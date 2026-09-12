@@ -116,4 +116,9 @@ uv run ruff format --check .
 Conventions: async throughout, tabs, Pydantic v2 with `extra="forbid"`, UUID7 string
 ids, immutable value objects in `views.py`, orchestration in `service.py`.
 
+`.markdownlint.json` disables **MD010 inside code blocks** deliberately. `ruff format`
+also formats fenced Python in Markdown and, honouring `indent-style = "tab"`, rewrites
+it to tabs; leaving MD010 on makes the two tools rewrite each other's bytes forever.
+Python fences belong to `ruff`, prose whitespace to `markdownlint`.
+
 Decisions are recorded in [`docs/adr`](docs/adr/).
