@@ -63,7 +63,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				contracts.append(Contract.model_validate(payload["contract"]))
 			case LedgerKind.EVIDENCE_RECORDED:
 				evidence.append(Evidence.model_validate(payload["evidence"]))
-			case LedgerKind.VERDICT_RENDERED:
+			case LedgerKind.VERDICT_RENDERED | LedgerKind.VERDICT_REUSED:
 				reports.append(VerificationReport.model_validate(payload["report"]))
 			case LedgerKind.CLAIM_DECLARED:
 				claims.append(CompletionClaim.model_validate(payload["claim"]))

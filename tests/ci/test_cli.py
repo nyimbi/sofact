@@ -463,6 +463,51 @@ class TestTheModelIsPartOfTheConfiguration:
 		assert "not checked: an incomplete session" not in refused.output
 
 
+class TestTheVerdictCache:
+	"""A repeated check of an unchanged workspace says it reused, and names the moment.
+
+	The operator must be able to tell a second measurement from a reuse — a verdict that
+	looked freshly measured but was carried forward would be exactly the plausible
+	signal FR-006 exists to prevent.
+	"""
+
+	def test_steps_that_did_not_change_the_workspace_say_what_they_reused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The synthetic harness writes nothing into the workspace, so only the first
+		step's check measures; every later step reuses the standing verdict (FR-006)."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		first = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		assert first.exit_code == 0, first.output
+		assert "reused from the check at" in first.output, (
+			"a step that changed nothing must say it reused rather than claim a re-measure"
+		)
+		assert "the oracles did not run again" in first.output
+
+		fresh = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all", "--fresh"])
+		assert fresh.exit_code == 0, fresh.output
+		assert "reused from" not in fresh.output
+
+	def test_fresh_remeasures_and_says_nothing_about_reuse(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"]).exit_code == 0
+
+		fresh = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all", "--fresh"])
+		assert fresh.exit_code == 0, fresh.output
+		assert "reused from" not in fresh.output
+
+
 class TestTheQuickProbe:
 	"""``--quick`` trades coverage for time, and says which rows it traded away.
 

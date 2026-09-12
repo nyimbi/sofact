@@ -36,6 +36,7 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.CONTRACT_CREATED: "contracts",
 	LedgerKind.EVIDENCE_RECORDED: "evidence",
 	LedgerKind.VERDICT_RENDERED: "reports",
+	LedgerKind.VERDICT_REUSED: "reports",
 	LedgerKind.CLAIM_DECLARED: "claims",
 	LedgerKind.ADVISOR_NOTE: "notes",
 	LedgerKind.PLAN_COMPILED: "plans",
@@ -125,10 +126,14 @@ async def test_a_real_run_folds_into_exactly_the_state_it_committed(
 	state = fold(service.ledger.entries())
 	counts = census(service)
 
+	field_to_kinds: dict[str, list[LedgerKind]] = {}
 	for kind, field in KIND_TO_FIELD.items():
+		field_to_kinds.setdefault(field, []).append(kind)
+	for field, mapped in field_to_kinds.items():
 		folded = len(getattr(state, field))
-		assert folded == counts.get(kind, 0), (
-			f"{kind.value} -> {field}: {folded} != {counts.get(kind, 0)}"
+		expected = sum(counts.get(kind, 0) for kind in mapped)
+		assert folded == expected, (
+			f"{field}: {folded} != {' + '.join(str(counts.get(k, 0)) for k in mapped)}"
 		)
 
 	# Nothing was written that the fold cannot account for.

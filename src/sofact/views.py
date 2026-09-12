@@ -549,6 +549,16 @@ class VerificationReport(View):
 	ceiling: AutonomyLevel
 	verdicts: tuple[ClauseVerdict, ...]
 	at: datetime
+	run_id: str = ""
+	"""The run whose observations this report weighed. Empty only on a report that
+	weighed an unnamed scope."""
+
+	cache_key: str = ""
+	"""FR-006's key: content hash of the contract, the change, and the oracle set.
+	Empty when no artefact was digestable, in which case the verdict is never reusable."""
+
+	reused_from: datetime | None = None
+	"""When the reused verdict was first rendered, if this one is a reuse."""
 
 	@model_validator(mode="after")
 	def _require_verdicts(self) -> Self:
@@ -1162,6 +1172,7 @@ class LedgerKind(StrEnum):
 	CAPABILITY_PROBED = "capability.probed"
 	STEP_DISPATCHED = "step.dispatched"
 	INTEGRITY_CHECKED = "integrity.checked"
+	VERDICT_REUSED = "verdict.reused"
 
 
 class LedgerEntry(View):

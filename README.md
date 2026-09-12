@@ -145,6 +145,15 @@ harness teaches the probe that harness's wording rather than requiring a source 
 different one is refused, because "this harness works" is a claim about a configuration,
 not about a name.
 
+A verdict is **keyed, then reused** (FR-006's second half, FR-166). Every dispatch check
+digests the workspace the session worked in — content hashes over the tree, ignoring VCS
+metadata, caches, dependency installs and build outputs, skipping symlinks — and folds the
+digest with the contract and oracle-set hashes. A previous verdict with the same key holds
+without re-running; the reuse is its own ledger row (`verdict.reused`) naming the verdict
+it stands in for, and `dispatch --fresh` bypasses it. A refuted verdict is reused exactly
+like a satisfied one. `verify` never reuses: it weighs the log, and a log has no tree to
+digest.
+
 The probe's remaining rows are **attempted rather than assumed** (FR-165). Four of them
 need more than one child, so each is a *differential*: `sandboxable` hands one child a tool
 set that cannot write outside its directory and tells it to attempt an escape (the escape

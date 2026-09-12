@@ -1,7 +1,9 @@
 # 15. A verdict describes one run, and a declaration triggers the check
 
 * Status: Accepted; **in part superseded by [ADR-0017](0017-a-completed-session-is-checked.md)**
-  — the trigger is now the session's outcome rather than a declaration. Everything here
+  — the trigger is now the session's outcome rather than a declaration. The open item this
+  record left — FR-006's keyed half — is now **resolved by
+  [ADR-0020](0020-a-verdict-is-reused-when-its-inputs-are-unchanged.md)**. Everything here
   about run scoping still stands.
 * Date: 2026-09-12
 * Deciders: operator

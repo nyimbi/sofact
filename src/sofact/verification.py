@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
+from sofact.contract import oracle_set_hash
 from sofact.views import (
 	Clause,
 	ClauseVerdict,
@@ -29,10 +30,11 @@ from sofact.views import (
 	OracleDeclaration,
 	VerdictOutcome,
 	VerificationReport,
+	content_hash,
 	now,
 )
 
-__all__ = ["SEVERITY", "verify"]
+__all__ = ["SEVERITY", "verdict_cache_key", "verify"]
 
 Rule = Callable[[OracleDeclaration, dict[str, object]], "tuple[VerdictOutcome, str]"]
 
@@ -64,6 +66,36 @@ def _as_bool(value: object) -> bool | None:
 	clause. ``None`` means "not a boolean", never "false".
 	"""
 	return value if isinstance(value, bool) else None
+
+
+def verdict_cache_key(contract: Contract, artefact_digest: str) -> str:
+	"""FR-006's key: content hash of the contract, the change, and the oracle set.
+
+	FR-139 pins three hashes separately because a single hash can only say *that*
+	something moved. The cache key names all three for the same reason: a reuse that
+	could not say which inputs it held constant would be a reuse nobody could audit.
+
+	``contract`` — the clause set the verdicts are phrased against, statements included.
+	Reusing a verdict across a contract whose *statements* moved would attach old words
+	to new clauses, which no digest of the oracles alone can catch.
+
+	``change`` — the digest of the artefact tree, computed by the caller. This module
+	never touches a file, so the digest arrives rather than being read here.
+
+	``oracles`` — ``oracle_set_hash``, FR-006's named component. Redundant while the
+	oracle set is derived from the contract, and kept on purpose: the requirement names
+	the oracle definition, so the key names it too, and a future change to that
+	derivation is caught by the key instead of silently re-keying every verdict.
+	"""
+	assert contract.clauses, "cannot key a verdict for a contract with no clauses"
+	assert artefact_digest, "an artefact digest must not be empty"
+	return content_hash(
+		{
+			"contract": contract.content_hash,
+			"change": artefact_digest,
+			"oracles": oracle_set_hash(contract),
+		},
+	)
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +234,7 @@ def verify(
 	evidence: Iterable[Evidence],
 	*,
 	run_id: str | None = None,
+	cache_key: str = "",
 ) -> VerificationReport:
 	"""Render a verdict for every clause of ``contract``.
 
@@ -221,6 +254,11 @@ def verify(
 	step could never succeed, which would make the repair tier of a goal plan
 	unobservable rather than merely hard. Worst-case dominance survives *within* a run,
 	where several observations of one clause genuinely compete.
+
+	``cache_key`` is a stamp, not a computation: the caller hashes the artefact (this
+	function never touches a file) and hands the key in. A report without one is
+	recorded as never reusable, which is the honest default — FR-006 forbids inferring a
+	cache hit from inputs nobody hashed.
 	"""
 	assert contract.clauses, "cannot verify a contract with no clauses"
 	assert run_id is None or run_id, "a run id, when given, must name a run"
@@ -234,6 +272,9 @@ def verify(
 	verdicts = tuple(_decide(c, tuple(by_clause.get(c.id, ()))) for c in contract.clauses)
 	assert len(verdicts) == len(contract.clauses), "every clause must receive a verdict"
 
+	assert run_id is not None or not cache_key, (
+		"a cache key without a run id would reuse evidence nobody can name"
+	)
 	return VerificationReport(
 		contract_id=contract.id,
 		contract_hash=contract.content_hash,
@@ -241,4 +282,6 @@ def verify(
 		ceiling=contract.ceiling,
 		verdicts=verdicts,
 		at=now(),
+		run_id=run_id or "",
+		cache_key=cache_key,
 	)

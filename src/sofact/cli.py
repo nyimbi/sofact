@@ -86,6 +86,11 @@ _STEP_OPTION = typer.Option(
 )
 _ALL_OPTION = typer.Option(False, "--all", help="Dispatch every wave, stopping at the first stall.")
 _MAX_STEPS_OPTION = typer.Option(None, "--max-steps", help="Cap how many steps `--all` may start.")
+_FRESH_OPTION = typer.Option(
+	False,
+	"--fresh",
+	help="Re-run the oracles even when the artefact and oracle set are unchanged (FR-006).",
+)
 
 
 def _service(home: Path | None) -> FactoryService:
@@ -210,6 +215,12 @@ def _print_report(report: VerificationReport) -> None:
 		f"  ceiling {report.ceiling.name} from weakest oracle rank {report.weakest_oracle_rank}",
 		fg="bright_black",
 	)
+	if report.reused_from is not None:
+		typer.secho(
+			f"  reused from the check at {report.reused_from.isoformat()} -- the artefact and "
+			"the oracle set are unchanged, so the oracles did not run again (FR-006).",
+			fg="bright_black",
+		)
 	for verdict in report.verdicts:
 		typer.secho(
 			f"  {_OUTCOME_MARK[verdict.outcome]} {verdict.statement}",
@@ -555,6 +566,7 @@ def dispatch(
 	step: str | None = _STEP_OPTION,
 	all_steps: bool = _ALL_OPTION,
 	max_steps: int | None = _MAX_STEPS_OPTION,
+	fresh: bool = _FRESH_OPTION,
 ) -> None:
 	"""Send plan steps to the harness as out-of-process sessions (FR-058)."""
 	asyncio.run(
@@ -567,6 +579,7 @@ def dispatch(
 			all_steps,
 			max_steps,
 			tools=tools,
+			fresh=fresh,
 		),
 	)
 
@@ -581,6 +594,7 @@ async def _dispatch(
 	max_steps: int | None,
 	*,
 	tools: str | None = None,
+	fresh: bool = False,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -652,6 +666,7 @@ async def _dispatch(
 				workspace=workdir,
 				model=model,
 				tools=resolved_tools,
+				fresh=fresh,
 			),
 		)
 	else:
@@ -662,6 +677,7 @@ async def _dispatch(
 			model=model,
 			tools=resolved_tools,
 			max_steps=max_steps,
+			fresh=fresh,
 		)
 
 	for record in records:
@@ -686,6 +702,12 @@ async def _dispatch(
 		"(FR-138: a declaration can trigger verification, it can never satisfy it).",
 		fg=_OUTCOME_STYLE[report.outcome],
 	)
+	if report.reused_from is not None:
+		typer.secho(
+			f"  reused from the check at {report.reused_from.isoformat()} -- the artefact "
+			"and the oracle set are unchanged, so the oracles did not run again (FR-006).",
+			fg="bright_black",
+		)
 	refuted = refuted_steps(plan, report)
 	ran_the_whole_plan = step is None and max_steps is None and len(records) == len(plan.steps)
 	if any(record.step_id in refuted for record in records):

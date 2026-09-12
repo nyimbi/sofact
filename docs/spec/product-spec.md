@@ -1453,10 +1453,32 @@ consequence is not stylistic: a clause refuted in one attempt must be able to co
 satisfied in the next, or the repair tier (FR-103) cannot observe its own success, and
 declaration precision (FR-147) reports a number produced by a missing check rather than
 by a dishonest producer. Run identity is an **ordering token, not a content hash**: it
-satisfies the half of FR-006 that forbids a stale result from deciding a newer state, and
-it does not satisfy the half that keys a cache by the content of the change and the
-oracle definition. That second half remains **unimplemented** and must be reported as
-such rather than inferred from the first.
+satisfies the half of FR-006 that forbids a stale result from deciding a newer state,
+and it does not satisfy the half that keys a cache by the content of the change and the
+oracle definition. That second half is FR-166.
+
+**FR-166** *(a verdict whose inputs are all still present holds without re-running)*
+The dispatch check must **key, then reuse**: before any oracle runs, the workspace the
+session worked in is digested — a content hash over the tree, ignoring VCS metadata,
+interpreter caches, dependency installs and build outputs, skipping symlinks rather than
+following them — and the digest is combined with the contract hash and the oracle-set
+hash. A previous verdict rendered against the same key holds without re-running, and the
+reuse is committed as its own row (`verdict.reused`) naming the moment of the verdict it
+stands in for, so the log shows a reuse as a reuse and never as a second measurement.
+All three components are in the key because a reuse that cannot say what it held constant
+cannot be audited: the contract hash includes the clause *statements*, so a reworded
+clause cannot silently inherit a verdict phrased for the old words; the digest is the
+change; and the oracle set is named explicitly even though it is derivable from the
+contract, because FR-006 names it and a future change to that derivation should be caught
+by the key rather than silently re-keying every verdict. `dispatch --fresh` bypasses the
+reuse, because the cache is an optimisation and not an obligation. The cache is **not a
+pass cache** — a violated verdict is exactly as reproducible as a satisfied one, and a
+reused refutation still refuses the dependent wave. Reuse applies only where the artefact
+is addressable: `verify` weighs the log and has no tree to digest, so it re-measures from
+the recorded evidence every time. A workspace that holds no change at all between two
+steps of one plan is the measured case: a plan run through one unchanged workspace
+rendered one verdict and reused the rest, which is ADR-0015's redundancy cost paid
+exactly once per distinct tree.
 
 **FR-163** *(a completed session triggers a check on the whole contract, in the session's
 workspace)* SoFact must run that contract's oracles **in the workspace the session worked
@@ -1768,6 +1790,12 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
   `compaction_event` is the record type that means a compaction happened, and a spec that
   declares none can never confirm survival across one. All three are optional, and each
   one narrows what the probe can decide rather than being assumed (FR-153).
+- **`--fresh`** (on `dispatch`) — re-run the oracles even when the workspace and the
+  oracle set are unchanged since a standing verdict (FR-166). The default reuses: a
+  verdict whose key — contract hash, artefact digest, oracle-set hash — matches a
+  previous report holds without re-running, and the reuse is written down as its own
+  row naming the verdict it stands in for. The cache is not a pass cache: a refuted
+  verdict is reused too, and still refuses its dependents.
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an

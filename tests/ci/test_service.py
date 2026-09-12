@@ -992,3 +992,112 @@ def test_environment_variables_are_read_not_written(
 	service = FactoryService(home=tmp_path / "state", llm=None)
 	service.adapter(None)
 	assert variable not in os.environ
+
+
+# --------------------------------------------------------------------------- #
+# the verdict cache (FR-006's second half)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheVerdictCache:
+	"""A verdict is keyed by what it was decided from, and reused only then.
+
+	FR-006's ordering half says an older result must not decide a newer state; the
+	keyed half says a verdict whose inputs are all still present holds without
+	re-running. The tests hold the two apart: reuse happens because the tree and the
+	contract are bit-for-bit unchanged, and any change — or any demand for a fresh
+	run — re-measures.
+	"""
+
+	async def test_an_unchanged_workspace_reuses_the_verdict(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		first = await service.latest_report(plan.contract_id)
+		assert first is not None
+		assert first.cache_key != "", "the check keyed its inputs"
+
+		again = await service.check_dispatch(plan.id, record.id)
+		assert again is not None
+		assert again.verdicts == first.verdicts, "the same inputs decide the same verdict"
+		assert again.reused_from == first.at
+		assert again.cache_key == first.cache_key
+		assert again.at >= first.at, "the reuse is a new row, not a replay of the old one"
+
+		counts = Counter(kinds(service))
+		assert counts["verdict.rendered"] == 1
+		assert counts["verdict.reused"] == 1
+		assert counts["evidence.recorded"] == len(
+			executable_clauses(await service.contract_by_id(plan.contract_id))
+		), "a reuse runs no oracle, so it records no new evidence"
+
+	async def test_the_reuse_is_in_the_log_as_its_own_row(self, home: Path, tmp_path: Path) -> None:
+		"""A reuse that looked like a second measurement would be a fabricated one."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		await service.check_dispatch(plan.id, record.id)
+
+		written = kinds(service)
+		assert written.count("verdict.reused") == 1
+		assert written.index("verdict.rendered") < written.index("verdict.reused")
+
+		latest = await service.latest_report(plan.contract_id)
+		assert latest is not None
+		assert latest.reused_from is not None, "the fold treats a reuse as the latest verdict"
+
+	async def test_a_changed_artefact_is_measured_again(self, home: Path, tmp_path: Path) -> None:
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		(service.home / "workspace" / "changed.txt").write_text("a new file", encoding="utf-8")
+
+		again = await service.check_dispatch(plan.id, record.id)
+		assert again is not None
+		assert again.reused_from is None, "the inputs moved, so the verdict had to be re-decided"
+
+		counts = Counter(kinds(service))
+		assert counts["verdict.rendered"] == 2
+		assert "verdict.reused" not in counts
+
+	async def test_fresh_remeasures_an_unchanged_workspace(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""--fresh exists because the cache is an optimisation, not an obligation."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+
+		again = await service.check_dispatch(plan.id, record.id, reuse=False)
+		assert again is not None
+		assert again.reused_from is None
+		assert again.cache_key != "", "measured fresh, but still keyed for the next reuse"
+
+		counts = Counter(kinds(service))
+		assert counts["verdict.rendered"] == 2
+		assert counts["evidence.recorded"] == 2 * len(
+			executable_clauses(await service.contract_by_id(plan.contract_id))
+		)
+
+	async def test_a_refuted_verdict_is_reused_like_a_satisfied_one(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The cache is not a pass cache: a violated verdict is equally reproducible."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 1")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		first = await service.latest_report(plan.contract_id)
+		assert first is not None
+		assert first.outcome is VerdictOutcome.VIOLATED
+
+		again = await service.check_dispatch(plan.id, record.id)
+		assert again is not None
+		assert again.outcome is VerdictOutcome.VIOLATED
+		assert again.reused_from == first.at
+
+	async def test_dispatch_plan_threads_the_fresh_bypass(self, home: Path, tmp_path: Path) -> None:
+		"""Every step's check is fresh, not merely the one the caller named."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		await service.dispatch_plan(plan.id, fresh=True)
+
+		counts = Counter(kinds(service))
+		# One verdict per completed step, none reused: every check re-ran the oracles.
+		assert counts["verdict.rendered"] == counts["step.dispatched"]
+		assert "verdict.reused" not in counts

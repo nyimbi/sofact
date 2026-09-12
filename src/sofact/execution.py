@@ -20,17 +20,85 @@ autonomy either, hanging buys a producer nothing.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
+import hashlib
 from pathlib import Path
+from typing import Final
 
-from sofact.views import Clause, Contract, Evidence, EvidenceKind
+from sofact.views import Clause, Contract, Evidence, EvidenceKind, content_hash
 
-__all__ = ["PRODUCER_NAME", "OracleNotExecutableError", "OracleRunner"]
+__all__ = [
+	"DEFAULT_DIGEST_EXCLUDES",
+	"PRODUCER_NAME",
+	"OracleNotExecutableError",
+	"OracleRunner",
+	"digest_tree",
+]
 
 PRODUCER_NAME = "sofact.oracle_runner"
 """Recorded on every observation, so evidence can be attributed in the log."""
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_MAX_OUTPUT_BYTES = 65_536
+
+DEFAULT_DIGEST_EXCLUDES: Final = (
+	".git",
+	".hg",
+	".svn",
+	".venv",
+	".pytest_cache",
+	".ruff_cache",
+	".mypy_cache",
+	".sofact",
+	"__pycache__",
+	"node_modules",
+	"build",
+	"dist",
+	"*.egg-info",
+)
+"""Names a digest of the artefact ignores, at any depth.
+
+VCS metadata, interpreter caches, dependency installs and build outputs are not the
+change under test: a producer that runs its own test suite will populate ``__pycache__``
+as a side effect, and a digest that moved because of it would invalidate a verdict the
+oracles would have reproduced exactly. Glob patterns (``*.egg-info``) match one path
+component; the rest match whole component names.
+"""
+
+
+def digest_tree(root: Path, *, excludes: tuple[str, ...] = DEFAULT_DIGEST_EXCLUDES) -> str:
+	"""Content hash of every regular file under ``root`` that the excludes let through.
+
+	FR-006's cache key needs a content hash of **the change**, and the change is the
+	artefact the session left in its workspace. The digest is deliberately not a git
+	index read: a workspace need not be a repository, and a producer able to write its
+	own index would be able to write its own cache key.
+
+	Order-independent by construction: the fold runs over paths sorted canonically, so
+	two trees holding identical content produce identical digests however they were
+	created. Symlinks are skipped rather than followed — a link aimed outside the tree
+	would otherwise fold bytes no session wrote into the key, and give a producer a
+	route to freeze its own verdict.
+
+	Raises :class:`AssertionError` when ``root`` is not a directory: digesting a missing
+	tree must fail loudly, because a caller that cached over an absent artefact would
+	key a verdict to nothing.
+	"""
+	assert root.is_dir(), f"cannot digest a tree that does not exist: {root}"
+	globs = tuple(pattern for pattern in excludes if any(c in pattern for c in "*?[]"))
+	names = frozenset(pattern for pattern in excludes if pattern not in globs)
+
+	kept: list[tuple[str, str]] = []
+	for path in sorted(root.rglob("*")):
+		if path.is_symlink() or not path.is_file():
+			continue
+		relative = path.relative_to(root)
+		if any(part in names for part in relative.parts):
+			continue
+		if any(fnmatch.fnmatch(part, pattern) for part in relative.parts for pattern in globs):
+			continue
+		kept.append((relative.as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()))
+	return content_hash(kept)
 
 
 class OracleNotExecutableError(ValueError):

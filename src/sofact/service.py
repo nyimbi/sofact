@@ -27,7 +27,7 @@ from sofact.elicitation import (
 	spec_for,
 )
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
-from sofact.execution import OracleRunner
+from sofact.execution import OracleRunner, digest_tree
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -43,7 +43,7 @@ from sofact.ledger import LEDGER_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
 from sofact.planner import check_integrity, compile_plan
 from sofact.state import fold
-from sofact.verification import verify
+from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	Advice,
 	ChainStatus,
@@ -463,6 +463,7 @@ class FactoryService:
 		dispatch_id: str,
 		*,
 		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
+		reuse: bool = True,
 	) -> VerificationReport | None:
 		"""Run P6 over the workspace a **completed** dispatch leaves behind (FR-163).
 
@@ -471,6 +472,15 @@ class FactoryService:
 		:func:`sofact.verification.verify`, whose signature has nowhere to put a claim.
 		Gating this on a declaration made the *default* harness unverifiable — ``pi`` has no
 		completion event, so nothing was ever checked while ``dispatch`` still exited 0.
+
+		The verdict is **keyed, then reused** (FR-006): before any oracle runs, the workspace
+		is digested and combined with the contract and oracle-set hashes. A previous verdict
+		rendered against the same key holds without re-running, because every input it weighed
+		is bit-for-bit present — a nine-step plan through one workspace re-runs the oracles
+		only when a step actually changed the tree. ``reuse=False`` re-runs regardless; the
+		reused verdict is committed as its own row (``verdict.reused``) and names the moment
+		of the verdict it stands in for, so the log shows a reuse as a reuse and not as a
+		second measurement.
 
 		Returns ``None`` when the session did not complete. A failed or budget-exhausted
 		dispatch was still changing the tree, and a verdict on a half-built artefact is a
@@ -494,6 +504,29 @@ class FactoryService:
 		contract = await self.contract_by_id(plan.contract_id)
 		workdir = Path(record.workspace)
 		assert workdir.is_dir(), f"dispatch workspace does not exist: {workdir}"
+		artefact = digest_tree(workdir)
+		key = verdict_cache_key(contract, artefact)
+		state = await self.state()
+		if reuse:
+			for prior in reversed(state.reports):
+				if prior.contract_id != contract.id or prior.cache_key != key:
+					continue
+				reused = VerificationReport(
+					contract_id=prior.contract_id,
+					contract_hash=prior.contract_hash,
+					weakest_oracle_rank=prior.weakest_oracle_rank,
+					ceiling=prior.ceiling,
+					verdicts=prior.verdicts,
+					at=now(),
+					run_id=prior.run_id,
+					cache_key=prior.cache_key,
+					reused_from=prior.at,
+				)
+				self._commit(
+					LedgerKind.VERDICT_REUSED,
+					{"report": reused.model_dump(mode="json")},
+				)
+				return reused
 		run_id = uuid7str()
 		produced = await OracleRunner(
 			workdir,
@@ -505,7 +538,7 @@ class FactoryService:
 				LedgerKind.EVIDENCE_RECORDED,
 				{"evidence": item.model_dump(mode="json")},
 			)
-		report = verify(contract, produced, run_id=run_id)
+		report = verify(contract, produced, run_id=run_id, cache_key=key)
 		self._commit(
 			LedgerKind.VERDICT_RENDERED,
 			{"report": report.model_dump(mode="json")},
@@ -690,6 +723,7 @@ class FactoryService:
 		model: str | None = None,
 		tools: str | None = None,
 		session_id: str | None = None,
+		fresh: bool = False,
 	) -> DispatchRecord:
 		"""Run one plan step as one out-of-process session.
 
@@ -697,6 +731,9 @@ class FactoryService:
 		runs against the *recorded* capability finding. A caller that could supply its own
 		profile could supply an optimistic one, and FR-148 exists precisely so that
 		capability is a measurement rather than a wish.
+
+		``fresh`` re-runs the oracles even when the workspace and the oracle set are
+		unchanged since a previous verdict (FR-006); the default reuses instead.
 		"""
 		plan = await self.plan_by_id(plan_id)
 		step = plan.step_by_id(step_id)
@@ -732,7 +769,7 @@ class FactoryService:
 		# happen at all — the trigger is the session *completing*, because the default
 		# harness has no way to declare anything.
 		if record.outcome is StepOutcome.COMPLETED:
-			await self.check_dispatch(plan.id, record.id)
+			await self.check_dispatch(plan.id, record.id, reuse=not fresh)
 		return record
 
 	async def dispatch_plan(
@@ -745,6 +782,7 @@ class FactoryService:
 		tools: str | None = None,
 		max_steps: int | None = None,
 		concurrent: bool = False,
+		fresh: bool = False,
 	) -> tuple[DispatchRecord, ...]:
 		"""Dispatch a plan wave by wave, stopping at the first wave that stalls (FR-142).
 
@@ -754,7 +792,8 @@ class FactoryService:
 		ends the run when a step did not complete. ``concurrent`` is
 		off by default and is not a performance setting: two sessions editing one workspace
 		is a merge conflict, and whether a wave may run together is a question about
-		worktrees (FR-141) that the operator owns, not the scheduler.
+		worktrees (FR-141) that the operator owns, not the scheduler. ``fresh`` is FR-006's
+		bypass, threaded to every step's check.
 		"""
 		assert max_steps is None or max_steps > 0, "max_steps must be positive"
 		plan = await self.plan_by_id(plan_id)
@@ -773,6 +812,7 @@ class FactoryService:
 								workspace=workspace,
 								model=model,
 								tools=tools,
+								fresh=fresh,
 							)
 							for step in wave
 						),
@@ -787,6 +827,7 @@ class FactoryService:
 						workspace=workspace,
 						model=model,
 						tools=tools,
+						fresh=fresh,
 					)
 					for step in wave
 				]

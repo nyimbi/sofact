@@ -18,8 +18,10 @@ import inspect
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
+import pytest
+
 from sofact import verification
-from sofact.verification import SEVERITY, verify
+from sofact.verification import SEVERITY, verdict_cache_key, verify
 from sofact.views import (
 	Clause,
 	Contract,
@@ -454,3 +456,71 @@ def test_aggregate_outcome_reports_the_worst_clause(
 	assert len(report.insufficient) == 1
 	assert report.outcome is VerdictOutcome.VIOLATED
 	assert report.verdicts[2].clause_id == third.id
+
+
+# --------------------------------------------------------------------------- #
+# the cache key (FR-006's second half)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheCacheKey:
+	"""FR-006 names three inputs — the contract, the change, the oracle set — and the
+	key must name them all, because a reuse that could not say what it held constant
+	could not be audited."""
+
+	def test_the_same_contract_and_change_key_the_same(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		contract = make_contract(("it holds", make_oracle("true")))
+		assert verdict_cache_key(contract, "digest-1") == verdict_cache_key(contract, "digest-1")
+
+	def test_a_different_change_keys_differently(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		contract = make_contract(("it holds", make_oracle("true")))
+		assert verdict_cache_key(contract, "digest-1") != verdict_cache_key(contract, "digest-2")
+
+	def test_a_different_contract_keys_differently(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		"""Statements are part of the key: verdicts are phrased per clause."""
+		first = make_contract(("it holds", make_oracle("true")))
+		second = make_contract(("it holds, differently", make_oracle("true")))
+		assert verdict_cache_key(first, "digest") != verdict_cache_key(second, "digest")
+
+	def test_a_different_oracle_set_keys_differently(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		"""The oracle definition is FR-006's named component, so it keys on its own."""
+		first = make_contract(("it holds", make_oracle("true")))
+		second = make_contract(("it holds", make_oracle("false")))
+		assert verdict_cache_key(first, "digest") != verdict_cache_key(second, "digest")
+
+	def test_a_keyed_report_names_its_key_and_its_run(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		contract = make_contract(("it holds", make_oracle("true")))
+		report = verify(contract, (), run_id=RUN_ONE, cache_key="key-1")
+
+		assert report.cache_key == "key-1"
+		assert report.run_id == RUN_ONE
+		assert report.reused_from is None
+
+	def test_an_unkeyed_report_is_recorded_as_never_reusable(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		"""An empty key is the honest default: nothing was hashed, so nothing is reused."""
+		contract = make_contract(("it holds", make_oracle("true")))
+		report = verify(contract, ())
+
+		assert report.cache_key == ""
+		assert report.run_id == ""
+		assert report.reused_from is None
+
+	def test_a_cache_key_without_a_run_id_is_refused(
+		self, make_contract: MakeContract, make_oracle: MakeOracle
+	) -> None:
+		"""A reuse nobody can trace to the run it stands on is not a reuse."""
+		contract = make_contract(("it holds", make_oracle("true")))
+		with pytest.raises(AssertionError, match="without a run id"):
+			verify(contract, (), cache_key="key-1")
