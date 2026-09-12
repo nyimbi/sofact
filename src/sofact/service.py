@@ -31,6 +31,7 @@ from sofact.execution import OracleRunner
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
+	DEFAULT_TOOLS,
 	SPECS,
 	ConfiguredHarnessAdapter,
 	HarnessSpec,
@@ -77,6 +78,7 @@ __all__ = [
 	"latest_run_id",
 	"refuted_steps",
 	"resolve_home",
+	"resolve_tools",
 ]
 
 DEFAULT_HOME_DIRNAME = ".sofact"
@@ -139,6 +141,27 @@ def resolve_home(home: Path | None = None) -> Path:
 	if from_env:
 		return Path(from_env).expanduser()
 	return Path.cwd() / DEFAULT_HOME_DIRNAME
+
+
+def resolve_tools(tools: str | None = None) -> str:
+	"""Which tools a dispatch hands the harness: explicit, then ``SOFACT_TOOLS``, then default.
+
+	Operator-tunable rather than baked into the adapter, because which tools a producer may
+	use is the operator's decision and the CLI is where the operator already is (FR-156).
+	An empty value is refused rather than forwarded: ``--tools ""`` renders an empty
+	allowlist, which disables every tool, and a producer that silently cannot write is
+	indistinguishable from one that failed.
+	"""
+	if tools is None:
+		tools = os.environ.get("SOFACT_TOOLS")
+	if tools is None:
+		return DEFAULT_TOOLS
+	if not tools.strip():
+		raise ValueError(
+			"the tool set is empty; an empty allowlist disables every tool, so a producer "
+			"given it cannot write rather than failing"
+		)
+	return tools
 
 
 class FactoryService:
@@ -613,7 +636,7 @@ class FactoryService:
 			workspace=workdir,
 			session_dir=sessions,
 			model=model or os.environ.get("SOFACT_MODEL") or DEFAULT_MODEL,
-			tools=tools if tools is not None else "read,write,edit,bash",
+			tools=resolve_tools(tools),
 			probe_timeout=DEFAULT_PROBE_TIMEOUT_SECONDS,
 		)
 
@@ -623,6 +646,7 @@ class FactoryService:
 		*,
 		workspace: Path | None = None,
 		model: str | None = None,
+		tools: str | None = None,
 		timeout: float | None = None,
 		goal_text: str | None = None,
 	) -> HarnessProfile:
@@ -632,7 +656,7 @@ class FactoryService:
 		absent — that is a fact about this machine, not about the harness, and recording
 		it as an unprobed capability would libel the harness.
 		"""
-		adapter = self.adapter(name, workspace=workspace, model=model)
+		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
 		profile = await adapter.probe(
 			goal_text=goal_text or DEFAULT_PROBE_GOAL,
 			timeout=timeout,
@@ -658,6 +682,7 @@ class FactoryService:
 		name: str | None = None,
 		workspace: Path | None = None,
 		model: str | None = None,
+		tools: str | None = None,
 		session_id: str | None = None,
 	) -> DispatchRecord:
 		"""Run one plan step as one out-of-process session.
@@ -671,7 +696,7 @@ class FactoryService:
 		step = plan.step_by_id(step_id)
 		if step is None:
 			raise KeyError(f"plan {plan_id} has no step {step_id}")
-		adapter = self.adapter(name, workspace=workspace, model=model)
+		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
 		record = await adapter.dispatch(
 			step,
 			plan,
@@ -711,6 +736,7 @@ class FactoryService:
 		name: str | None = None,
 		workspace: Path | None = None,
 		model: str | None = None,
+		tools: str | None = None,
 		max_steps: int | None = None,
 		concurrent: bool = False,
 	) -> tuple[DispatchRecord, ...]:
@@ -740,6 +766,7 @@ class FactoryService:
 								name=name,
 								workspace=workspace,
 								model=model,
+								tools=tools,
 							)
 							for step in wave
 						),
@@ -753,6 +780,7 @@ class FactoryService:
 						name=name,
 						workspace=workspace,
 						model=model,
+						tools=tools,
 					)
 					for step in wave
 				]

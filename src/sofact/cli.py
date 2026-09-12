@@ -24,7 +24,7 @@ from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
-from sofact.service import FactoryService, refuted_steps
+from sofact.service import FactoryService, refuted_steps, resolve_tools
 from sofact.views import (
 	ClauseKind,
 	DispatchRecord,
@@ -65,6 +65,11 @@ _HARNESS_OPTION = typer.Option(
 	None, "--harness", help="Harness to drive: pi or dsh (default: $SOFACT_HARNESS, else pi)."
 )
 _MODEL_OPTION = typer.Option(None, "--model", help="Model id to hand the harness.")
+_TOOLS_OPTION = typer.Option(
+	None,
+	"--tools",
+	help="Comma-separated tool allowlist for the producer (default: $SOFACT_TOOLS, else the spec's set).",
+)
 _STYLE_OPTION = typer.Option(
 	"labelled", "--style", help="Goal rendering: labelled (default) or objective."
 )
@@ -96,6 +101,19 @@ def _configured_specs() -> Mapping[str, HarnessSpec] | None:
 		return load_specs(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_HARNESS_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _require_tools(tools: str | None) -> str:
+	"""Resolve the tool set, refusing an empty one *before* a session starts.
+
+	An empty allowlist is not "no tools configured": it is a producer handed no way to
+	write, whose failure would surface later as a failed step with no cause attached.
+	"""
+	try:
+		return resolve_tools(tools)
+	except ValueError as exc:
+		typer.secho(f"cannot use that tool set: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -436,10 +454,11 @@ def probe(
 	home: Path | None = _HOME_OPTION,
 	harness: str | None = _HARNESS_OPTION,
 	model: str | None = _MODEL_OPTION,
+	tools: str | None = _TOOLS_OPTION,
 	timeout: float | None = _PROBE_TIMEOUT_OPTION,
 ) -> None:
 	"""Attempt a harness and record what was actually observed (FR-148)."""
-	asyncio.run(_probe(_service(_home_of(ctx, home)), harness, model, timeout))
+	asyncio.run(_probe(_service(_home_of(ctx, home)), harness, model, timeout, tools=tools))
 
 
 async def _probe(
@@ -447,8 +466,11 @@ async def _probe(
 	harness: str | None,
 	model: str | None,
 	timeout: float | None,
+	*,
+	tools: str | None = None,
 ) -> None:
 	_require_known(svc, harness)
+	resolved_tools = _require_tools(tools)
 	workdir = svc.home / "workspace"
 	workdir.mkdir(parents=True, exist_ok=True)
 	try:
@@ -456,12 +478,13 @@ async def _probe(
 			harness,
 			workspace=workdir,
 			model=model,
+			tools=resolved_tools,
 			timeout=timeout,
 		)
 	except HarnessBinaryMissing as exc:
 		typer.secho(f"cannot probe: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
-	_print_profile(profile)
+	_print_profile(profile, tools=resolved_tools)
 	if not profile.is_usable:
 		typer.secho(
 			"\n  this harness cannot run unattended; dispatching to it would hang "
@@ -471,7 +494,7 @@ async def _probe(
 		raise typer.Exit(code=1)
 
 
-def _print_profile(profile: HarnessProfile) -> None:
+def _print_profile(profile: HarnessProfile, *, tools: str) -> None:
 	colours = {
 		ProbeOutcome.CONFIRMED: "green",
 		ProbeOutcome.ABSENT: "red",
@@ -479,6 +502,7 @@ def _print_profile(profile: HarnessProfile) -> None:
 	}
 	typer.secho(f"\n{profile.name} probe @ {profile.command[0]}", fg="cyan", bold=True)
 	typer.echo(f"  version {profile.version or 'unknown'}")
+	typer.echo(f"  tools   {tools}")
 	for finding in profile.findings:
 		typer.secho(
 			f"  {finding.outcome.value:<13} {finding.capability.value}",
@@ -500,6 +524,7 @@ def dispatch(
 	home: Path | None = _HOME_OPTION,
 	harness: str | None = _HARNESS_OPTION,
 	model: str | None = _MODEL_OPTION,
+	tools: str | None = _TOOLS_OPTION,
 	workspace: Path | None = _WORKSPACE_OPTION,
 	step: str | None = _STEP_OPTION,
 	all_steps: bool = _ALL_OPTION,
@@ -515,6 +540,7 @@ def dispatch(
 			step,
 			all_steps,
 			max_steps,
+			tools=tools,
 		),
 	)
 
@@ -527,6 +553,8 @@ async def _dispatch(
 	step: str | None,
 	all_steps: bool,
 	max_steps: int | None,
+	*,
+	tools: str | None = None,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -542,6 +570,7 @@ async def _dispatch(
 		raise typer.Exit(code=1)
 
 	resolved = _require_known(svc, harness)
+	resolved_tools = _require_tools(tools)
 	profile = await svc.latest_profile(harness)
 	if profile is None:
 		typer.secho(
@@ -588,6 +617,7 @@ async def _dispatch(
 				name=harness,
 				workspace=workdir,
 				model=model,
+				tools=resolved_tools,
 			),
 		)
 	else:
@@ -596,6 +626,7 @@ async def _dispatch(
 			name=harness,
 			workspace=workdir,
 			model=model,
+			tools=resolved_tools,
 			max_steps=max_steps,
 		)
 

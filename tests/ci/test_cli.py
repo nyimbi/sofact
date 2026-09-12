@@ -323,6 +323,65 @@ class TestConfiguredHarnesses:
 # --------------------------------------------------------------------------- #
 
 
+class TestTheToolSet:
+	"""The producer's tool allowlist, reachable from the product's own surface.
+
+	The adapter had a ``tools`` parameter from the beginning and no way to set it, which
+	is the same as not having one: a value an operator cannot reach is a constant.
+	"""
+
+	def test_the_probe_reports_the_set_it_will_hand_over(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The tool set must be visible at probe time, not discovered mid-build."""
+		configure(tmp_path, monkeypatch)
+		result = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert result.exit_code == 0, result.output
+		assert "tools   read,write,edit,bash" in result.output, result.output
+
+	def test_the_flag_narrows_it(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--tools", "read"])
+		assert result.exit_code == 0, result.output
+		assert "tools   read" in result.output, result.output
+
+	def test_the_environment_also_narrows_it(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		monkeypatch.setenv("SOFACT_TOOLS", "read,grep")
+		result = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert result.exit_code == 0, result.output
+		assert "tools   read,grep" in result.output, result.output
+
+	def test_an_empty_set_is_a_message_not_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--tools", ""])
+		assert result.exit_code == 1, result.output
+		assert "cannot use that tool set" in result.output
+		assert "empty allowlist" in result.output
+		assert "Traceback" not in result.output
+
+	def test_dispatch_refuses_it_before_starting_a_session(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A refusal is only useful if nothing ran: no session, no ledger row."""
+		configure(tmp_path, monkeypatch, mode="goal")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		refused = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all", "--tools", ""])
+		assert refused.exit_code == 1, refused.output
+		assert "cannot use that tool set" in refused.output
+		assert "step.dispatched" not in refused.output
+
+
 class TestMisconfiguration:
 	def test_an_unknown_harness_is_reported(self, home: Path) -> None:
 		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--harness", "nosuch"])

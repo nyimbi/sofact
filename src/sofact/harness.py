@@ -63,6 +63,7 @@ from sofact.views import (
 )
 
 __all__ = [
+	"DEFAULT_TOOLS",
 	"DSH_SPEC",
 	"PI_SPEC",
 	"SPECS",
@@ -101,6 +102,14 @@ _STRING_FIELDS: Final = (
 	"usage_reduce",
 )
 _BOOL_FIELDS: Final = ("session_is_zstd", "supports_context_file_flag")
+
+DEFAULT_TOOLS: Final = "read,write,edit,bash"
+"""The tool set a dispatch hands the harness unless the operator says otherwise.
+
+A *default*, not a policy: which tools a producer may use is the operator's decision, and
+the value is reachable from the CLI (``--tools``) and the environment (``SOFACT_TOOLS``)
+precisely so that it does not have to be edited in ``src/`` (FR-156).
+"""
 
 INCONCLUSIVE_NO_PROBE: Final = (
 	"no probe implemented: one bounded invocation cannot witness this capability, "
@@ -598,7 +607,7 @@ class ConfiguredHarnessAdapter:
 		workspace: Path,
 		session_dir: Path,
 		model: str,
-		tools: str = "read,write,edit,bash",
+		tools: str = DEFAULT_TOOLS,
 		probe_timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 		env: Mapping[str, str] | None = None,
 	) -> None:

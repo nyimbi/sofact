@@ -73,6 +73,12 @@ uv run sofact precision                        # did the claims survive verifica
 `probe` is not optional: dispatching against an assumed capability is exactly what
 FR-148 forbids, so `dispatch` refuses until a profile exists.
 
+Which tools the producer gets is the operator's decision, so it is a flag rather than a
+constant: `--tools read,edit` (or `SOFACT_TOOLS`) narrows the allowlist, and `probe`
+prints the set it resolved before anything is dispatched. An empty set is refused — an
+empty allowlist is a producer with no way to write, and that must not arrive later as a
+failed step.
+
 A producer's declaration is **not evidence, and it is not the trigger either**. Whenever a
 dispatched session **completes**, SoFact runs that contract's oracles in the *session's*
 workspace and records the verdict; when the harness also declares completion, the claim is

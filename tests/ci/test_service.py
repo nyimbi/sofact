@@ -31,8 +31,8 @@ from synthetic import (
 )
 
 from sofact.contract import executable_clauses
-from sofact.harness import DSH_SPEC, PI_SPEC, SPECS
-from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home
+from sofact.harness import DEFAULT_TOOLS, DSH_SPEC, PI_SPEC, SPECS, ConfiguredHarnessAdapter
+from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home, resolve_tools
 from sofact.views import (
 	ElicitationDimension,
 	GoalPlan,
@@ -222,6 +222,70 @@ class TestConfiguration:
 		registered = synthetic_service(home, tmp_path, "complete")
 		chosen = tmp_path / "elsewhere"
 		assert registered.adapter(None, workspace=chosen).workspace == chosen
+
+
+class TestTheToolSet:
+	"""Which tools a producer gets is the operator's decision, not a default in src/.
+
+	The tool set is the whole of what an agent may do, so it is the one knob that most
+	deserves a surface. Making it reachable is FR-156's rule applied to a *capability*
+	rather than a harness: the value must be settable without a source edit.
+	"""
+
+	def test_the_default_is_the_read_write_edit_bash_set(self) -> None:
+		assert resolve_tools(None) == DEFAULT_TOOLS
+		assert resolve_tools(None) == "read,write,edit,bash"
+
+	def test_an_explicit_set_is_used_verbatim(self) -> None:
+		assert resolve_tools("read,grep") == "read,grep"
+
+	def test_the_environment_is_the_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setenv("SOFACT_TOOLS", "read")
+		assert resolve_tools(None) == "read"
+
+	def test_an_explicit_set_beats_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+		monkeypatch.setenv("SOFACT_TOOLS", "read")
+		assert resolve_tools("read,edit") == "read,edit"
+
+	def test_an_empty_set_is_refused_rather_than_forwarded(self) -> None:
+		"""``--tools ""`` is an empty allowlist: a producer with no way to write.
+
+		Forwarding it would produce a run that cannot edit anything and a failure with
+		no cause attached, so it is refused where the operator can still see why.
+		"""
+		with pytest.raises(ValueError, match="the tool set is empty"):
+			resolve_tools("")
+		with pytest.raises(ValueError, match="the tool set is empty"):
+			resolve_tools("   ")
+
+	def test_an_empty_environment_value_is_refused_too(
+		self, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Unset and set-to-empty are different answers, and the empty one is a mistake."""
+		monkeypatch.setenv("SOFACT_TOOLS", "")
+		with pytest.raises(ValueError, match="the tool set is empty"):
+			resolve_tools(None)
+
+	async def test_the_adapter_carries_it(self, home: Path, tmp_path: Path) -> None:
+		registered = synthetic_service(home, tmp_path, "complete")
+		assert registered.adapter(None).tools == DEFAULT_TOOLS
+		assert registered.adapter(None, tools="read").tools == "read"
+
+	def test_it_reaches_the_argv_slot_the_spec_declares(self, tmp_path: Path) -> None:
+		"""Resolution is only real if the value lands where the harness reads it."""
+		adapter = ConfiguredHarnessAdapter(
+			PI_SPEC,
+			workspace=tmp_path,
+			session_dir=tmp_path,
+			model="some-model",
+			tools="read,grep",
+		)
+		argv = adapter.build_argv(
+			"a goal long enough to clear the contamination floor",
+			"01920000-0000-7000-8000-000000000001",
+		)
+		assert "{tools}" not in argv, "the placeholder must be filled, not passed through"
+		assert argv[argv.index("--tools") + 1] == "read,grep"
 
 
 # --------------------------------------------------------------------------- #

@@ -1677,6 +1677,13 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
   ollama tag it does not list, exits 1, and writes no session record. So a tier is a
   harness registry entry (FR-132), and the probe is what catches a bad one — the check
   happens in the child, which is why it is measured rather than validated on SoFact's side.
+- **`--tools`** (or `SOFACT_TOOLS`) — the comma-separated allowlist handed to the
+  producer, default `read,write,edit,bash`. The tool set is the whole of what an agent may
+  do, so it is operator-tunable rather than a constant in `src/` (FR-156), and the probe
+  prints the set it resolved so a build's capability is visible *before* it starts. An
+  **empty** set is refused rather than forwarded: an empty allowlist disables every tool,
+  so the producer could not write, and the failure would surface later as a broken step
+  with no cause attached.
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an
