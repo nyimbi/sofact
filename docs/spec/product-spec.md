@@ -979,6 +979,11 @@ as it performs no coding of its own (FR-058): the loop is delegated to the harne
 `--offline` and `--no-extensions` removed, and `RESEARCH_MODEL` pinned to the
 operator's model — while the build spec keeps its composition freeze; a session that
 needs an extension gets a spec that names it, never a default that carries everything.
+**Naming an extension includes naming its tools**: the spec's `research_tools` are
+appended to the producer's `--tools` allowlist, because pi's allowlist governs
+extension tools exactly as it governs built-in ones — measured, an allowlist that
+omits `deep_research` left the producer no way to call the loop at all, and it spent
+its wall clock hand-rolling a recursive `pi` instead ([S25]).
 The artefact protocol is two workspace files (`research-report.md`,
 `research-meta.json`), so SoFact observes only the workspace it already observes
 (FR-149) and never the extension's private store. **Sources are recorded, not

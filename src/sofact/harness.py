@@ -95,6 +95,7 @@ _USAGE_REDUCERS: Final = frozenset({"sum", "max"})
 # dataclass the first time a field was added.
 _TUPLE_FIELDS: Final = (
 	"budget_argv",
+	"research_tools",
 	"completion_reason_path",
 	"goal_event_types",
 	"usage_path",
@@ -196,6 +197,7 @@ class HarnessSpec:
 	confinement_tools: str = ""
 	budget_argv: tuple[str, ...] = ()
 	compaction_event: str = ""
+	research_tools: tuple[str, ...] = ()
 	notes: str = ""
 
 	def __post_init__(self) -> None:
@@ -491,6 +493,7 @@ PI_RESEARCH_SPEC: Final = HarnessSpec(
 	supports_context_file_flag=PI_SPEC.supports_context_file_flag,
 	model_error_pattern=PI_SPEC.model_error_pattern,
 	env=(("RESEARCH_MODEL", "{model}"),),
+	research_tools=("deep_research", "super_deep_research"),
 	notes=(
 		"The research dispatch (FR-167): the same measured pi mechanics as PI_SPEC, with "
 		"two deliberate differences. --offline is dropped because the research loop must "
@@ -499,7 +502,11 @@ PI_RESEARCH_SPEC: Final = HarnessSpec(
 		"its tool, which spawns a recursive headless pi that performs the searches and "
 		"writes a report plus a machine-readable meta.json under ~/.forecastx-reports. "
 		"RESEARCH_MODEL is pinned to the operator's model so the recursion does not fall "
-		"back to a default the operator did not choose. The artefact protocol the goal "
+		"back to a default the operator did not choose. research_tools names the "
+		"extension's tools in the producer's --tools allowlist: measured, an allowlist "
+		"that omits them leaves the producer no way to call the loop at all -- it spent "
+		"its wall clock hand-rolling a recursive pi instead (2026-09-12). The "
+		"artefact protocol the goal "
 		"imposes is research-report.md plus research-meta.json in the workspace; the "
 		"extension's own timeout (240 s deep, 360 s super) binds before its advertised "
 		"search floor on a local model, which was measured, not assumed."

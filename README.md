@@ -158,7 +158,9 @@ digest.
 research goal with zero model involvement and hands it to a harness whose research loop
 is an installed `pi` extension ([S25]); the build spec freezes extensions out
 (`--no-extensions`) and the research spec is the one row that names its allowance, with
-`RESEARCH_MODEL` pinned to the operator's model. The verb records what the workspace
+`RESEARCH_MODEL` pinned to the operator's model, and the extension's tools named in the
+producer's allowlist — measured, an allowlist without them leaves the producer no way
+to call the loop at all. The verb records what the workspace
 holds — report size, the loop's own search count from `research-meta.json`, cited URLs —
 and never rounds a report with no sources into research that happened: on a local model
 the extension's own timeout binds first, and that fact reads *unmeasured*, not *none

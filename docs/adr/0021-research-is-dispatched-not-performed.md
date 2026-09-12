@@ -113,6 +113,19 @@ artefacts the run leaves — never a conclusion about them.**
   warning line.
 * [S25] — the extension measured: source read in full, one live run executed.
 
+## Correction (2026-09-12, same day, measured after first dispatch)
+
+The first live research dispatch exposed a defect in the spec data, not in this
+decision: the producer's `--tools` allowlist carried the default four tools and
+therefore filtered the extension's tool out — measured three ways, the allowlist
+governs extension tools exactly as it governs built-in ones. The producer, given a
+goal naming `deep_research` but no such tool, spent its wall clock hand-rolling a
+recursive `pi` (46 tool calls, 12,511 output tokens) and never wrote the report.
+The decision above already held the principle — *a spec that needs an extension
+names it* — and the fix is that principle made complete: `HarnessSpec.research_tools`
+names the extension's tools, and the research flow appends them to the resolved
+allowlist. No decision changed; the spec data grew one field.
+
 ## References
 
 * ADR-0004 — delegate the coding loop to an external harness (the same boundary, held

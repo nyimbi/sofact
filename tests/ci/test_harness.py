@@ -118,6 +118,8 @@ class TestMeasuredSpecs:
 		)
 		assert "--no-extensions" in PI_SPEC.argv, "and the build spec still freezes them"
 		assert PI_RESEARCH_SPEC.env == (("RESEARCH_MODEL", "{model}"),)
+		assert PI_RESEARCH_SPEC.research_tools == ("deep_research", "super_deep_research")
+		assert PI_SPEC.research_tools == (), "a build spec delegates no research tool"
 		assert PI_RESEARCH_SPEC.session_glob == PI_SPEC.session_glob
 		assert PI_RESEARCH_SPEC.usage_path == PI_SPEC.usage_path
 		assert PI_RESEARCH_SPEC.model_error_pattern == PI_SPEC.model_error_pattern

@@ -1118,7 +1118,11 @@ class TestTheResearchRun:
 	"""
 
 	async def _service_with_goal(self, home: Path, tmp_path: Path, mode: str) -> FactoryService:
-		registered = synthetic_service(home, tmp_path, mode, name="pi-research")
+		spec = dataclasses.replace(
+			base_spec(tmp_path, mode, name="pi-research"),
+			research_tools=("deep_research",),
+		)
+		registered = FactoryService(home=home, llm=None, specs={"pi-research": spec})
 		await registered.start("a platform that builds software from a conversation")
 		return registered
 
@@ -1141,6 +1145,10 @@ class TestTheResearchRun:
 			"https://example.com/three",
 		)
 		assert record.tokens_observed == 120, "the session record's usage is read"
+		assert any("deep_research" in part for part in record.argv), (
+			"the spec's research tools must reach the producer's allowlist, or the loop "
+			"cannot be called at all (measured 2026-09-12)"
+		)
 
 		assert Counter(kinds(registered))["research.run"] == 1
 		state = await registered.state()

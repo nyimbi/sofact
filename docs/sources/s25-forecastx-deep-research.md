@@ -54,7 +54,17 @@ budget, so its five-search floor is roughly half of what the ceiling allows).
 extension flag. SoFact's response is data: the build spec runs `--no-extensions`
 (FR-154), and the research spec is the same argv with `--offline` and
 `--no-extensions` deliberately removed plus `RESEARCH_MODEL` pinned from the
-operator's model (FR-161, FR-167).
+operator's model (FR-161, FR-167). **The `--tools` allowlist governs extension
+tools too**, measured three ways with the same prompt (`Do you have a tool named
+deep_research?`): extensions off → MISSING; extensions on with an allowlist
+omitting the tool → MISSING; extensions on with the tool named in the allowlist →
+READY, and the model's own reasoning lists the allowlist as its tool set. The
+first live research dispatch therefore failed honestly: the producer, denied the
+tool, spent 46 tool calls hand-rolling a recursive `pi` (10 searches in 129 s)
+but could not produce the report artefacts, and SoFact's 900 s ceiling ended the
+run as `budget_exhausted` with no report — recorded, not rounded away. The fix
+is a spec field: `research_tools` names the loop's tools in the allowlist
+(FR-161).
 
 ## Verification status
 

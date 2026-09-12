@@ -934,7 +934,17 @@ class FactoryService:
 		else:
 			resolved = self.harness_name(name)
 		workdir = self.home / "research" / goal.id / uuid7str()[:8]
-		adapter = self.adapter(resolved, workspace=workdir, model=model, tools=tools)
+		# The research spec names the extension's tools; the producer's allowlist must
+		# carry them or the loop cannot be called at all -- measured: without this the
+		# producer spent its wall clock hand-rolling a recursive pi (2026-09-12).
+		resolved_tools = resolve_tools(tools)
+		research_spec = harness_spec_for(resolved, self._specs)
+		if research_spec.research_tools:
+			declared = resolved_tools.split(",")
+			missing = [name for name in research_spec.research_tools if name not in declared]
+			if missing:
+				resolved_tools = ",".join([*declared, *missing])
+		adapter = self.adapter(resolved, workspace=workdir, model=model, tools=resolved_tools)
 		session_id = uuid7str()
 		goal_text = research_goal(resolved_query, mode=mode)
 		argv = adapter.build_argv(goal_text, session_id)
