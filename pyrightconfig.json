@@ -3,14 +3,13 @@
 		"src",
 		"tests"
 	],
-	"pythonVersion": "3.13",
+	"pythonVersion": "3.12",
 	"typeCheckingMode": "strict",
 	"reportMissingTypeStubs": false,
 	"venvPath": ".",
 	"venv": ".venv",
 	"extraPaths": [
 		"src",
-		".venv/lib/python3.13/site-packages",
 		"tests/ci"
 	],
 	"executionEnvironments": [
@@ -18,7 +17,6 @@
 			"root": ".",
 			"extraPaths": [
 				"src",
-				".venv/lib/python3.13/site-packages",
 				"tests/ci"
 			]
 		}

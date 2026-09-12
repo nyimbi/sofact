@@ -66,8 +66,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101"]
 
-[tool.pyright]
-include = ["src", "tests"]
-pythonVersion = "3.12"
-typeCheckingMode = "strict"
-reportMissingTypeStubs = false
+# pyright is configured by pyrightconfig.json, which pyright prefers over this file.
+# Keeping a second copy here was dead config and drifted (it said 3.12 while the real
+# config said 3.13) — a setting that looks authoritative and is not is worse than no
+# setting at all. One source of truth per tool.
