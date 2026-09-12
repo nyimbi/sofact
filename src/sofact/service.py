@@ -11,10 +11,12 @@ directory: unset, SoFact writes to ``./.sofact``, and ``SOFACT_HOME`` overrides 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, suggest_oracle
@@ -31,6 +33,7 @@ from sofact.execution import OracleRunner, digest_tree
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
+	DEFAULT_STDERR_TAIL_BYTES,
 	DEFAULT_TOOLS,
 	SPECS,
 	ConfiguredHarnessAdapter,
@@ -63,6 +66,8 @@ from sofact.views import (
 	OracleDeclaration,
 	ProjectState,
 	Readiness,
+	ResearchMode,
+	ResearchRecord,
 	SpecificationDraft,
 	StepBudget,
 	StepOutcome,
@@ -84,6 +89,47 @@ __all__ = [
 DEFAULT_HOME_DIRNAME = ".sofact"
 
 DEFAULT_HARNESS = "pi"
+DEFAULT_RESEARCH_HARNESS = "pi-research"
+
+RESEARCH_TIMEOUT_SECONDS: Final = 900.0
+"""Wall clock for one research dispatch. The extension's own loop timeout (240 s deep,
+360 s super) is the tighter bound on a local model; this is the outer session's ceiling."""
+
+
+research_url_pattern = re.compile(r"https?://[^\s()>]+")
+
+
+def extract_source_urls(text: str) -> tuple[str, ...]:
+	"""URLs cited in a research report, deduplicated in order of first appearance."""
+	seen: list[str] = []
+	for raw in research_url_pattern.findall(text):
+		cleaned = raw.rstrip(".,;:")
+		if cleaned and cleaned not in seen:
+			seen.append(cleaned)
+	return tuple(seen)
+
+
+def research_goal(query: str, *, mode: ResearchMode) -> str:
+	"""The research session's goal, authored with zero model involvement (FR-167).
+
+	SoFact writes the prompt; the model performs the research. The goal names the tool,
+	the exact query, and the two files the workspace must end up holding, because the
+	artefact protocol — not the producer's honesty — is what makes the run observable.
+	"""
+	assert query.strip(), "a research query must not be empty"
+	tool = "super_deep_research" if mode is ResearchMode.SUPER else "deep_research"
+	return (
+		f"Research the following subject using the {tool} tool.\n\n"
+		f"Subject: {query}\n\n"
+		f"Call the {tool} tool exactly once, with the query: {query}\n\n"
+		"When the tool finishes: write the full report text it returned, verbatim and "
+		"unchanged, to research-report.md in the working directory; then copy the file "
+		"~/.forecastx-reports/<the report id the tool reported>/meta.json to "
+		"research-meta.json in the working directory. Change the content of neither "
+		"file. Then reply DONE."
+	)
+
+
 """The harness used when ``SOFACT_HARNESS`` is unset.
 
 ``pi`` rather than ``dsh`` because it is the one whose dispatch argv has actually been
@@ -841,6 +887,131 @@ class FactoryService:
 			if max_steps is not None and len(produced) >= max_steps:
 				break
 		return tuple(produced)
+
+	# ------------------------------------------------------------ P1: research
+
+	async def research(
+		self,
+		query: str | None = None,
+		*,
+		name: str | None = None,
+		model: str | None = None,
+		tools: str | None = None,
+		mode: ResearchMode = ResearchMode.DEEP,
+		timeout: float = RESEARCH_TIMEOUT_SECONDS,
+	) -> ResearchRecord:
+		"""Dispatch one research run and record what it left behind (FR-167).
+
+		SoFact performs no research of its own: it authors the session's goal
+		deterministically — zero model involvement, the same discipline as a build
+		step — and sends it to a harness whose *research* spec is a deliberate
+		composition rather than an ambient one. The report is the producer's word
+		(ADR-0008); what SoFact records are the artefacts: the report's size, the
+		loop's own search count from ``research-meta.json``, and the source URLs the
+		report and the meta cite. A report with no sources is recorded as exactly
+		that, never rounded into research that happened (NFR-024).
+
+		The harness resolves from the configured table like any other: explicit name,
+		then :data:`DEFAULT_RESEARCH_HARNESS` if the table contains it. Unlike a build
+		dispatch this does **not** require a probe — its capability claims are the
+		report artefacts themselves, which this method measures directly, and a
+		research session that cannot run is one failed artefact rather than an
+		assumed one.
+		"""
+		goal = await self.current_goal()
+		if goal is None:
+			raise KeyError("no goal yet; research refines a goal, so start one first")
+		resolved_query = (query or goal.statement).strip()
+		assert resolved_query, "a research query must not be empty"
+		if name is None:
+			if DEFAULT_RESEARCH_HARNESS not in self._specs:
+				known = ", ".join(sorted(self._specs)) or "none"
+				raise KeyError(
+					f"no research harness: {DEFAULT_RESEARCH_HARNESS!r} is not among the "
+					f"configured harnesses ({known}); add it to the table or pass --harness"
+				)
+			resolved = DEFAULT_RESEARCH_HARNESS
+		else:
+			resolved = self.harness_name(name)
+		workdir = self.home / "research" / goal.id / uuid7str()[:8]
+		adapter = self.adapter(resolved, workspace=workdir, model=model, tools=tools)
+		session_id = uuid7str()
+		goal_text = research_goal(resolved_query, mode=mode)
+		argv = adapter.build_argv(goal_text, session_id)
+		started = now()
+		exit_code, _stdout, stderr, timed_out, session_path, tokens = await adapter.invoke(
+			argv, timeout=timeout, session_id=session_id
+		)
+		ended = now()
+
+		if timed_out:
+			outcome = StepOutcome.BUDGET_EXHAUSTED
+			note = f"the research session did not finish within {timeout:.0f}s"
+		elif exit_code != 0:
+			outcome = StepOutcome.FAILED
+			note = f"the research session exited {exit_code}"
+		else:
+			outcome = StepOutcome.COMPLETED
+			note = None
+
+		report = workdir / "research-report.md"
+		report_chars = 0
+		urls: list[str] = []
+		searches: int | None = None
+		if report.is_file():
+			report_text = report.read_text(encoding="utf-8", errors="replace")
+			report_chars = len(report_text)
+			urls = list(extract_source_urls(report_text))
+		meta_path = workdir / "research-meta.json"
+		if meta_path.is_file():
+			try:
+				loaded: object = json.loads(meta_path.read_text(encoding="utf-8"))
+			except json.JSONDecodeError:
+				loaded = None
+			# ``isinstance`` on a JSON value would narrow to ``dict[Unknown, Unknown]``;
+			# the cast keeps the mapping's value type explicit, which is what the
+			# narrowing below needs to mean anything.
+			meta = cast("dict[str, object] | None", loaded if isinstance(loaded, dict) else None)
+			if meta is not None:
+				stats_raw = meta.get("stats")
+				stats = (
+					cast("dict[str, object]", stats_raw) if isinstance(stats_raw, dict) else None
+				)
+				if stats is not None:
+					observed = stats.get("searches")
+					if isinstance(observed, int) and not isinstance(observed, bool):
+						searches = observed
+				sources_raw = meta.get("sources")
+				if isinstance(sources_raw, list):
+					for source in cast("list[object]", sources_raw):
+						if isinstance(source, dict):
+							url = cast("dict[str, object]", source).get("url")
+							if isinstance(url, str) and url and url not in urls:
+								urls.append(url)
+		record = ResearchRecord(
+			id=uuid7str(),
+			goal_id=goal.id,
+			query=resolved_query,
+			harness=resolved,
+			mode=mode,
+			argv=argv,
+			workspace=str(workdir),
+			started_at=started,
+			ended_at=ended,
+			wall_clock_seconds=max(0.0, (ended - started).total_seconds()),
+			outcome=outcome,
+			exit_code=exit_code,
+			tokens_observed=tokens,
+			session_path=str(session_path) if session_path is not None else None,
+			stderr_tail=stderr[-DEFAULT_STDERR_TAIL_BYTES:] or None,
+			report_path=str(report) if report.is_file() else None,
+			report_chars=report_chars,
+			searches_observed=searches,
+			source_urls=tuple(urls),
+			note=note,
+		)
+		self._commit(LedgerKind.RESEARCH_RUN, {"research": record.model_dump(mode="json")})
+		return record
 
 	# --------------------------------------------------- FR-139: integrity at end
 

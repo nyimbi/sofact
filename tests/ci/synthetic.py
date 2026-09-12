@@ -140,6 +140,38 @@ if "budget-marker.txt" in goal:
 	if not capped_and_honoured:
 		pathlib.Path("budget-marker.txt").write_text("WORK", encoding="utf-8")
 
+if "research-report.md" in goal:
+	# The research protocol: the report is the artefact, and the meta carries the
+	# loop's own counts. The stub variant is the measured truncation case -- a real
+	# run that hit its timeout mid-loop and left a report with no sources behind.
+	# No newline escapes here: inside the generated script they would be real
+	# newlines, and a string literal split across lines is a SyntaxError.
+	if mode.startswith("research-stub"):
+		pathlib.Path("research-report.md").write_text(
+			"partial: the loop was cut before any search completed", encoding="utf-8"
+		)
+		pathlib.Path("research-meta.json").write_text(
+			json.dumps({"stats": {"searches": 2}, "sources": []}), encoding="utf-8"
+		)
+	else:
+		pathlib.Path("research-report.md").write_text(
+			"# report .. finding one .. ## Sources .. - https://example.com/one .. "
+			"- https://example.com/two.",
+			encoding="utf-8",
+		)
+		pathlib.Path("research-meta.json").write_text(
+			json.dumps(
+				{
+					"stats": {"searches": 5},
+					"sources": [
+						{"id": 1, "title": "one", "url": "https://example.com/one"},
+						{"id": 2, "title": "two", "url": "https://example.com/three"},
+					],
+				}
+			),
+			encoding="utf-8",
+		)
+
 records = [{"seq": 1, "type": "session", "data": {}}]
 records.append({"seq": 2, "type": "turn/start", "data": {"turn": 1}})
 records.append({"seq": 3, "type": "assistant/message", "data": {"usage": {"outputTokens": 120}}})

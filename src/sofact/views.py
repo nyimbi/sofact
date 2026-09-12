@@ -1058,6 +1058,45 @@ class StepOutcome(StrEnum):
 	NOT_DISPATCHED = "not_dispatched"
 
 
+class ResearchMode(StrEnum):
+	"""Which research engine to ask for. Depth is the producer's choice to honour."""
+
+	DEEP = "deep"
+	SUPER = "super"
+
+
+class ResearchRecord(View):
+	"""One research dispatch (FR-167) and what it left behind.
+
+	The record keeps the report a **fact about an artefact**, not a verdict about
+	research: ``report_chars`` and ``source_urls`` are measurements, and an empty
+	``source_urls`` means *none were recorded*, never *none exist* (NFR-024). A
+	truncated research loop and a completed one look different only in these numbers,
+	which is why they are recorded at all.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	query: str
+	harness: str
+	mode: ResearchMode
+	argv: tuple[str, ...]
+	workspace: str
+	started_at: datetime
+	ended_at: datetime | None = None
+	wall_clock_seconds: float | None = None
+	outcome: StepOutcome = StepOutcome.NOT_DISPATCHED
+	exit_code: int | None = None
+	tokens_observed: int | None = None
+	session_path: str | None = None
+	stderr_tail: str | None = None
+	report_path: str | None = None
+	report_chars: int = 0
+	searches_observed: int | None = None
+	source_urls: tuple[str, ...] = ()
+	note: str | None = None
+
+
 class DispatchRecord(View):
 	"""What one attempt at one plan step actually did.
 
@@ -1173,6 +1212,7 @@ class LedgerKind(StrEnum):
 	STEP_DISPATCHED = "step.dispatched"
 	INTEGRITY_CHECKED = "integrity.checked"
 	VERDICT_REUSED = "verdict.reused"
+	RESEARCH_RUN = "research.run"
 
 
 class LedgerEntry(View):
@@ -1276,6 +1316,7 @@ class ProjectState(View):
 	profiles: tuple[HarnessProfile, ...] = ()
 	integrity: tuple[IntegrityCheck, ...] = ()
 	claims: tuple[CompletionClaim, ...] = ()
+	research: tuple[ResearchRecord, ...] = ()
 	notes: tuple[str, ...] = ()
 
 	def goal(self, goal_id: str) -> Goal | None:

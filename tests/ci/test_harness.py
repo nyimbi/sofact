@@ -23,6 +23,7 @@ from synthetic import base_spec
 
 from sofact.harness import (
 	DSH_SPEC,
+	PI_RESEARCH_SPEC,
 	PI_SPEC,
 	SPECS,
 	ConfiguredHarnessAdapter,
@@ -98,13 +99,28 @@ def _records(*rows: dict[str, object]) -> tuple[dict[str, object], ...]:
 
 class TestMeasuredSpecs:
 	def test_both_harnesses_have_a_spec(self) -> None:
-		assert set(SPECS) == {"pi", "dsh"}
+		assert set(SPECS) == {"pi", "dsh", "pi-research"}
 		assert spec_for("pi") is PI_SPEC
 		assert spec_for("dsh") is DSH_SPEC
+		assert spec_for("pi-research") is PI_RESEARCH_SPEC
 
 	def test_unknown_harness_names_the_configured_set(self) -> None:
 		with pytest.raises(KeyError, match="configured harnesses: dsh, pi"):
 			spec_for("omp")
+
+	def test_the_research_spec_is_a_deliberate_variant_of_the_build_spec(self) -> None:
+		"""FR-167: the same measured mechanics, with the two web-facing flags removed."""
+		assert "pi-research" in SPECS
+		assert spec_for("pi-research") is PI_RESEARCH_SPEC
+		assert "--offline" not in PI_RESEARCH_SPEC.argv, "the research loop must search"
+		assert "--no-extensions" not in PI_RESEARCH_SPEC.argv, (
+			"the loop IS an installed extension, so this spec names it by omission"
+		)
+		assert "--no-extensions" in PI_SPEC.argv, "and the build spec still freezes them"
+		assert PI_RESEARCH_SPEC.env == (("RESEARCH_MODEL", "{model}"),)
+		assert PI_RESEARCH_SPEC.session_glob == PI_SPEC.session_glob
+		assert PI_RESEARCH_SPEC.usage_path == PI_SPEC.usage_path
+		assert PI_RESEARCH_SPEC.model_error_pattern == PI_SPEC.model_error_pattern
 
 	def test_pi_argv_matches_the_S19_measurement(self) -> None:
 		assert PI_SPEC.argv[:2] == ("pi", "--mode")

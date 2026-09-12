@@ -24,7 +24,12 @@ from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
-from sofact.service import FactoryService, refuted_steps, resolve_tools
+from sofact.service import (
+	RESEARCH_TIMEOUT_SECONDS,
+	FactoryService,
+	refuted_steps,
+	resolve_tools,
+)
 from sofact.views import (
 	ClauseKind,
 	DispatchRecord,
@@ -33,6 +38,8 @@ from sofact.views import (
 	HarnessProfile,
 	IntegrityOutcome,
 	ProbeOutcome,
+	ResearchMode,
+	ResearchRecord,
 	SpecificationDraft,
 	StepOutcome,
 	VerdictOutcome,
@@ -929,6 +936,112 @@ async def _run(svc: FactoryService, workspace: Path | None, timeout: float) -> N
 		timed_out = isinstance(observed_timeout, bool) and observed_timeout
 		shown = "timed out" if timed_out else f"exit {item.payload.get('exit_code')}"
 		typer.secho(f"  ran {item.payload.get('command')!r} → {shown}", fg="bright_black")
+
+
+@app.command(name="research")
+def research(
+	ctx: typer.Context,
+	query: str | None = typer.Argument(None, help="Defaults to the current goal's statement."),
+	home: Path | None = _HOME_OPTION,
+	harness: str | None = _HARNESS_OPTION,
+	model: str | None = _MODEL_OPTION,
+	tools: str | None = _TOOLS_OPTION,
+	super_mode: bool = typer.Option(
+		False,
+		"--super",
+		help="Ask for the multi-phase research loop instead of the single deep one.",
+	),
+	timeout: float = typer.Option(
+		RESEARCH_TIMEOUT_SECONDS,
+		"--timeout",
+		help="Wall-clock ceiling for the research session.",
+	),
+) -> None:
+	"""Dispatch a research run on the current goal and record what it left (FR-167)."""
+	asyncio.run(
+		_research(
+			_service(_home_of(ctx, home)),
+			query,
+			harness,
+			model,
+			tools,
+			super_mode,
+			timeout,
+		),
+	)
+
+
+async def _research(
+	svc: FactoryService,
+	query: str | None,
+	harness: str | None,
+	model: str | None,
+	tools: str | None,
+	super_mode: bool,
+	timeout: float,
+) -> None:
+	resolved_tools = _require_tools(tools)
+	try:
+		record = await svc.research(
+			query,
+			name=harness,
+			model=model,
+			tools=resolved_tools,
+			mode=ResearchMode.SUPER if super_mode else ResearchMode.DEEP,
+			timeout=timeout,
+		)
+	except KeyError as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="yellow")
+		raise typer.Exit(code=1) from exc
+	_print_research(record)
+
+
+def _print_research(record: ResearchRecord) -> None:
+	style = (
+		"green"
+		if record.outcome is StepOutcome.COMPLETED
+		else ("yellow" if record.outcome is StepOutcome.BUDGET_EXHAUSTED else "red")
+	)
+	typer.secho(
+		f"\nresearch {record.id} @ {record.harness} ({record.mode.value})",
+		fg=style,
+		bold=True,
+	)
+	typer.secho(f"  query   {record.query}", fg="bright_black")
+	typer.secho(
+		f"  {record.outcome.value}"
+		+ (f" after {record.wall_clock_seconds:.0f}s" if record.wall_clock_seconds else ""),
+		fg=style,
+	)
+	if record.note is not None:
+		typer.secho(f"  {record.note}", fg="yellow")
+	if record.report_path is not None:
+		typer.secho(
+			f"  report  {record.report_path} ({record.report_chars} characters)",
+			fg="bright_black",
+		)
+		if record.searches_observed is not None:
+			typer.secho(f"  searches {record.searches_observed}", fg="bright_black")
+		if record.source_urls:
+			typer.secho(f"  sources {len(record.source_urls)}", fg="bright_black")
+			for url in record.source_urls:
+				typer.echo(f"    {url}")
+		else:
+			typer.secho(
+				"  no source URLs were recorded; a report without sources is unmeasured "
+				"research, not research that found nothing (NFR-024).",
+				fg="yellow",
+			)
+	else:
+		typer.secho(
+			"  the session left no research-report.md, so nothing was learned that a "
+			"later phase could cite (FR-001's discipline, applied to research).",
+			fg="red",
+		)
+	if record.outcome is not StepOutcome.COMPLETED:
+		raise typer.Exit(code=1)
+	if record.report_path is None:
+		raise typer.Exit(code=1)
 
 
 @app.command(name="verify")

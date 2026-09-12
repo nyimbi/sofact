@@ -195,7 +195,7 @@ class TestConfiguration:
 		self, service: FactoryService
 	) -> None:
 		assert service.harness_table() == SPECS
-		assert set(service.harness_table()) == {PI_SPEC.name, DSH_SPEC.name}
+		assert set(service.harness_table()) == {PI_SPEC.name, DSH_SPEC.name, "pi-research"}
 
 	async def test_a_deployment_can_register_a_harness_without_patching_code(
 		self, home: Path, tmp_path: Path
@@ -1101,3 +1101,98 @@ class TestTheVerdictCache:
 		# One verdict per completed step, none reused: every check re-ran the oracles.
 		assert counts["verdict.rendered"] == counts["step.dispatched"]
 		assert "verdict.reused" not in counts
+
+
+# --------------------------------------------------------------------------- #
+# P1: research is dispatched, not performed (FR-167)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheResearchRun:
+	"""SoFact authors the research goal and measures the artefacts; the model researches.
+
+	The protocol the goal imposes is two files in the workspace: ``research-report.md``
+	and ``research-meta.json``. What SoFact records is exactly what those hold — sizes,
+	the loop's own search count, cited URLs — and nothing it did not measure. A report
+	with no sources is the recorded shape of a truncated loop, never of a conclusion.
+	"""
+
+	async def _service_with_goal(self, home: Path, tmp_path: Path, mode: str) -> FactoryService:
+		registered = synthetic_service(home, tmp_path, mode, name="pi-research")
+		await registered.start("a platform that builds software from a conversation")
+		return registered
+
+	async def test_a_completed_loop_records_the_report_and_its_sources(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		record = await registered.research()
+
+		assert record.outcome is StepOutcome.COMPLETED
+		assert record.exit_code == 0
+		assert record.report_path is not None
+		assert record.report_chars > 0
+		assert record.searches_observed == 5, "the loop's own meta carries its count"
+		# Two from the report text (the trailing period stripped), one more from the
+		# meta's sources array, deduplicated in order of first appearance.
+		assert record.source_urls == (
+			"https://example.com/one",
+			"https://example.com/two",
+			"https://example.com/three",
+		)
+		assert record.tokens_observed == 120, "the session record's usage is read"
+
+		assert Counter(kinds(registered))["research.run"] == 1
+		state = await registered.state()
+		assert state.research[-1] == record, "the fold replays the run"
+
+	async def test_a_truncated_loop_is_a_fact_not_a_failure_to_report(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The measured truncation case: session exit 0, report exists, sources absent."""
+		registered = await self._service_with_goal(home, tmp_path, "research-stub")
+		record = await registered.research()
+
+		assert record.outcome is StepOutcome.COMPLETED, "the session itself finished"
+		assert record.searches_observed == 2
+		assert record.source_urls == (), "none recorded, which is not none exist (NFR-024)"
+		assert record.report_path is not None
+		assert record.report_chars > 0
+
+	async def test_a_failed_session_records_what_did_not_happen(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The session failed, and whatever it left before failing is still recorded."""
+		registered = await self._service_with_goal(home, tmp_path, "fail")
+		record = await registered.research()
+
+		assert record.outcome is StepOutcome.FAILED
+		assert record.exit_code == 7
+		assert record.note is not None and "exited 7" in record.note
+		# The child wrote its artefact before exiting non-zero; the record reports the
+		# artefact and the exit code as separate facts, because they are separate facts.
+		assert record.report_path is not None
+		assert record.report_chars > 0
+
+	async def test_the_query_defaults_to_the_goal_and_an_explicit_one_wins(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		defaulted = await registered.research()
+		assert defaulted.query == "a platform that builds software from a conversation"
+
+		named = await registered.research("open-source agent harnesses, 2026")
+		assert named.query == "open-source agent harnesses, 2026"
+
+	async def test_a_table_without_a_research_harness_is_named(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered = synthetic_service(home, tmp_path, "research", name="synthetic")
+		await registered.start("a statement about factories")
+		with pytest.raises(KeyError, match="no research harness"):
+			await registered.research()
+
+	async def test_research_without_a_goal_is_refused(self, home: Path, tmp_path: Path) -> None:
+		registered = synthetic_service(home, tmp_path, "research", name="pi-research")
+		with pytest.raises(KeyError, match="no goal yet"):
+			await registered.research()

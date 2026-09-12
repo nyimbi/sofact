@@ -969,6 +969,25 @@ this run's evidence.
 nothing are different facts. `goal_survives_compaction` is not skipped: it costs no
 child.
 
+**FR-167** *(research is dispatched, not performed)* SoFact must **author the research
+goal deterministically** — zero model involvement, the same discipline as a build step
+— and dispatch it to a harness whose research spec is a deliberate composition, then
+record the artefacts the run leaves: the report's size, the loop's own search count,
+and the source URLs the report cites. SoFact performs no research of its own, exactly
+as it performs no coding of its own (FR-058): the loop is delegated to the harness
+([S25]). The research spec is data in the built-in table — the build spec's argv with
+`--offline` and `--no-extensions` removed, and `RESEARCH_MODEL` pinned to the
+operator's model — while the build spec keeps its composition freeze; a session that
+needs an extension gets a spec that names it, never a default that carries everything.
+The artefact protocol is two workspace files (`research-report.md`,
+`research-meta.json`), so SoFact observes only the workspace it already observes
+(FR-149) and never the extension's private store. **Sources are recorded, not
+verified**: a report with no sources is the recorded shape of a truncated loop —
+measured on a local model, where the extension's own 240 s ceiling binds before its
+five-search floor ([S25]) — and reads *unmeasured*, never *none found* (NFR-024). The
+report prose is advisory input with the same standing as a completion claim (ADR-0008,
+FR-138): recorded as a signal, never consulted as a verdict.
+
 **FR-149** Harness invocations must be **hermetic**: every flag that could cause a
 session to read operator state, ambient configuration, or network resources must be
 explicitly set rather than defaulted. A build that depends on an unset default is
@@ -1751,11 +1770,12 @@ v0.1's lane and oracle definition formats are retained. New surface:
   human identity (FR-061, NFR-017).
 
 **Running in v0.1** — the subset of the above that exists as executable code today:
-`sofact` (the interrogation itself, which is P0), `contract`, `plan`, `probe`,
-`dispatch`, `verify`, `integrity`, `precision`, `claim`, `dimensions`, `draft`,
-`status`, `ledger`, `verify-ledger`, `run`. The planned verbs remain the target
-surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is FR-142's wave
-scheduler (and FR-163's trigger: **a completed session** is checked against the contract,
+`sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
+`contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
+`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `run`. The planned verbs
+remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
+FR-142's wave scheduler (and FR-163's trigger: **a completed session** is checked against the
+contract,
 and the command exits non-zero when nothing was verified, when a step was refuted, or when
 a plan that ran to its end left the contract not clean), and `integrity`/`precision`
 are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
@@ -1796,6 +1816,13 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
   previous report holds without re-running, and the reuse is written down as its own
   row naming the verdict it stands in for. The cache is not a pass cache: a refuted
   verdict is reused too, and still refuses its dependents.
+- **`sofact research [query]`** — dispatch one research run on the current goal (FR-167).
+  SoFact authors the goal deterministically; the harness's research loop does the
+  searching (`pi-research` in the built-in table, [S25]). The verb records what the
+  workspace holds — report size, the loop's own search count, cited URLs — and never
+  rounds a report with no sources into research that happened. `--super` asks for the
+  multi-phase loop; `--timeout` bounds only the outer session, because the extension's
+  own loop ceiling binds first on a local model.
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an

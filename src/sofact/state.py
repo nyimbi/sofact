@@ -28,6 +28,7 @@ from sofact.views import (
 	LedgerEntry,
 	LedgerKind,
 	ProjectState,
+	ResearchRecord,
 	SpecificationDraft,
 	VerificationReport,
 )
@@ -49,6 +50,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	dispatches: list[DispatchRecord] = []
 	profiles: list[HarnessProfile] = []
 	integrity: list[IntegrityCheck] = []
+	research: list[ResearchRecord] = []
 
 	for entry in entries:
 		payload = entry.payload
@@ -65,6 +67,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				evidence.append(Evidence.model_validate(payload["evidence"]))
 			case LedgerKind.VERDICT_RENDERED | LedgerKind.VERDICT_REUSED:
 				reports.append(VerificationReport.model_validate(payload["report"]))
+			case LedgerKind.RESEARCH_RUN:
+				research.append(ResearchRecord.model_validate(payload["research"]))
 			case LedgerKind.CLAIM_DECLARED:
 				claims.append(CompletionClaim.model_validate(payload["claim"]))
 			case LedgerKind.ADVISOR_NOTE:
@@ -96,6 +100,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		dispatches=tuple(dispatches),
 		profiles=tuple(profiles),
 		integrity=tuple(integrity),
+		research=tuple(research),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

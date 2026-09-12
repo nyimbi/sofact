@@ -154,6 +154,16 @@ it stands in for, and `dispatch --fresh` bypasses it. A refuted verdict is reuse
 like a satisfied one. `verify` never reuses: it weighs the log, and a log has no tree to
 digest.
 
+**Research is a dispatch too** (`sofact research [query]`, FR-167). SoFact authors the
+research goal with zero model involvement and hands it to a harness whose research loop
+is an installed `pi` extension ([S25]); the build spec freezes extensions out
+(`--no-extensions`) and the research spec is the one row that names its allowance, with
+`RESEARCH_MODEL` pinned to the operator's model. The verb records what the workspace
+holds — report size, the loop's own search count from `research-meta.json`, cited URLs —
+and never rounds a report with no sources into research that happened: on a local model
+the extension's own timeout binds first, and that fact reads *unmeasured*, not *none
+found* (NFR-024).
+
 The probe's remaining rows are **attempted rather than assumed** (FR-165). Four of them
 need more than one child, so each is a *differential*: `sandboxable` hands one child a tool
 set that cannot write outside its directory and tells it to attempt an escape (the escape

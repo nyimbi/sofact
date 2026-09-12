@@ -65,6 +65,7 @@ from sofact.views import (
 __all__ = [
 	"DEFAULT_TOOLS",
 	"DSH_SPEC",
+	"PI_RESEARCH_SPEC",
 	"PI_SPEC",
 	"PROBE_BUDGET_GOAL",
 	"PROBE_BUDGET_SLOT",
@@ -476,6 +477,40 @@ probe that caught it was the ``telemetry`` row reading a real record (FR-148, FR
 """
 
 
+PI_RESEARCH_SPEC: Final = HarnessSpec(
+	name="pi-research",
+	argv=tuple(part for part in PI_SPEC.argv if part not in ("--offline", "--no-extensions")),
+	session_glob=PI_SPEC.session_glob,
+	session_is_zstd=PI_SPEC.session_is_zstd,
+	version_argv=PI_SPEC.version_argv,
+	completion_event=PI_SPEC.completion_event,
+	usage_path=PI_SPEC.usage_path,
+	usage_reduce=PI_SPEC.usage_reduce,
+	goal_event_types=PI_SPEC.goal_event_types,
+	goal_entry=PI_SPEC.goal_entry,
+	supports_context_file_flag=PI_SPEC.supports_context_file_flag,
+	model_error_pattern=PI_SPEC.model_error_pattern,
+	env=(("RESEARCH_MODEL", "{model}"),),
+	notes=(
+		"The research dispatch (FR-167): the same measured pi mechanics as PI_SPEC, with "
+		"two deliberate differences. --offline is dropped because the research loop must "
+		"search the web, and --no-extensions is dropped because the loop is an installed "
+		"pi extension (@forecastx/deep-research, measured 2026-09-12): the producer calls "
+		"its tool, which spawns a recursive headless pi that performs the searches and "
+		"writes a report plus a machine-readable meta.json under ~/.forecastx-reports. "
+		"RESEARCH_MODEL is pinned to the operator's model so the recursion does not fall "
+		"back to a default the operator did not choose. The artefact protocol the goal "
+		"imposes is research-report.md plus research-meta.json in the workspace; the "
+		"extension's own timeout (240 s deep, 360 s super) binds before its advertised "
+		"search floor on a local model, which was measured, not assumed."
+	),
+)
+"""The research variant of the default harness. Composition is still deliberate: the
+build spec freezes every extension out (FR-154), and this spec is the one place an
+extension is allowed, because it *is* the capability the phase exists to delegate to.
+"""
+
+
 DSH_SPEC: Final = HarnessSpec(
 	name="dsh",
 	argv=(
@@ -522,7 +557,11 @@ whose dispatch argv has never been witnessed.
 """
 
 
-SPECS: Final[dict[str, HarnessSpec]] = {PI_SPEC.name: PI_SPEC, DSH_SPEC.name: DSH_SPEC}
+SPECS: Final[dict[str, HarnessSpec]] = {
+	PI_SPEC.name: PI_SPEC,
+	DSH_SPEC.name: DSH_SPEC,
+	"pi-research": PI_RESEARCH_SPEC,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -1118,10 +1157,43 @@ class ConfiguredHarnessAdapter:
 			model=self.model,
 		)
 		assert len(profile.findings) == len(HarnessCapability), (
-			f"probe must report on every capability: got {len(profile.findings)} "
+			"probe must report on every capability: got {len(profile.findings)} "
 			f"of {len(HarnessCapability)}"
 		)
 		return profile
+
+	async def invoke(
+		self,
+		argv: Sequence[str],
+		*,
+		timeout: float,
+		session_id: str,
+	) -> tuple[int | None, str, str, bool, Path | None, int | None]:
+		"""Run one session that is not a plan step (FR-167's research run).
+
+		:meth:`dispatch` is shaped by the plan: it renders a step goal, gates on a
+		probe, and produces a :class:`~sofact.views.DispatchRecord`. A research run
+		shares the session mechanics — argv, workspace, record parsing, token
+		accounting — but none of the plan shape, so it goes through this thinner door.
+		The caller builds ``argv`` with :meth:`build_argv` and owns the goal text; this
+		method owns the process, the record it left, and the tokens the record
+		reports. The last two elements are the session record's path (``None`` when
+		the run wrote nothing) and the usage total (``None`` when unmeasured —
+		NFR-024's other direction), so the caller records observations without
+		re-globbing or re-parsing.
+		"""
+		exit_code, stdout, stderr, timed_out = await self._invoke(
+			argv, timeout=timeout, session_id=session_id
+		)
+		files = self.session_files(session_id)
+		tokens: int | None = None
+		if files:
+			try:
+				records = await self._read_records(files[0])
+				tokens = parse_usage(records, self.spec)
+			except HarnessSessionUnreadable:
+				tokens = None
+		return exit_code, stdout, stderr, timed_out, files[0] if files else None, tokens
 
 	# ------------------------------------------------------- the extra attempts
 

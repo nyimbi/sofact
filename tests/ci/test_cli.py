@@ -585,7 +585,7 @@ class TestMisconfiguration:
 
 class TestLoadSpecs:
 	def test_the_built_in_table_is_untouched(self) -> None:
-		assert set(SPECS) == {"dsh", "pi"}
+		assert set(SPECS) == {"dsh", "pi", "pi-research"}
 
 	def test_a_round_trip_preserves_every_field(self, tmp_path: Path) -> None:
 		"""Derived from the real spec, so this cannot drift from the dataclass."""
@@ -713,3 +713,62 @@ class TestTheDocumentedTable:
 
 		assert "{goal}" in spec.argv
 		assert "{session_id}" in spec.argv
+
+
+# --------------------------------------------------------------------------- #
+# the research verb (FR-167)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheResearchVerb:
+	"""``sofact research`` dispatches a research run and reports its artefacts.
+
+	The verb's exit code follows the dispatch rule: the run is responsible for
+	leaving a report, so a session that did not complete — or completed without one
+	— is a red light, while a report with no sources is a measured fact printed in
+	warning colour rather than a failure.
+	"""
+
+	def _configure_research(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		spec = base_spec(tmp_path, mode, name="pi-research")
+		table = tmp_path / "harnesses.json"
+		table.write_text(
+			json.dumps({"harnesses": {spec.name: spec_json(spec)}}),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_HARNESS_SPECS", str(table))
+
+	def test_research_without_a_goal_says_so(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		result = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert result.exit_code == 1
+		assert "no goal yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_completed_research_run_prints_its_sources(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert result.exit_code == 0, result.output
+		assert "completed" in result.output
+		assert "report" in result.output
+		assert "sources 3" in result.output
+		assert "https://example.com/one" in result.output
+		assert "searches 5" in result.output
+
+	def test_a_truncated_loop_is_reported_as_unmeasured(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research-stub")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert result.exit_code == 0, result.output
+		assert "searches 2" in result.output
+		assert "no source URLs were recorded" in result.output
+		assert "not research that found nothing" in result.output
