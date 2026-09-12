@@ -167,6 +167,14 @@ if it actually did work, because they share one local model and a contention art
 be blamed on the harness. `probe --quick` skips the ones needing a second child and records
 the skip in each row's own reason.
 
+One row was decided against the real harness and the answer is not flattering to it:
+measured live at `pi` 0.85.1, the `--tools read,write,edit` allowlist **does not confine
+the working directory** — a child told to escape wrote one directory up, so `sandboxable`
+reads `absent` for `pi`'s default confinement. An allowlist filters which tools exist, not
+where they reach; real confinement for `pi` needs a filesystem boundary (FR-019), not a
+flag. This is what the matrix is for: the row is a measurement, and a harness whose help
+text suggests otherwise is exactly the case FR-148 exists to catch.
+
 ## Develop
 
 ```sh
