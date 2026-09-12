@@ -604,7 +604,7 @@ def first_clause_bearing(plan: GoalPlan) -> GoalStep:
 	raise AssertionError("the plan carries no clause-bearing step")
 
 
-class TestTheDeclarationTriggersVerification:
+class TestWhatTriggersVerification:
 	async def test_a_declaration_runs_the_oracles_and_renders_a_verdict(
 		self, home: Path, tmp_path: Path
 	) -> None:
@@ -658,24 +658,45 @@ class TestTheDeclarationTriggersVerification:
 		assert precision.corroborated == 0, "a refuted claim must not be counted as corroborated"
 		assert precision.precision == 0.0
 
-	async def test_a_dispatch_that_declares_nothing_triggers_nothing(
+	async def test_a_completed_dispatch_is_checked_without_a_declaration(
 		self, home: Path, tmp_path: Path
 	) -> None:
-		"""A failed or silent session asserts nothing about the artefact, so there is
-		nothing to check and no verdict is invented for it."""
+		"""The trigger is a *completed session*, not a producer's word (FR-163).
+
+		``pi`` has no completion event at all, so a trigger gated on a declaration never
+		fires for the default harness: measured live, five real ``pi`` sessions built a
+		working module while the run recorded zero evidence rows and still exited 0.
+		"""
 		service, plan = await plan_and_service(home, tmp_path, "plain", commands="exit 0")
 		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
-		assert not record.declared_complete
-		assert await service.check_declaration(plan.id, record.id) is None
+		assert not record.declared_complete, "this harness cannot declare completion at all"
+		assert record.outcome is StepOutcome.COMPLETED
 		counts = Counter(kinds(service))
-		assert counts["claim.declared"] == 0
+		assert counts["claim.declared"] == 0, "nothing was declared, so nothing is claimed"
+		assert counts["evidence.recorded"] > 0
+		assert counts["verdict.rendered"] == 1
+		report = await service.latest_report(plan.contract_id)
+		assert report is not None
+		assert report.outcome is VerdictOutcome.SATISFIED
+
+	async def test_a_failed_session_is_not_checked(self, home: Path, tmp_path: Path) -> None:
+		"""The other half of the rule, unchanged: an incomplete session asserts nothing.
+
+		A verdict there would be about an artefact the producer was still changing, and
+		inventing one is the manufactured signal ADR-0015 refuses.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "fail", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		assert record.outcome is StepOutcome.FAILED
+		assert await service.check_dispatch(plan.id, record.id) is None
+		counts = Counter(kinds(service))
 		assert counts["evidence.recorded"] == 0
 		assert counts["verdict.rendered"] == 0
 
 	async def test_an_unknown_dispatch_is_refused(self, home: Path, tmp_path: Path) -> None:
 		service, plan = await plan_and_service(home, tmp_path, "complete")
 		with pytest.raises(KeyError, match="has no dispatch"):
-			await service.check_declaration(plan.id, "01920000-0000-7000-8000-0000000000ff")
+			await service.check_dispatch(plan.id, "01920000-0000-7000-8000-0000000000ff")
 
 	async def test_precision_now_measures_instead_of_reporting_zero(
 		self, home: Path, tmp_path: Path

@@ -73,12 +73,17 @@ uv run sofact precision                        # did the claims survive verifica
 `probe` is not optional: dispatching against an assumed capability is exactly what
 FR-148 forbids, so `dispatch` refuses until a profile exists.
 
-A producer's declaration is **not evidence and does trigger a check**. When a session
-declares completion, SoFact runs that contract's oracles in the *producer's* workspace,
-records the claim and the verdict as two separate rows, and keeps going only if the
-clauses came out clean (FR-138/FR-163). So `dispatch` exits **non-zero** when the
-contract is refuted — or insufficient, because an artefact nothing could check is not a
-verified one — and `verify` remains the command that renders a verdict on demand (P6).
+A producer's declaration is **not evidence, and it is not the trigger either**. Whenever a
+dispatched session **completes**, SoFact runs that contract's oracles in the *session's*
+workspace and records the verdict; when the harness also declares completion, the claim is
+recorded as its own separate row, first (FR-138/FR-163). Gating that check on a declaration
+makes the default harness unverifiable — `pi` has no completion event at all — so a run
+that built working code would record no evidence and still exit `0`. So `dispatch` exits
+**non-zero** when nothing was verified, when a step was refuted by its own check, or when a
+plan that ran to its end left the contract unclean (including *insufficient*: an artefact
+nothing could check is not a verified one). A run you capped with `--max-steps` is progress
+rather than failure and exits `0` unless a step it ran was refuted. `verify` remains the
+command that renders a verdict on demand (P6).
 
 `pi` and `dsh` ship as specs. To point SoFact at another harness without editing
 `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
@@ -116,6 +121,12 @@ Default: `deepseek-v4.1-flash:cloud` via Ollama's OpenAI-compatible endpoint —
 1M-token context model served through Ollama's cloud, not locally. Override with
 `SOFACT_MODEL` / `SOFACT_BASE_URL`. See
 [ADR-0002](docs/adr/0002-model-access-is-one-openai-compatible-interface.md) for what that costs in hermeticity.
+
+For a real coding session the model must be one the **harness** can resolve, not merely one
+Ollama serves: `pi` validates `--model` against its own registry and refuses a local tag it
+does not list (`Error: Model "…" not found`, exit 1, no session record). `qwen3.6:35b-mlx`
+is what the end-to-end run used — `SOFACT_MODEL=qwen3.6:35b-mlx sofact probe` before
+dispatching, since a bad model is a child-process failure the probe catches.
 
 ## Develop
 

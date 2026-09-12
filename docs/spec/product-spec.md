@@ -1391,21 +1391,41 @@ it does not satisfy the half that keys a cache by the content of the change and 
 oracle definition. That second half remains **unimplemented** and must be reported as
 such rather than inferred from the first.
 
-**FR-163** *(a declaration triggers a check on the whole contract, in the producer's
-workspace)* Where a producer declares completion, SoFact must run that contract's oracles
-**in the workspace the producer worked in** — a verdict about a different tree is a
-verdict about an artefact nobody claimed — and must record the **claim** and the
-**verdict** as separate rows, claim first, so that a disagreement between the producer's
-word and the artefact's behaviour stays legible rather than being resolved by whichever
-ran last (FR-138). The check must run **every executable clause of the contract**, not
-merely the clauses the declaring step covers: under FR-162's run scoping, a partial
+**FR-163** *(a completed session triggers a check on the whole contract, in the session's
+workspace)* SoFact must run that contract's oracles **in the workspace the session worked
+in** — a verdict about a different tree is a verdict about an artefact no session wrote —
+whenever a dispatched session **completes**, that is, when its process exits without timing
+out. Where the harness also declares completion, the **claim** and the **verdict** must be
+recorded as separate rows, claim first, so that a disagreement between the producer's word
+and the artefact's behaviour stays legible rather than being resolved by whichever ran last
+(FR-138). **The trigger is the session's outcome, not the producer's word.** Gating the
+check on a declaration makes the *default* harness unverifiable: `pi` has no completion
+event at all (measured at 0.85.1, [S19]), so a declaration-gated trigger never fires, and a
+run of five real sessions that produced working code recorded **zero** evidence rows while
+`dispatch --all` still exited `0`. A declaration is therefore an *additional* recorded
+signal, never a precondition. The check must run **every executable clause of the
+contract**, not merely the clauses the step covers: under FR-162's run scoping, a partial
 report would mark every unrun clause `INSUFFICIENT` and thereby destroy the corroboration
-of steps that were verified a moment earlier. A dispatch that declared nothing (a failed
-or budget-exhausted session) asserts nothing about the artefact and must trigger no check
-at all — inventing a verdict for it manufactures a signal the producer never gave. Any
-build command that dispatched against a refuted or unverified contract must **exit
-non-zero**, because a green exit code for an unverified artefact is the same lie at the
-shell boundary.
+of steps that were verified a moment earlier. A session that did **not** complete (failed,
+refused, or budget-exhausted) was still changing the tree and must trigger no check at all —
+inventing a verdict for it manufactures a signal the producer never gave. A build command
+must **exit non-zero** when nothing was verified, when a step was refuted by its own check,
+or when a plan that ran to its end left the contract not clean — a green exit code for an
+unverified artefact is the same lie at the shell boundary. A run the operator **capped**
+(`--max-steps`) is progress rather than failure and may exit `0`, provided no step it ran
+was refuted; the contract line still reports how much of the contract holds.
+
+**The trigger was on the wrong signal, and only a live run could show it.** Two defects in
+this section were found by executing the product rather than by reading it: the verdict was
+monotone across the log's history, and the trigger waited for a declaration. The second one
+survived its own test suite, because a synthetic harness that *declares* completion is a
+harness whose declaration is exactly what a declaration-gated trigger needs — the suite
+measured the rule and never measured the default harness's inability to feed it. The live
+run against `pi` (five sessions, `qwen3.6:35b-mlx` via ollama, real files written, the
+contract's own oracle green by hand) recorded `5 step.dispatched`, `0 evidence.recorded`,
+`0 verdict.rendered`, and exit status `0`. A capability the trigger depends on must be
+treated like any other capability: if the default harness cannot supply it, the trigger
+must not depend on it.
 
 ---
 
@@ -1646,11 +1666,17 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `dispatch`, `verify`, `integrity`, `precision`, `claim`, `dimensions`, `draft`,
 `status`, `ledger`, `verify-ledger`, `run`. The planned verbs remain the target
 surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is FR-142's wave
-scheduler (and FR-163's trigger: it checks the producer's declaration against the
-contract and exits non-zero when the result is not clean), and `integrity`/`precision`
+scheduler (and FR-163's trigger: **a completed session** is checked against the contract,
+and the command exits non-zero when nothing was verified, when a step was refuted, or when
+a plan that ran to its end left the contract not clean), and `integrity`/`precision`
 are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
 `run` + `verify` re-checks an artefact after a repair (§9.6, FR-162).
 
+- **`SOFACT_MODEL`** (or `dispatch --model`) — the model id handed to the harness. It is
+  resolved by the **harness's own registry**, not by the model server: `pi` refuses a local
+  ollama tag it does not list, exits 1, and writes no session record. So a tier is a
+  harness registry entry (FR-132), and the probe is what catches a bad one — the check
+  happens in the child, which is why it is measured rather than validated on SoFact's side.
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an

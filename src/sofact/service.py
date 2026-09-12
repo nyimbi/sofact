@@ -434,26 +434,30 @@ class FactoryService:
 		)
 		return report
 
-	async def check_declaration(
+	async def check_dispatch(
 		self,
 		plan_id: str,
 		dispatch_id: str,
 		*,
 		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
 	) -> VerificationReport | None:
-		"""Run P6 because a producer declared completion (FR-138).
+		"""Run P6 over the workspace a **completed** dispatch leaves behind (FR-163).
 
-		The declaration is the *trigger*, never the input: the verdict is rendered by
+		The trigger is the session's own outcome, never the producer's word: a declaration
+		is recorded as its own row and is not an input, because the verdict comes from
 		:func:`sofact.verification.verify`, whose signature has nowhere to put a claim.
-		Returns ``None`` when the dispatch declared nothing — a failed or
-		budget-exhausted session is not an assertion about the artefact, so there is no
-		claim to check, and the run's own outcome already says what happened.
+		Gating this on a declaration made the *default* harness unverifiable — ``pi`` has no
+		completion event, so nothing was ever checked while ``dispatch`` still exited 0.
 
-		The oracles run in the *dispatch's* workspace, because that is where the producer
-		worked; checking a different tree would produce a verdict about an artefact nobody
-		claimed. A contract whose clauses are all unexecutable runs zero commands and still
-		renders a verdict, all ``INSUFFICIENT`` — the absence of a report and a report that
-		corroborates nothing are different facts, and ``declaration_precision`` must be
+		Returns ``None`` when the session did not complete. A failed or budget-exhausted
+		dispatch was still changing the tree, and a verdict on a half-built artefact is a
+		manufactured signal — the run's own outcome already says what happened.
+
+		The oracles run in the *dispatch's* workspace, because that is where the session
+		worked; checking a different tree would produce a verdict about an artefact no
+		session wrote. A contract whose clauses are all unexecutable runs zero commands and
+		still renders a verdict, all ``INSUFFICIENT`` — the absence of a report and a report
+		that corroborates nothing are different facts, and ``declaration_precision`` must be
 		able to tell them apart.
 		"""
 		plan = await self.plan_by_id(plan_id)
@@ -461,7 +465,7 @@ class FactoryService:
 		record = state.dispatch(dispatch_id)
 		if record is None or record.plan_id != plan.id:
 			raise KeyError(f"plan {plan_id} has no dispatch {dispatch_id}")
-		if not record.declared_complete:
+		if record.outcome is not StepOutcome.COMPLETED:
 			return None
 
 		contract = await self.contract_by_id(plan.contract_id)
@@ -691,11 +695,13 @@ class FactoryService:
 					).model_dump(mode="json"),
 				},
 			)
-			# FR-138: the declaration triggers P6. The claim is written down first and the
-			# verdict second, as separate rows, so a disagreement between the producer's
-			# word and the artefact's behaviour stays legible in the log rather than being
-			# resolved by whichever ran last.
-			await self.check_declaration(plan.id, record.id)
+		# FR-138 keeps the two signals apart: the claim is written down as its own row, so a
+		# disagreement between the producer's word and the artefact's behaviour stays legible
+		# rather than being resolved by whichever ran last. FR-163 is what makes a verdict
+		# happen at all — the trigger is the session *completing*, because the default
+		# harness has no way to declare anything.
+		if record.outcome is StepOutcome.COMPLETED:
+			await self.check_dispatch(plan.id, record.id)
 		return record
 
 	async def dispatch_plan(
@@ -712,8 +718,8 @@ class FactoryService:
 
 		A step may start only once every step it depends on has *completed* **and** not been
 		refuted by a verdict: FR-142 says a dependent must not start on an "unverified"
-		dependency, so a producer's claim is a trigger to check rather than a licence to
-		proceed. A wave also ends the run when a step did not complete. ``concurrent`` is
+		dependency, and a completed session is checked for exactly that reason. A wave also
+		ends the run when a step did not complete. ``concurrent`` is
 		off by default and is not a performance setting: two sessions editing one workspace
 		is a merge conflict, and whether a wave may run together is a question about
 		worktrees (FR-141) that the operator owns, not the scheduler.

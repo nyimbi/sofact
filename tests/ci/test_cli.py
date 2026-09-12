@@ -274,6 +274,49 @@ class TestConfiguredHarnesses:
 		assert "failed" in dispatched.output
 		assert "a declaration is not a finding" in dispatched.output
 
+	def test_a_run_that_verified_nothing_exits_nonzero(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""An exit code is the contract: a run that checked nothing is not a pass.
+
+		Measured before this rule existed: ``dispatch --all`` against a real harness exited
+		0 having recorded zero evidence rows, because the trigger waited on a completion
+		declaration the default harness cannot make.
+		"""
+		configure(tmp_path, monkeypatch, mode="fail")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		assert dispatched.exit_code == 1
+		assert "no verdict" in dispatched.output
+		assert "not checked" in dispatched.output
+
+	def test_a_capped_run_reports_progress_rather_than_failure(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``--max-steps`` is a resumable workflow, so stopping early is not a failure.
+
+		The oracle here is ``false`` on purpose, so the contract is *not* clean; the single
+		step that ran covers no clause and therefore refuted nothing. The run made progress,
+		the contract line says how much holds, and the exit code stays 0.
+		"""
+		configure(tmp_path, monkeypatch, mode="goal")
+		conversation(home)
+		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "false"])
+		assert contract.exit_code == 0, contract.output
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		dispatched = RUNNER.invoke(
+			app, ["--home", str(home), "dispatch", "--all", "--max-steps", "1"]
+		)
+		assert dispatched.exit_code == 0, dispatched.output
+		assert "contract violated" in dispatched.output
+		assert "does not hold yet" in dispatched.output
+
 
 # --------------------------------------------------------------------------- #
 # misconfiguration — a message, not a traceback

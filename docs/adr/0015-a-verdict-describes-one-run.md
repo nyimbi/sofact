@@ -1,6 +1,8 @@
 # 15. A verdict describes one run, and a declaration triggers the check
 
-* Status: Accepted
+* Status: Accepted; **in part superseded by [ADR-0017](0017-a-completed-session-is-checked.md)**
+  — the trigger is now the session's outcome rather than a declaration. Everything here
+  about run scoping still stands.
 * Date: 2026-09-12
 * Deciders: operator
 * Supersedes: none (it supersedes a rule that lived only in code and never had a record)

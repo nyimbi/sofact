@@ -64,6 +64,14 @@ evidence that the adapter boundary (FR-058) is achievable without forking.
 - `--provider`, `--model <pattern>` (`provider/id`, optional `:thinking` suffix),
   `--models`, `--list-models [search]`.
 - `--thinking <off|minimal|low|medium|high|xhigh|max>`.
+- **`--model` is resolved against `pi`'s own registry, not against the provider.** A model
+  id that ollama serves but `pi` does not list is refused outright — measured at 0.85.1:
+  `--model qwen3.6-coding:latest` (present in `ollama list`, 19 GB) exits 1 with
+  `Error: Model "qwen3.6-coding:latest" not found. Use --list-models to see available
+  models`, and writes no session record at all. The `ollama` provider advertises seven
+  models, so a local build must name one of them (`qwen3.6:35b-mlx` was used for the live
+  end-to-end run). Consequence for FR-132's model tiering: a tier is a *harness* registry
+  entry, and the probe is what catches a bad one, because the check happens in the child.
 
 ### Introspection and lifecycle
 

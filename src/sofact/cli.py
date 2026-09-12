@@ -24,7 +24,7 @@ from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
-from sofact.service import FactoryService
+from sofact.service import FactoryService, refuted_steps
 from sofact.views import (
 	ClauseKind,
 	DispatchRecord,
@@ -602,19 +602,40 @@ async def _dispatch(
 	for record in records:
 		_print_dispatch(record)
 
-	# A step can now complete *and* be refuted: the declaration triggered P6 and the
-	# oracles disagreed. Exiting 0 on that would hand a script a green light for an
-	# artefact that failed its own contract, so the verdict decides the exit code —
-	# and an unrun or unexecutable contract counts as unverified, not as passing.
+	# The exit code answers one question: did anything this run was responsible for break?
+	# A step that failed, a step whose own clauses the oracles now refute, or a plan that
+	# ran to the end with the contract not clean — each is a red light. A run the operator
+	# capped on purpose is not: it stopped early by request, so progress exits 0, the
+	# refutation check still applies, and the contract line above says how much holds.
 	report = await svc.latest_report(plan.contract_id)
-	if report is not None:
+	if report is None:
 		typer.secho(
-			f"\n  contract {report.outcome.value}: "
-			f"{len(report.satisfied)} of {len(report.verdicts)} clauses "
-			"hold (FR-138: a declaration triggers verification, it does not replace it).",
-			fg=_OUTCOME_STYLE[report.outcome],
+			"\n  no verdict: no session completed, so no oracle ran. An unrun contract is "
+			"not a passing one (FR-001).",
+			fg="red",
 		)
-	if report is not None and not report.is_clean:
+		raise typer.Exit(code=1)
+	typer.secho(
+		f"\n  contract {report.outcome.value}: "
+		f"{len(report.satisfied)} of {len(report.verdicts)} clauses hold "
+		"(FR-138: a declaration can trigger verification, it can never satisfy it).",
+		fg=_OUTCOME_STYLE[report.outcome],
+	)
+	refuted = refuted_steps(plan, report)
+	ran_the_whole_plan = step is None and max_steps is None and len(records) == len(plan.steps)
+	if any(record.step_id in refuted for record in records):
+		typer.secho(
+			"  a step was refuted: a clause it covers does not hold after its own session.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	if not report.is_clean and not ran_the_whole_plan:
+		typer.secho(
+			f"  stopped after {len(records)} of {len(plan.steps)} step(s); the contract does "
+			"not hold yet, and nothing that ran was refuted.",
+			fg="yellow",
+		)
+	if ran_the_whole_plan and not report.is_clean:
 		raise typer.Exit(code=1)
 	if any(r.outcome is not StepOutcome.COMPLETED for r in records):
 		raise typer.Exit(code=1)
@@ -630,11 +651,6 @@ def _print_dispatch(record: DispatchRecord) -> None:
 	typer.secho(f"      argv: {' '.join(record.argv[:6])} …", fg="bright_black")
 	if record.tokens_observed is not None:
 		typer.echo(f"      output tokens: {record.tokens_observed}")
-	if record.declared_complete:
-		typer.secho(
-			f"      declared complete: {record.declaration_note or '(no note)'}",
-			fg="magenta",
-		)
 	if record.capability_loss is not None:
 		typer.secho(f"      {record.capability_loss}", fg="yellow")
 	if record.budget_violations:
@@ -644,10 +660,26 @@ def _print_dispatch(record: DispatchRecord) -> None:
 		)
 	if record.stderr_tail:
 		typer.secho(f"      stderr: {record.stderr_tail.strip()[:300]}", fg="red")
-	typer.secho(
-		"      a declaration is not a finding; run `sofact verify` for the verdict.",
-		fg="bright_black",
-	)
+	if record.declared_complete:
+		typer.secho(
+			f"      declared complete: {record.declaration_note or '(no note)'}",
+			fg="magenta",
+		)
+		typer.secho(
+			"      a declaration is not a finding; the oracles decide, and they have run.",
+			fg="bright_black",
+		)
+	elif record.outcome is StepOutcome.COMPLETED:
+		typer.secho(
+			"      the session completed, so its artefact was checked (FR-163); the verdict "
+			"is below.",
+			fg="bright_black",
+		)
+	else:
+		typer.secho(
+			"      not checked: an incomplete session asserts nothing about the artefact.",
+			fg="bright_black",
+		)
 
 
 @app.command()
