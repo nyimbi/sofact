@@ -492,6 +492,14 @@ async def _probe(
 			fg="red",
 		)
 		raise typer.Exit(code=1)
+	if profile.model_resolved is ProbeOutcome.ABSENT:
+		typer.secho(
+			f"\n  the harness cannot resolve the model {profile.model!r}, so every dispatch "
+			"would fail before any work started -- fix SOFACT_MODEL (or --model) and probe "
+			"again (FR-148).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
 
 
 def _print_profile(profile: HarnessProfile, *, tools: str) -> None:
@@ -502,6 +510,7 @@ def _print_profile(profile: HarnessProfile, *, tools: str) -> None:
 	}
 	typer.secho(f"\n{profile.name} probe @ {profile.command[0]}", fg="cyan", bold=True)
 	typer.echo(f"  version {profile.version or 'unknown'}")
+	typer.echo(f"  model   {profile.model or 'unrecorded'}")
 	typer.echo(f"  tools   {tools}")
 	for finding in profile.findings:
 		typer.secho(
@@ -588,6 +597,14 @@ async def _dispatch(
 			"single-shot, and every record will say so.",
 			fg="yellow",
 		)
+	if profile.model_resolved is ProbeOutcome.ABSENT:
+		typer.secho(
+			f"{resolved} cannot resolve the model {profile.model!r}: this is a "
+			"model-resolution failure and not a producer failure, so every step would be "
+			"refused rather than dispatched. Fix SOFACT_MODEL (or --model) and probe again.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
 
 	if not all_steps and step is None:
 		typer.secho(
@@ -680,6 +697,11 @@ def _print_dispatch(record: DispatchRecord) -> None:
 		fg=colour,
 	)
 	typer.secho(f"      argv: {' '.join(record.argv[:6])} …", fg="bright_black")
+	if record.note and record.outcome is StepOutcome.NOT_DISPATCHED:
+		# For a step that never ran, the note *is* the fact: without it the operator sees
+		# `not_dispatched` and no reason, and a refusal whose reason is invisible is
+		# indistinguishable from a bug.
+		typer.secho(f"      {record.note}", fg="red")
 	if record.tokens_observed is not None:
 		typer.echo(f"      output tokens: {record.tokens_observed}")
 	if record.capability_loss is not None:
@@ -704,6 +726,11 @@ def _print_dispatch(record: DispatchRecord) -> None:
 		typer.secho(
 			"      the session completed, so its artefact was checked (FR-163); the verdict "
 			"is below.",
+			fg="bright_black",
+		)
+	elif record.outcome is StepOutcome.NOT_DISPATCHED:
+		typer.secho(
+			"      nothing ran, so there is no artefact and nothing to check.",
 			fg="bright_black",
 		)
 	else:

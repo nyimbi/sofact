@@ -497,6 +497,126 @@ class TestProbe:
 		assert profile.is_usable is True
 		assert profile.observation(HarnessCapability.TELEMETRY) is ProbeOutcome.CONFIRMED
 
+	async def test_the_profile_records_the_model_it_was_probed_with(self, tmp_path: Path) -> None:
+		"""A profile describes one *configuration*, and the model is part of it.
+
+		Without this the finding could not be applied to the run it is supposed to gate:
+		"this harness works" is a claim about a model as much as about a binary.
+		"""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		assert profile.model == "synthetic-model"
+
+
+class TestModelResolution:
+	"""MODEL_RESOLVED: the one row that is decidable in *both* directions.
+
+	A harness that resolves its model against its own registry names the failure in its
+	own words, so a refusal is a positive observation (ABSENT) and a clean run that left
+	a record is a positive observation of the opposite (CONFIRMED). Neither is a guess.
+	"""
+
+	async def test_a_clean_run_resolves_the_model(self, tmp_path: Path) -> None:
+		profile = await adapter_for(tmp_path, "complete").probe()
+		assert profile.model_resolved is ProbeOutcome.CONFIRMED
+
+	async def test_a_refusal_is_quoted_verbatim(self, tmp_path: Path) -> None:
+		"""The reason must quote the child, or the operator cannot act on it."""
+		profile = await adapter_for(tmp_path, "badmodel-always").probe()
+		assert profile.model_resolved is ProbeOutcome.ABSENT
+		finding = profile.finding(HarnessCapability.MODEL_RESOLVED)
+		assert finding is not None
+		assert "not found. Use --list-models" in finding.observed
+		assert "registry" in finding.observed
+
+	async def test_a_spec_with_no_declared_pattern_stays_inconclusive(self, tmp_path: Path) -> None:
+		"""Silence is not success: without a declared string the probe cannot read the failure."""
+		spec = dataclasses.replace(base_spec(tmp_path, "badmodel-always"), model_error_pattern="")
+		profile = await make_adapter(tmp_path, spec).probe()
+		assert profile.model_resolved is ProbeOutcome.INCONCLUSIVE
+		finding = profile.finding(HarnessCapability.MODEL_RESOLVED)
+		assert finding is not None
+		assert "does not know how to read" in finding.observed
+
+	async def test_an_undeclared_failure_is_not_blamed_on_the_model(self, tmp_path: Path) -> None:
+		"""A non-zero exit with no refusal string is unattributed, and must say so."""
+		profile = await adapter_for(tmp_path, "fail").probe()
+		assert profile.model_resolved is ProbeOutcome.INCONCLUSIVE
+		finding = profile.finding(HarnessCapability.MODEL_RESOLVED)
+		assert finding is not None
+		assert "unattributed" in finding.observed
+
+	async def test_a_clean_exit_with_no_record_resolves_nothing(self, tmp_path: Path) -> None:
+		"""Exiting 0 is not evidence that the model was accepted and did work."""
+		profile = await adapter_for(tmp_path, "silent").probe()
+		assert profile.model_resolved is ProbeOutcome.INCONCLUSIVE
+
+	async def test_every_capability_including_this_one_is_reported(self, tmp_path: Path) -> None:
+		profile = await adapter_for(tmp_path, "complete").probe()
+		assert len(profile.findings) == len(HarnessCapability) == 10
+
+	async def test_dispatch_refuses_when_the_profile_watched_the_refusal(
+		self, tmp_path: Path, plan: GoalPlan
+	) -> None:
+		"""The attribution the operator needs: not a producer failure, and nothing ran.
+
+		Before this row existed, a refused model surfaced as a `pi` session that exited 1
+		with no record -- indistinguishable from a producer that tried and failed, and
+		attributed to the wrong party in every report built on it.
+		"""
+		adapter = adapter_for(tmp_path, "badmodel-once")
+		profile = await adapter.probe()
+		assert profile.model_resolved is ProbeOutcome.ABSENT
+		assert (tmp_path / ".calls").read_text() == "1", "the probe consumed the refusal"
+
+		record = await adapter.dispatch(_step(plan, 0), plan, profile=profile)
+		assert record.outcome is StepOutcome.NOT_DISPATCHED
+		assert record.exit_code is None, "no session was started at all"
+		assert record.session_path is None
+		assert "model-resolution failure and not a producer failure" in (record.note or "")
+		assert "synthetic-nonesuch:latest" in (record.note or "")
+		assert (tmp_path / ".calls").read_text() == "1", "the gate refused before the child ran"
+
+	async def test_dispatch_refuses_a_profile_measured_with_another_model(
+		self, tmp_path: Path, plan: GoalPlan
+	) -> None:
+		"""A capability finding is about the configuration that was measured, not the name."""
+		probed = adapter_for(tmp_path, "complete")
+		profile = await probed.probe()
+		other = ConfiguredHarnessAdapter(
+			base_spec(tmp_path, "complete"),
+			workspace=probed.workspace,
+			session_dir=tmp_path,
+			model="a-different-model",
+		)
+		record = await other.dispatch(_step(plan, 0), plan, profile=profile)
+		assert record.outcome is StepOutcome.NOT_DISPATCHED
+		assert "synthetic-model" in (record.note or "")
+		assert "a-different-model" in (record.note or "")
+		assert record.session_path is None
+
+	async def test_an_inconclusive_row_does_not_stop_the_run(
+		self, tmp_path: Path, plan: GoalPlan
+	) -> None:
+		"""FR-153: an undecided row is reported, not promoted to a refusal."""
+		adapter = adapter_for(tmp_path, "fail")
+		profile = await adapter.probe()
+		assert profile.model_resolved is ProbeOutcome.INCONCLUSIVE
+		record = await adapter.dispatch(_step(plan, 0), plan, profile=profile)
+		assert record.outcome is not StepOutcome.NOT_DISPATCHED
+		assert record.exit_code == 7
+		assert "could not decide whether the harness resolves" in (record.note or "")
+
+	async def test_a_profile_with_no_model_recorded_gates_nothing(
+		self, tmp_path: Path, plan: GoalPlan
+	) -> None:
+		"""Rows written before this field existed must stay readable, not refused."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		legacy = profile.model_copy(update={"model": ""})
+		record = await adapter_for(tmp_path, "complete").dispatch(
+			_step(plan, 0), plan, profile=legacy
+		)
+		assert record.outcome is StepOutcome.COMPLETED
+
 
 # --------------------------------------------------------------------------- #
 # dispatch

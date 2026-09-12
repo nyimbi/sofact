@@ -382,6 +382,87 @@ class TestTheToolSet:
 		assert "step.dispatched" not in refused.output
 
 
+class TestTheModelIsPartOfTheConfiguration:
+	"""The probe names the model it measured, and a refusal is a refusal to dispatch.
+
+	A model the harness cannot resolve produced a session that exited non-zero with no
+	record -- the same bytes as a producer that tried and failed. The two are different
+	facts, and the operator is the one who has to act on the difference.
+	"""
+
+	def test_the_probe_reports_the_model_it_measured(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		monkeypatch.setenv("SOFACT_MODEL", "qwen3.6:35b-mlx")
+		result = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert result.exit_code == 0, result.output
+		assert "model   qwen3.6:35b-mlx" in result.output, result.output
+		assert "model_resolved" in result.output, "the row must be reported like any other"
+
+	def test_a_refused_model_fails_the_probe_and_says_which_party_is_at_fault(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch, mode="badmodel-once")
+		monkeypatch.setenv("SOFACT_MODEL", "synthetic-nonesuch:latest")
+		result = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert result.exit_code == 1, result.output
+		assert "cannot resolve the model" in result.output
+		assert "fix SOFACT_MODEL" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_dispatched_refusal_names_the_model_not_the_producer(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Dispatch must attribute it before it starts, not after a session fails."""
+		configure(tmp_path, monkeypatch, mode="badmodel-once")
+		monkeypatch.setenv("SOFACT_MODEL", "synthetic-nonesuch:latest")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		probed = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert probed.exit_code == 1, probed.output
+
+		refused = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		assert refused.exit_code == 1, refused.output
+		assert "model-resolution failure and not a producer failure" in refused.output
+		assert "synthetic-nonesuch:latest" in refused.output
+		assert "step.dispatched" not in refused.output
+
+	def test_a_refusal_reached_through_the_adapter_is_printed(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The CLI gate catches one refusal; the adapter's gate catches the other.
+
+		A profile measured with a different model is not visible to the preflight check,
+		so the only place its reason reaches the operator is the record's own note.
+		"""
+		configure(tmp_path, monkeypatch, mode="complete")
+		monkeypatch.setenv("SOFACT_MODEL", "a-model-that-was-probed")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		refused = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"dispatch",
+				"--all",
+				"--model",
+				"a-model-nobody-probed",
+			],
+		)
+		assert refused.exit_code == 1, refused.output
+		assert "not_dispatched" in refused.output
+		assert "a-model-that-was-probed" in refused.output
+		assert "a-model-nobody-probed" in refused.output
+		assert "nothing ran, so there is no artefact" in refused.output
+		assert "not checked: an incomplete session" not in refused.output
+
+
 class TestMisconfiguration:
 	def test_an_unknown_harness_is_reported(self, home: Path) -> None:
 		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--harness", "nosuch"])

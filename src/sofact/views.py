@@ -922,6 +922,7 @@ class HarnessCapability(StrEnum):
 	BOOTSTRAP_EMPTY_REPO = "bootstrap_empty_repo"
 	GOAL_SURVIVES_COMPACTION = "goal_survives_compaction"
 	CONTEXT_FILES_DISABLED = "context_files_disabled"
+	MODEL_RESOLVED = "model_resolved"
 
 
 class ProbeOutcome(StrEnum):
@@ -961,6 +962,13 @@ class HarnessProfile(View):
 	findings: tuple[CapabilityFinding, ...]
 	version: NonEmptyStr | None = None
 	manifest_path: str | None = None
+	model: str = ""
+	"""The model this profile was probed with, empty when the spec names none.
+
+	Recorded because a profile is a statement about one *configuration*, and the model is
+	the slot most likely to be re-pointed between the probe and the dispatch. A default
+	keeps ledger rows written before this field existed readable.
+	"""
 
 	def finding(self, capability: HarnessCapability) -> CapabilityFinding | None:
 		"""The finding for one capability, or ``None`` if it was never probed."""
@@ -984,6 +992,15 @@ class HarnessProfile(View):
 	def non_interactive(self) -> ProbeOutcome:
 		"""Whether the harness can run without an interactive prompt (FR-145)."""
 		return self.observation(HarnessCapability.NON_INTERACTIVE)
+
+	@property
+	def model_resolved(self) -> ProbeOutcome:
+		"""Whether the harness's own registry accepts the configured model.
+
+		Distinct from telemetry, which is about the record's shape: this row is about
+		the *identifier*, and a harness that rejects it fails before any work starts.
+		"""
+		return self.observation(HarnessCapability.MODEL_RESOLVED)
 
 	@property
 	def is_usable(self) -> bool:

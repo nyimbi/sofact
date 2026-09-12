@@ -52,6 +52,23 @@ import time
 session_dir, session_id, mode = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 target = session_dir / f"{session_id}.jsonl"
 
+if mode.startswith("badmodel"):
+	# The harness's own registry rejects the identifier and it exits before writing any
+	# record -- which is what a real harness does, and what makes the failure look like a
+	# producer failure unless the refusal is attributed. `badmodel-once` refuses only on
+	# the first call, so a *probe* can measure the refusal and the dispatch that follows
+	# still has a working child to prove that nothing ran.
+	counter = session_dir / ".calls"
+	seen = int(counter.read_text()) if counter.exists() else 0
+	counter.write_text(str(seen + 1))
+	if seen == 0 or mode.startswith("badmodel-always"):
+		print(
+			'Error: Model "synthetic-nonesuch:latest" not found.'
+			' Use --list-models to see available models.',
+			file=sys.stderr,
+		)
+		sys.exit(1)
+
 if mode.startswith("slow"):
 	if mode.startswith("slow-after-first"):
 		counter = session_dir / ".calls"
@@ -163,6 +180,7 @@ def base_spec(
 		goal_event_types=("goal/created",),
 		goal_entry=GoalEntry.PROMPT,
 		supports_context_file_flag=True,
+		model_error_pattern="not found. Use --list-models",
 		notes="a real subprocess, not a mock",
 	)
 

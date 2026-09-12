@@ -97,6 +97,7 @@ _TUPLE_FIELDS: Final = (
 )
 _STRING_FIELDS: Final = (
 	"completion_reason_value",
+	"model_error_pattern",
 	"notes",
 	"session_glob",
 	"usage_reduce",
@@ -167,6 +168,7 @@ class HarnessSpec:
 	goal_event_types: tuple[str, ...] = ()
 	goal_entry: GoalEntry = GoalEntry.PROMPT
 	supports_context_file_flag: bool = False
+	model_error_pattern: str = ""
 	notes: str = ""
 
 	def __post_init__(self) -> None:
@@ -411,6 +413,7 @@ PI_SPEC: Final = HarnessSpec(
 	goal_event_types=(),
 	goal_entry=GoalEntry.PROMPT,
 	supports_context_file_flag=True,
+	model_error_pattern="not found. Use --list-models",
 	notes=(
 		"Measured 2026-09-12 against pi 0.85.1 with a local ollama model. The session "
 		"record is plain JSONL at <session-dir>/<iso-timestamp>_<session-id>.jsonl with "
@@ -422,7 +425,11 @@ PI_SPEC: Final = HarnessSpec(
 		"prefix. It emits NO completion event and NO goal event, so this adapter can "
 		"never corroborate a declaration and DeclarationPrecision stays unmeasured for "
 		"it -- 'unmeasured', not 'wrong'. This is FR-144's reduced-mode adapter and "
-		"exists to test the interface (FR-058), not to be the production harness."
+		"exists to test the interface (FR-058), not to be the production harness. Its "
+		"--model is resolved against its own curated registry rather than against what "
+		"the model server serves, and a tag it does not list exits 1 with 'Model "
+		'"qwen3.6-coding:latest" not found. Use --list-models to see available models.\', '
+		"hence model_error_pattern. Measured 2026-09-12."
 	),
 )
 """``pi`` as measured: JSONL session record, usage inside ``message``, no completion
@@ -806,9 +813,10 @@ class ConfiguredHarnessAdapter:
 		argv = self.build_argv(goal_text, session_id)
 		assert argv[-1] == goal_text, "probe must dispatch a real goal"
 		entries_before = self._workspace_entries()
-		exit_code, _stdout, _stderr, timed_out = await self._invoke(
+		exit_code, stdout, stderr, timed_out = await self._invoke(
 			argv, timeout=budget, session_id=session_id
 		)
+		child_output = f"{stdout}\n{stderr}"
 
 		files = self.session_files(session_id)
 		records: tuple[dict[str, object], ...] = ()
@@ -911,6 +919,65 @@ class ConfiguredHarnessAdapter:
 				),
 			)
 		)
+		# MODEL_RESOLVED is decidable in *both* directions here, which no other row is: the
+		# harness names its own failure, so a refusal is a positive observation and a clean
+		# run with a record is a positive observation of the opposite. The string is data
+		# (FR-161), so a deployment can teach the probe its harness's wording rather than
+		# wait for a source change.
+		pattern = self.spec.model_error_pattern
+		refusal = next(
+			(line.strip() for line in child_output.splitlines() if pattern and pattern in line),
+			None,
+		)
+		if refusal is not None:
+			model_outcome = ProbeOutcome.ABSENT
+			model_reason = (
+				f"the harness rejected `{self.model}` in its own words -- {refusal!r}. The "
+				"identifier is resolved by the harness's registry, not by the model server, so "
+				"a tag the server serves can still be one the harness refuses"
+			)
+		elif not pattern:
+			model_outcome = ProbeOutcome.INCONCLUSIVE
+			model_reason = (
+				"this harness declares no model-resolution error string, so a clean exit cannot "
+				"be separated from a failure the probe does not know how to read (FR-153)"
+			)
+		elif timed_out:
+			model_outcome = ProbeOutcome.INCONCLUSIVE
+			model_reason = (
+				f"the run did not finish within {budget:.0f}s, so it neither resolved nor "
+				"rejected the model"
+			)
+		elif exit_code != 0:
+			model_outcome = ProbeOutcome.INCONCLUSIVE
+			model_reason = (
+				f"the run exited {exit_code} without the declared refusal string, so the "
+				"failure is unattributed: this may be the model, and it may be anything else"
+			)
+		elif not records:
+			model_outcome = ProbeOutcome.INCONCLUSIVE
+			model_reason = (
+				"the run exited 0 but left no readable session record, so no work was "
+				"witnessed and nothing shows which model did it"
+			)
+		else:
+			model_outcome = ProbeOutcome.CONFIRMED
+			model_reason = (
+				f"`{self.model}` was accepted and the run exited 0 with a readable session record"
+			)
+		findings.append(
+			CapabilityFinding(
+				capability=HarnessCapability.MODEL_RESOLVED,
+				outcome=model_outcome,
+				attempted=(
+					f"dispatched with `--model {self.model}` and read the child's output for "
+					f"the harness's own model-resolution error"
+					if self.spec.model_error_pattern
+					else "no model-resolution error string is configured for this harness"
+				),
+				observed=model_reason,
+			)
+		)
 		# BOOTSTRAP_EMPTY_REPO is observable, because the probe runs with the workspace as
 		# cwd and therefore starts cold on a fresh deployment. The outcome is the predicate
 		# below -- one source of truth -- and the chain only explains the reason it failed.
@@ -983,6 +1050,7 @@ class ConfiguredHarnessAdapter:
 			findings=tuple(findings),
 			version=await self._read_version(),
 			manifest_path=str(files[0]) if files else None,
+			model=self.model,
 		)
 		assert len(profile.findings) == len(HarnessCapability), (
 			f"probe must report on every capability: got {len(profile.findings)} "
@@ -1073,6 +1141,32 @@ class ConfiguredHarnessAdapter:
 				f"profile is for {profile.name!r} but this adapter is {self.spec.name!r}; "
 				"dispatching against the wrong capability record is not a recoverable error"
 			)
+		# The profile is a statement about one *configuration*, and the model is the slot most
+		# likely to have been re-pointed since the probe. A profile measured with a different
+		# model says nothing about this one, and a profile that watched the harness refuse the
+		# model says the run would fail before any work started. Both are attributed here, in
+		# the harness's own words, rather than left to surface as an unexplained exit code.
+		if profile.model and profile.model != self.model:
+			return record(
+				outcome=StepOutcome.NOT_DISPATCHED,
+				mode=DispatchMode.SINGLE_SHOT,
+				note=(
+					f"the recorded profile is for model {profile.model!r} but this dispatch would "
+					f"use {self.model!r}; the capability findings describe the configuration that "
+					"was measured, so probe this one before dispatching against it (FR-148)"
+				),
+			)
+		if profile.model_resolved is ProbeOutcome.ABSENT:
+			finding = profile.finding(HarnessCapability.MODEL_RESOLVED)
+			return record(
+				outcome=StepOutcome.NOT_DISPATCHED,
+				mode=DispatchMode.SINGLE_SHOT,
+				note=(
+					f"the harness could not resolve the model {self.model!r}, so this is a "
+					"model-resolution failure and not a producer failure; nothing was dispatched. "
+					f"Observed: {finding.observed if finding else 'no finding recorded'}"
+				),
+			)
 		mode = DispatchMode.GOAL if profile.supports_goal_dispatch else DispatchMode.SINGLE_SHOT
 		if not profile.is_usable:
 			return record(
@@ -1153,6 +1247,12 @@ class ConfiguredHarnessAdapter:
 			notes.append(
 				"the probe claimed goal mode but this session shows no forced entry; treat "
 				"that capability as unproven rather than acting on it"
+			)
+		if profile.model_resolved is ProbeOutcome.INCONCLUSIVE:
+			notes.append(
+				f"the probe could not decide whether the harness resolves {self.model!r}, so "
+				"this run's outcome is attributed to the producer and an unresolved model "
+				"would look the same (FR-153)"
 			)
 
 		return record(

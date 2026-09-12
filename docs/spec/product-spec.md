@@ -888,19 +888,38 @@ propose a probe; it may not answer one.
 **Which rows one bounded invocation actually decides** (v0.1, measured):
 `non_interactive` (the child either exits or had to be killed), `telemetry` (a
 usage block in the record or none), `context_files_disabled` (the flag either ran
-cleanly or did not), `goal_mode` **on positive evidence only** (FR-153), and
-`bootstrap_empty_repo` **on positive evidence only** — the probe invokes the
-harness with its workspace as `cwd`, so a cold start is counted *before* the child
-runs, and a workspace that is not empty is reported as an unwitnessed capability
-rather than as a failure to bootstrap. Four rows — `sandboxable`, `concurrent`,
-`budget_control`, `goal_survives_compaction` — remain **coverage gaps in the
-probe** and say so in their own reason string, which is a statement about the
-probe and not about the harness. Exactly one row gates anything:
-`non_interactive` refuses dispatch (FR-145). `goal_mode` **downgrades** a step to
-single-shot and records the capability loss rather than refusing it (FR-144). Every
-other row is reported. No capability may be promoted to a gate while its probe
-row still reads `INCONCLUSIVE`, and none may be demoted to a report once it
-decides whether a build can run unattended.
+cleanly or did not), `model_resolved` (FR-164), `goal_mode` **on positive evidence
+only** (FR-153), and `bootstrap_empty_repo` **on positive evidence only** — the
+probe invokes the harness with its workspace as `cwd`, so a cold start is counted
+*before* the child runs, and a workspace that is not empty is reported as an
+unwitnessed capability rather than as a failure to bootstrap. Four rows —
+`sandboxable`, `concurrent`, `budget_control`, `goal_survives_compaction` — remain
+**coverage gaps in the probe** and say so in their own reason string, which is a
+statement about the probe and not about the harness.
+
+**Two rows gate, and they gate differently.** `non_interactive` refuses dispatch
+(FR-145); `model_resolved` also refuses it, but only for the model the refusal was
+measured against (FR-164). `goal_mode` **downgrades** a step to single-shot and
+records the capability loss rather than refusing it (FR-144). Every other row is
+reported. No capability may be promoted to a gate while its probe row still reads
+`INCONCLUSIVE`, and none may be demoted to a report once it decides whether a
+build can run unattended.
+
+**FR-164** The probe must report whether the harness **resolves the configured
+model**, and a refusal must be **attributed before a step runs** rather than left
+to surface as a session that exited non-zero and wrote no record — which is
+byte-for-byte what a producer that tried and failed looks like. The check is a
+measurement, not a validation: the identifier is resolved by the *harness's own
+registry*, not by the model server, so a tag `ollama` serves can be one the
+harness refuses, and only the child can answer. The refusal string is **data on
+the spec** (`model_error_pattern`, FR-161), measured for `pi` as
+`not found. Use --list-models`; a harness that declares none reports
+`INCONCLUSIVE` rather than reading an unattributed failure as a model problem.
+This row is decidable in **both** directions, which no other row is: a positive
+observation of refusal is `ABSENT`, and a clean exit that left a readable record
+is `CONFIRMED` (FR-153). A profile records the model it was probed with, and a
+dispatch whose model differs from the profile's is refused, because a capability
+finding describes the configuration that was measured, not the harness's name.
 
 **FR-149** Harness invocations must be **hermetic**: every flag that could cause a
 session to read operator state, ambient configuration, or network resources must be
@@ -1675,8 +1694,11 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
 - **`SOFACT_MODEL`** (or `dispatch --model`) — the model id handed to the harness. It is
   resolved by the **harness's own registry**, not by the model server: `pi` refuses a local
   ollama tag it does not list, exits 1, and writes no session record. So a tier is a
-  harness registry entry (FR-132), and the probe is what catches a bad one — the check
-  happens in the child, which is why it is measured rather than validated on SoFact's side.
+  harness registry entry (FR-132), and the check happens in the child — which is why it is
+  **measured and then attributed** rather than validated on SoFact's side. The probe
+  records `model_resolved` and the model it measured (FR-164); `probe` and `dispatch` both
+  exit non-zero on a refusal, naming the harness's words for it, so a refused model is
+  never reported as a producer failure.
 - **`--tools`** (or `SOFACT_TOOLS`) — the comma-separated allowlist handed to the
   producer, default `read,write,edit,bash`. The tool set is the whole of what an agent may
   do, so it is operator-tunable rather than a constant in `src/` (FR-156), and the probe

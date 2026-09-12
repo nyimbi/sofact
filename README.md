@@ -132,7 +132,18 @@ For a real coding session the model must be one the **harness** can resolve, not
 Ollama serves: `pi` validates `--model` against its own registry and refuses a local tag it
 does not list (`Error: Model "…" not found`, exit 1, no session record). `qwen3.6:35b-mlx`
 is what the end-to-end run used — `SOFACT_MODEL=qwen3.6:35b-mlx sofact probe` before
-dispatching, since a bad model is a child-process failure the probe catches.
+dispatching.
+
+That refusal is **attributed rather than blamed on the producer**. A session that exits
+non-zero having written no record is byte-for-byte what a producer that tried and failed
+looks like, so the probe asks the question directly and records the answer as the
+`model_resolved` row, quoting the harness's own words; a profile that watched a refusal
+makes `probe` and `dispatch` exit non-zero before anything runs, saying so. The refusal
+string is **data on the spec** (`model_error_pattern`), so pointing SoFact at another
+harness teaches the probe that harness's wording rather than requiring a source change
+(FR-161, FR-164). A profile also records *which* model it measured: dispatch against a
+different one is refused, because "this harness works" is a claim about a configuration,
+not about a name.
 
 ## Develop
 

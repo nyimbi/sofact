@@ -406,6 +406,65 @@ class TestProbeHarness:
 			await registered.probe_harness(None)
 
 
+class TestModelResolutionThroughTheService:
+	"""The preflight an operator actually meets: a refused model, attributed.
+
+	The probe is what measures it (FR-148: capability is attempted, never read off a help
+	page), and the dispatch is what refuses on it. Neither half is useful alone -- a
+	measurement nothing acts on is a note, and a refusal with no measurement is a guess.
+	"""
+
+	async def test_the_probe_records_the_refusal(self, home: Path, tmp_path: Path) -> None:
+		registered = synthetic_service(home, tmp_path, "badmodel-once")
+		profile = await registered.probe_harness(None)
+		assert profile.model_resolved is ProbeOutcome.ABSENT
+		assert profile.model, "the profile names the model it was measured with"
+		assert LedgerKind.CAPABILITY_PROBED.value in kinds(registered)
+
+	async def test_the_dispatch_refuses_rather_than_blaming_the_producer(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A refused model and a failed producer were the same observation before this."""
+		registered = synthetic_service(home, tmp_path, "badmodel-once")
+		profile = await registered.probe_harness(None)
+		assert profile.model_resolved is ProbeOutcome.ABSENT
+		_, contract_id = await elicitation_to_contract(registered)
+		plan = await registered.compile_plan(contract_id)
+		record = await registered.dispatch_step(plan.id, plan.steps[0].id)
+		assert record.outcome is StepOutcome.NOT_DISPATCHED
+		assert record.exit_code is None
+		assert record.session_path is None
+		assert record.declared_complete is False
+		assert "model-resolution failure and not a producer failure" in (record.note or "")
+		assert record.note is not None and profile.model in record.note
+
+	async def test_the_refusal_is_in_the_log_not_only_in_the_return_value(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A refusal a later reader cannot find is not auditable."""
+		registered = synthetic_service(home, tmp_path, "badmodel-once")
+		await registered.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(registered)
+		plan = await registered.compile_plan(contract_id)
+		await registered.dispatch_step(plan.id, plan.steps[0].id)
+		state = await registered.state()
+		dispatches = state.dispatches_for(plan.id)
+		assert len(dispatches) == 1
+		assert dispatches[0].note is not None
+		assert "model-resolution" in dispatches[0].note
+
+	async def test_the_gate_does_not_fire_when_the_model_was_never_refused(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The instrument must not be a blanket refusal: a good model still dispatches."""
+		registered = synthetic_service(home, tmp_path, "complete")
+		assert (await registered.probe_harness(None)).model_resolved is ProbeOutcome.CONFIRMED
+		_, contract_id = await elicitation_to_contract(registered)
+		plan = await registered.compile_plan(contract_id)
+		record = await registered.dispatch_step(plan.id, plan.steps[0].id)
+		assert record.outcome is StepOutcome.COMPLETED
+
+
 # --------------------------------------------------------------------------- #
 # dispatch, and the claim it may carry
 # --------------------------------------------------------------------------- #

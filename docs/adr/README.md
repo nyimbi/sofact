@@ -30,6 +30,7 @@ than argued. Numbering is sequential and never reused.
 | [0015](0015-a-verdict-describes-one-run.md) | A verdict describes one run, and a declaration triggers the check | Accepted |
 | [0016](0016-a-harness-path-names-its-own-envelope.md) | A harness path names its own envelope, and nothing is stripped implicitly | Accepted |
 | [0017](0017-a-completed-session-is-checked.md) | A completed session triggers the check; a declaration is a signal, never a precondition | Accepted |
+| [0018](0018-a-refused-model-is-attributed.md) | A refused model is a measured capability and a gate, attributed in the harness's own words rather than reported as a producer failure | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -50,9 +51,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Six records here answer questions the specification
+Not every decision resolves a `D`. Seven records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and three because the rule each replaces was never written
+about the factory's behaviour, and four because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -63,3 +64,4 @@ down at all and so had no `D` to resolve:
 | [0015](0015-a-verdict-describes-one-run.md) | When a verdict is invalidated: FR-006 carried forward, and the trigger FR-138 was missing. The superseded rule existed only in `verification.py`, so no `D` ever pointed at it |
 | [0016](0016-a-harness-path-names-its-own-envelope.md) | Where a harness path starts. The rule it replaces was a generalization from one harness' wire format, stated as a fact about harnesses, and it failed silently — `telemetry absent` for a record containing a usage block |
 | [0017](0017-a-completed-session-is-checked.md) | What triggers the check. The rule it replaces gated verification on a declaration the *default* harness cannot make, so the default configuration built without verifying and exited `0` — a green light measured against a run that recorded zero evidence rows |
+| [0018](0018-a-refused-model-is-attributed.md) | Which party a failed session is blamed on. The rule it replaces read any non-zero exit with no record as a producer failure, so a model the harness would not resolve was reported as work that was attempted and lost — and the only signal that could tell them apart was already in the child's output, discarded by the probe |
