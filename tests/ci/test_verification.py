@@ -35,14 +35,24 @@ MakeContract = Callable[..., Contract]
 
 PRODUCER = "test-producer"
 
+RUN_ONE = "01920000-0000-7000-8000-000000000001"
+RUN_TWO = "01920000-0000-7000-8000-000000000002"
+"""Two distinguishable runs, so a verdict can be scoped to one of them (FR-006)."""
 
-def observe(clause: Clause, kind: EvidenceKind, payload: Mapping[str, object]) -> Evidence:
+
+def observe(
+	clause: Clause,
+	kind: EvidenceKind,
+	payload: Mapping[str, object],
+	run_id: str | None = None,
+) -> Evidence:
 	"""Record an observation for a clause, as the executor would."""
 	return Evidence.record(
 		clause_id=clause.id,
 		kind=kind,
 		produced_by=PRODUCER,
 		payload=dict(payload),
+		run_id=run_id,
 	)
 
 
@@ -78,8 +88,58 @@ def test_verifier_cannot_reach_the_executor() -> None:
 
 
 def test_verify_takes_no_completion_claim() -> None:
-	"""FR-138 expressed as a signature: termination is not an input to verification."""
-	assert list(inspect.signature(verify).parameters) == ["contract", "evidence"]
+	"""FR-138 expressed as a signature: termination is not an input to verification.
+
+	Two properties, not one spelling: nothing is accepted positionally beyond the
+	evidence, and no parameter is annotated with anything claim-shaped. Pinning the exact
+	list of names would fail on every legitimate addition while proving neither — the
+	question is whether a claim *could* be passed, not what the extras happen to be.
+	"""
+	parameters = inspect.signature(verify).parameters
+	positional = [
+		name
+		for name, parameter in parameters.items()
+		if parameter.kind is not inspect.Parameter.KEYWORD_ONLY
+	]
+	assert positional == ["contract", "evidence"]
+	assert not any("claim" in name.lower() for name in parameters)
+	annotated = " ".join(str(parameter.annotation) for parameter in parameters.values())
+	assert "Claim" not in annotated, (
+		f"a verdict cannot take a claim, but annotation is {annotated!r}"
+	)
+
+
+def test_a_verdict_can_be_scoped_to_one_run(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""FR-006: a result older than the change under test is invalid.
+
+	The same clause, observed failing and then passing, must be able to turn green —
+	otherwise a repair step could never succeed, and the log would answer a provenance
+	question while wearing the name of a status one.
+	"""
+	contract = make_contract(("the endpoint answers", make_oracle("true")))
+	clause = only(contract)
+	stale = observe(clause, EvidenceKind.COMMAND_OUTPUT, {"exit_code": 1}, run_id=RUN_ONE)
+	fresh = observe(clause, EvidenceKind.COMMAND_OUTPUT, {"exit_code": 0}, run_id=RUN_TWO)
+
+	assert verify(contract, [stale, fresh]).outcome is VerdictOutcome.VIOLATED, (
+		"unscoped, history still dominates: that is the provenance question"
+	)
+	assert verify(contract, [stale, fresh], run_id=RUN_TWO).outcome is VerdictOutcome.SATISFIED
+	assert verify(contract, [stale, fresh], run_id=RUN_ONE).outcome is VerdictOutcome.VIOLATED
+
+
+def test_scoping_to_a_run_that_observed_nothing_is_insufficient(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""An unrun oracle must not inherit the verdict of a different run."""
+	contract = make_contract(("the endpoint answers", make_oracle("true")))
+	passed = observe(only(contract), EvidenceKind.COMMAND_OUTPUT, {"exit_code": 0}, run_id=RUN_ONE)
+
+	report = verify(contract, [passed], run_id=RUN_TWO)
+	assert report.outcome is VerdictOutcome.INSUFFICIENT
+	assert report.verdicts[0].reason == "no evidence was recorded for this clause"
 
 
 def test_severity_ordering_is_worst_case_dominant() -> None:
@@ -187,6 +247,28 @@ def test_timeout_is_insufficient_not_violated(
 	)
 	assert report.outcome is VerdictOutcome.INSUFFICIENT
 	assert "timed out" in report.verdicts[0].reason
+
+
+def test_a_truthy_stand_in_for_timed_out_is_not_a_pass(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""``1`` is not ``True``. Reading it as falsy would skip the timeout branch and
+	let the stale exit code beside it satisfy the clause — a malformed payload turned
+	into a green light, which is the one direction this must never fail in."""
+	contract = make_contract(("the suite is fast", make_oracle("true")))
+	for stand_in in (1, "true", "yes", [1]):
+		report = verify(
+			contract,
+			[
+				observe(
+					only(contract),
+					EvidenceKind.COMMAND_OUTPUT,
+					{"timed_out": stand_in, "exit_code": 0},
+				)
+			],
+		)
+		assert report.outcome is VerdictOutcome.INSUFFICIENT, f"{stand_in!r} produced a verdict"
+		assert "non-boolean timed_out" in report.verdicts[0].reason
 
 
 def test_malformed_payload_is_never_coerced(

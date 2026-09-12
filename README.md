@@ -15,8 +15,8 @@ to believe a producer's own claim that it is done.
 | --- | --- |
 | **P0 — Elicit** | **Working.** Interactive Socratic dialogue with a deterministic resolution gate. |
 | **P2/P4 — Specify & contract** | **Working.** Clause stems are drafted from the conversation; `contract` assigns one oracle to every stem. Without a `--command` it reports **100% ground-truth debt** rather than hiding it. |
-| **P6 — Verify** | **Working.** `run` executes the oracles out-of-process and records observations; `verify` renders the verdict — and takes **no completion claim**, by signature (FR-138). |
-| **P3/P5 — Decompose & dispatch** | **Partial.** `plan` compiles the contract into ordered goal sessions with pinned hashes (FR-136/139); `probe` measures a harness instead of trusting it (FR-148); `dispatch` runs the plan in waves, one out-of-process session per step. Single-module only — worktree isolation (FR-141) is not implemented. |
+| **P6 — Verify** | **Working.** `run` executes the oracles out-of-process and records observations; `verify` renders the verdict — and takes **no completion claim**, by signature (FR-138). A verdict describes one *run* (FR-006/FR-162), so a repaired clause can turn green. |
+| **P3/P5 — Decompose & dispatch** | **Partial.** `plan` compiles the contract into ordered goal sessions with pinned hashes (FR-136/139); `probe` measures a harness instead of trusting it (FR-148); `dispatch` runs the plan in waves, one out-of-process session per step, and stops at the first **refuted** wave (FR-142/FR-163). Single-module only — worktree isolation (FR-141) is not implemented. |
 | **P1 — Research** | Not implemented. |
 
 This is a deliberate vertical slice of the part that survives every argument in
@@ -65,15 +65,20 @@ Which harness is a **row of data, not a class**:
 uv run sofact contract --command 'pytest -q'   # every stem needs an oracle
 uv run sofact plan                             # contract → ordered goal sessions
 uv run sofact probe                            # attempt a harness; record observations
-uv run sofact dispatch --all                   # run the plan, wave by wave
+uv run sofact dispatch --all                   # run the plan; stops at the first refuted wave
 uv run sofact integrity                        # re-verify the pinned hashes (FR-139)
 uv run sofact precision                        # did the claims survive verification?
 ```
 
 `probe` is not optional: dispatching against an assumed capability is exactly what
-FR-148 forbids, so `dispatch` refuses until a profile exists. A producer's completion
-declaration is recorded and **changes no verdict** — `verify` is the only thing that
-does (FR-138).
+FR-148 forbids, so `dispatch` refuses until a profile exists.
+
+A producer's declaration is **not evidence and does trigger a check**. When a session
+declares completion, SoFact runs that contract's oracles in the *producer's* workspace,
+records the claim and the verdict as two separate rows, and keeps going only if the
+clauses came out clean (FR-138/FR-163). So `dispatch` exits **non-zero** when the
+contract is refuted — or insufficient, because an artefact nothing could check is not a
+verified one — and `verify` remains the command that renders a verdict on demand (P6).
 
 `pi` and `dsh` ship as specs. To point SoFact at another harness without editing
 `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:

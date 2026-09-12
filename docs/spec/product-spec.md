@@ -1337,6 +1337,48 @@ FR-157: if it decides the ceiling, it is measured.
 
 ---
 
+### 9.6 When a verdict is invalid, and what triggers one
+
+FR-006 and FR-138 were both stated and only one of them was implemented. FR-006's
+scoping was contradicted by an aggregation rule that existed only in code — worst-case
+dominance applied across the **log's whole history** — and FR-138's trigger was absent, so
+nothing ran the oracles after a declaration. Both defects are silent: a monotone verdict
+looks like a strict verifier, and an untriggered check looks like an unfired one.
+
+**FR-162** *(a verdict describes one attempt)* A verdict must describe **one execution of
+an oracle set**, never the log's accumulated history. An observation must carry the
+identity of the run that produced it; worst-case dominance must apply **within** an
+evaluation, so a single counterexample still cannot be outvoted by corroboration; and a
+result from an earlier run must never decide a later state (FR-006, carried forward
+unchanged). Asking for a named run must answer the *provenance* question — "has this
+clause ever failed?" — as a question explicitly distinct from the status one. The
+consequence is not stylistic: a clause refuted in one attempt must be able to come out
+satisfied in the next, or the repair tier (FR-103) cannot observe its own success, and
+declaration precision (FR-147) reports a number produced by a missing check rather than
+by a dishonest producer. Run identity is an **ordering token, not a content hash**: it
+satisfies the half of FR-006 that forbids a stale result from deciding a newer state, and
+it does not satisfy the half that keys a cache by the content of the change and the
+oracle definition. That second half remains **unimplemented** and must be reported as
+such rather than inferred from the first.
+
+**FR-163** *(a declaration triggers a check on the whole contract, in the producer's
+workspace)* Where a producer declares completion, SoFact must run that contract's oracles
+**in the workspace the producer worked in** — a verdict about a different tree is a
+verdict about an artefact nobody claimed — and must record the **claim** and the
+**verdict** as separate rows, claim first, so that a disagreement between the producer's
+word and the artefact's behaviour stays legible rather than being resolved by whichever
+ran last (FR-138). The check must run **every executable clause of the contract**, not
+merely the clauses the declaring step covers: under FR-162's run scoping, a partial
+report would mark every unrun clause `INSUFFICIENT` and thereby destroy the corroboration
+of steps that were verified a moment earlier. A dispatch that declared nothing (a failed
+or budget-exhausted session) asserts nothing about the artefact and must trigger no check
+at all — inventing a verdict for it manufactures a signal the producer never gave. Any
+build command that dispatched against a refuted or unverified contract must **exit
+non-zero**, because a green exit code for an unverified artefact is the same lie at the
+shell boundary.
+
+---
+
 ## 10. Integration (P7) — where multi-module systems fail
 
 **FR-111** Integration must proceed in the **topological build order** (FR-092).
@@ -1574,7 +1616,10 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `dispatch`, `verify`, `integrity`, `precision`, `claim`, `dimensions`, `draft`,
 `status`, `ledger`, `verify-ledger`, `run`. The planned verbs remain the target
 surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is FR-142's wave
-scheduler, and `integrity`/`precision` are FR-139 and §20.4.
+scheduler (and FR-163's trigger: it checks the producer's declaration against the
+contract and exits non-zero when the result is not clean), and `integrity`/`precision`
+are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
+`run` + `verify` re-checks an artefact after a repair (§9.6, FR-162).
 
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare

@@ -55,6 +55,17 @@ def _as_str(value: object) -> str | None:
 	return value if isinstance(value, str) else None
 
 
+def _as_bool(value: object) -> bool | None:
+	"""Narrow to ``bool``, so a truthy stand-in is never read as agreement.
+
+	``1``, ``"true"`` and ``"yes"`` are all truthy and none of them is the runner's
+	flag. Treating one as ``False`` would be the dangerous direction here: the timeout
+	branch would be skipped and a stale ``exit_code`` beside it could satisfy the
+	clause. ``None`` means "not a boolean", never "false".
+	"""
+	return value if isinstance(value, bool) else None
+
+
 # --------------------------------------------------------------------------- #
 # per-kind rules
 # --------------------------------------------------------------------------- #
@@ -66,7 +77,13 @@ def _command_output(
 ) -> tuple[VerdictOutcome, str]:
 	"""An oracle was run. The criterion comes from the contract, the observation
 	from the evidence — never both from the same place."""
-	if payload.get("timed_out") is True:
+	timed_out = _as_bool(payload.get("timed_out"))
+	if timed_out is None and "timed_out" in payload:
+		return (
+			VerdictOutcome.INSUFFICIENT,
+			f"evidence carries a non-boolean timed_out ({payload['timed_out']!r})",
+		)
+	if timed_out:
 		return (
 			VerdictOutcome.INSUFFICIENT,
 			"the oracle timed out, so the clause was neither demonstrated nor refuted",
@@ -180,7 +197,12 @@ def _decide(clause: Clause, observations: tuple[Evidence, ...]) -> ClauseVerdict
 	)
 
 
-def verify(contract: Contract, evidence: Iterable[Evidence]) -> VerificationReport:
+def verify(
+	contract: Contract,
+	evidence: Iterable[Evidence],
+	*,
+	run_id: str | None = None,
+) -> VerificationReport:
 	"""Render a verdict for every clause of ``contract``.
 
 	Accepts no :class:`~sofact.views.CompletionClaim` — the signature has nowhere to
@@ -190,11 +212,23 @@ def verify(contract: Contract, evidence: Iterable[Evidence]) -> VerificationRepo
 
 	Evidence pointing at clauses outside ``contract`` is ignored, and cannot raise the
 	verdict: unmatched observations have no clause to satisfy.
+
+	``run_id`` scopes the verdict to **one** execution of the oracle set. Without it,
+	every observation the log holds is weighed worst-case, which answers *"has this
+	clause ever failed?"* — a provenance question. FR-006 asks the other one: a result
+	older than the change under test is invalid, so a stale failure must not decide a
+	later state. Left unscoped, a repaired clause could never turn green and a repair
+	step could never succeed, which would make the repair tier of a goal plan
+	unobservable rather than merely hard. Worst-case dominance survives *within* a run,
+	where several observations of one clause genuinely compete.
 	"""
 	assert contract.clauses, "cannot verify a contract with no clauses"
+	assert run_id is None or run_id, "a run id, when given, must name a run"
 
 	by_clause: dict[str, list[Evidence]] = {}
 	for item in evidence:
+		if run_id is not None and item.run_id != run_id:
+			continue
 		by_clause.setdefault(item.clause_id, []).append(item)
 
 	verdicts = tuple(_decide(c, tuple(by_clause.get(c.id, ()))) for c in contract.clauses)

@@ -452,6 +452,12 @@ class Evidence(View):
 
 	Evidence carries raw observations, never a conclusion. There is no ``passed``
 	field: the verifier decides, from the payload, whether the clause holds.
+
+	``run_id`` groups the observations made by one execution of an oracle set. It is an
+	*ordering token*, not a content hash: it distinguishes a later observation from an
+	earlier one, which is what FR-006 needs in order to refuse a stale result, but it
+	does not prove that the artefact changed. ``None`` means unattributed — evidence
+	recorded without a run, which a verdict then treats as one undifferentiated set.
 	"""
 
 	id: UUID7
@@ -461,6 +467,7 @@ class Evidence(View):
 	payload: dict[str, Any]
 	content_hash: str
 	at: datetime
+	run_id: UUID7 | None = None
 
 	@classmethod
 	def record(
@@ -470,6 +477,7 @@ class Evidence(View):
 		kind: EvidenceKind,
 		produced_by: str,
 		payload: dict[str, Any],
+		run_id: str | None = None,
 	) -> Self:
 		"""Record an observation, hashing its payload for integrity."""
 		assert clause_id and produced_by, "evidence needs a clause and a producer"
@@ -481,6 +489,7 @@ class Evidence(View):
 			payload=payload,
 			content_hash=content_hash(payload),
 			at=now(),
+			run_id=run_id,
 		)
 
 
@@ -1284,6 +1293,10 @@ class ProjectState(View):
 		"""Most recent probe of a harness, if it has ever been probed."""
 		matching = [p for p in self.profiles if p.name == name]
 		return matching[-1] if matching else None
+
+	def dispatch(self, dispatch_id: str) -> DispatchRecord | None:
+		"""Look up a dispatch attempt by id."""
+		return next((d for d in self.dispatches if d.id == dispatch_id), None)
 
 	def dispatches_for(self, plan_id: str) -> tuple[DispatchRecord, ...]:
 		"""Every dispatch attempt made for a plan, in log order."""

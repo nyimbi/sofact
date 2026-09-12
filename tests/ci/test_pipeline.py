@@ -164,6 +164,54 @@ async def test_the_ledger_chain_holds_across_the_whole_pipeline(
 	assert chain.length > 0
 
 
+async def test_a_repaired_clause_can_turn_green(service: FactoryService, tmp_path: Path) -> None:
+	"""FR-006 at the artefact level: the verdict describes the latest attempt.
+
+	The oracle asks whether a file exists, so it is refutable and then satisfiable by
+	the same contract. A verdict that weighed the whole history would answer "has this
+	clause ever failed?" and this repair would be reported as a failure forever — which
+	would make the plan's repair tier unable to observe its own success and would accuse
+	the producer of lying about work that succeeded.
+	"""
+	goal_id = await interrogate(service, "Every reminder appears in the dashboard.")
+	contract = await service.contract(goal_id, commands="test -f marker.txt")
+
+	await service.run(contract.id, workspace=tmp_path)
+	before = await service.verify_contract(contract.id)
+	assert before.outcome is VerdictOutcome.VIOLATED
+
+	(tmp_path / "marker.txt").write_text("repaired", encoding="utf-8")
+
+	await service.run(contract.id, workspace=tmp_path)
+	after = await service.verify_contract(contract.id)
+	assert after.outcome is VerdictOutcome.SATISFIED
+	assert after.is_clean
+
+	tampered = await service.verify_ledger()
+	assert tampered.ok, "both verdicts stay in the log: the history is not rewritten"
+
+
+async def test_a_verdict_can_be_asked_for_a_specific_run(
+	service: FactoryService, tmp_path: Path
+) -> None:
+	"""Naming the run answers the provenance question on purpose, not by accident."""
+	goal_id = await interrogate(service, "Every reminder appears in the dashboard.")
+	contract = await service.contract(goal_id, commands="test -f marker.txt")
+
+	await service.run(contract.id, workspace=tmp_path)
+	(tmp_path / "marker.txt").write_text("repaired", encoding="utf-8")
+	await service.run(contract.id, workspace=tmp_path)
+
+	latest = await service.verify_contract(contract.id)
+	state = await service.state()
+	runs = [item.run_id for item in state.evidence if item.run_id is not None]
+	assert len(set(runs)) == 2, "two runs, two identities"
+
+	oldest = await service.verify_contract(contract.id, run_id=runs[0])
+	assert oldest.outcome is VerdictOutcome.VIOLATED
+	assert latest.outcome is VerdictOutcome.SATISFIED
+
+
 async def test_a_restarted_service_reconstructs_everything_from_the_log(
 	home: Path, tmp_path: Path
 ) -> None:

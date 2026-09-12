@@ -27,6 +27,7 @@ than argued. Numbering is sequential and never reused.
 | [0012](0012-the-harness-table-is-data-not-code.md) | The harness adapter table is data, not code | Accepted |
 | [0013](0013-a-version-claim-is-checked-against-the-floor.md) | A version claim is checked against the minimum supported version | Accepted |
 | [0014](0014-markdown-fence-ownership.md) | Markdown code fences belong to ruff, prose whitespace to markdownlint | Accepted |
+| [0015](0015-a-verdict-describes-one-run.md) | A verdict describes one run, and a declaration triggers the check | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -47,12 +48,14 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Three records here answer questions the specification
-never had to ask, because they are about this repository's own tooling rather than about
-the factory's behaviour:
+Not every decision resolves a `D`. Four records here answer questions the specification
+never had to ask — three because they are about this repository's own tooling rather than
+about the factory's behaviour, and one because the rule it replaces was never written
+down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
 | ----- | ----------------- |
 | [0012](0012-the-harness-table-is-data-not-code.md) | That FR-161 is enforced at all — a table read from an untrusted file is validated by name rather than defaulted |
 | [0013](0013-a-version-claim-is-checked-against-the-floor.md) | Which interpreter's version each checker validates against, and that no tool gets two configuration files |
 | [0014](0014-markdown-fence-ownership.md) | Which tool owns which bytes in Markdown, after two of them spent several turns undoing each other |
+| [0015](0015-a-verdict-describes-one-run.md) | When a verdict is invalidated: FR-006 carried forward, and the trigger FR-138 was missing. The superseded rule existed only in `verification.py`, so no `D` ever pointed at it |

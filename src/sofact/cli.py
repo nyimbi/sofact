@@ -601,6 +601,21 @@ async def _dispatch(
 
 	for record in records:
 		_print_dispatch(record)
+
+	# A step can now complete *and* be refuted: the declaration triggered P6 and the
+	# oracles disagreed. Exiting 0 on that would hand a script a green light for an
+	# artefact that failed its own contract, so the verdict decides the exit code —
+	# and an unrun or unexecutable contract counts as unverified, not as passing.
+	report = await svc.latest_report(plan.contract_id)
+	if report is not None:
+		typer.secho(
+			f"\n  contract {report.outcome.value}: "
+			f"{len(report.satisfied)} of {len(report.verdicts)} clauses "
+			"hold (FR-138: a declaration triggers verification, it does not replace it).",
+			fg=_OUTCOME_STYLE[report.outcome],
+		)
+	if report is not None and not report.is_clean:
+		raise typer.Exit(code=1)
 	if any(r.outcome is not StepOutcome.COMPLETED for r in records):
 		raise typer.Exit(code=1)
 

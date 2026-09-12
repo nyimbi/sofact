@@ -16,6 +16,7 @@ import dataclasses
 import inspect
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -29,15 +30,19 @@ from synthetic import (
 	synthetic_service,
 )
 
+from sofact.contract import executable_clauses
 from sofact.harness import DSH_SPEC, PI_SPEC, SPECS
 from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home
 from sofact.views import (
 	ElicitationDimension,
+	GoalPlan,
+	GoalStep,
 	GoalStyle,
 	HarnessCapability,
 	IntegrityOutcome,
 	IntegritySubject,
 	LedgerKind,
+	PlanStepKind,
 	ProbeOutcome,
 	StepOutcome,
 	VerdictOutcome,
@@ -548,6 +553,147 @@ class TestDispatchPlan:
 		await service.dispatch_plan(plan.id)
 		state = await service.state()
 		assert len(state.dispatches_for(plan.id)) == len(plan.steps)
+
+	async def test_a_refuted_step_ends_the_run(self, home: Path, tmp_path: Path) -> None:
+		"""FR-142 stops a dependency on an *unverified* step, not merely a failed one.
+
+		Every session here completes: the producers all declare success. What stops the
+		run is the verdict — the first wave carrying clauses comes back ``VIOLATED``, so
+		the steps after it never start. Without this the plan would happily build its
+		repair wave on top of a refuted operation wave.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 1")
+		records = await service.dispatch_plan(plan.id)
+		dispatched = [plan.step_by_id(record.step_id) for record in records]
+		assert all(record.outcome is StepOutcome.COMPLETED for record in records)
+		assert len(records) < len(plan.steps), "a refuted wave must stop the build"
+		assert any(step is not None and step.clause_ids for step in dispatched)
+		assert not any(
+			step is not None and step.kind is PlanStepKind.REPAIR for step in dispatched
+		), "repair must not run on a refuted dependency"
+		report = await service.latest_report(plan.contract_id)
+		assert report is not None
+		assert report.outcome is VerdictOutcome.VIOLATED
+
+	async def test_an_agreeing_oracle_runs_the_whole_plan(self, home: Path, tmp_path: Path) -> None:
+		"""The gate must not stop a build that is actually passing."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		records = await service.dispatch_plan(plan.id)
+		assert len(records) == len(plan.steps)
+		report = await service.latest_report(plan.contract_id)
+		assert report is not None
+		assert report.outcome is VerdictOutcome.SATISFIED
+
+
+# --------------------------------------------------------------------------- #
+# a declaration triggers P6 (FR-138)
+# --------------------------------------------------------------------------- #
+
+
+def first_clause_bearing(plan: GoalPlan) -> GoalStep:
+	"""The earliest step that carries clauses.
+
+	A verdict can only corroborate a step that has something to corroborate, so the
+	trigger tests aim at one of these rather than at the bootstrap step, whose "success"
+	no oracle can confirm.
+	"""
+	for wave in plan.waves():
+		for step in wave:
+			if step.clause_ids:
+				return step
+	raise AssertionError("the plan carries no clause-bearing step")
+
+
+class TestTheDeclarationTriggersVerification:
+	async def test_a_declaration_runs_the_oracles_and_renders_a_verdict(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-138's missing half: the claim is a *trigger* to run P6, not a substitute."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		contract = await service.contract_by_id(plan.contract_id)
+		executable = executable_clauses(contract)
+		assert len(executable) == len(contract.clauses), "every clause got the command"
+
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		assert record.declared_complete
+		counts = Counter(kinds(service))
+		assert counts["claim.declared"] == 1
+		assert counts["evidence.recorded"] == len(executable)
+		assert counts["verdict.rendered"] == 1
+
+		report = await service.latest_report(plan.contract_id)
+		assert report is not None
+		assert report.outcome is VerdictOutcome.SATISFIED
+		assert len(report.verdicts) == len(contract.clauses)
+
+	async def test_the_claim_is_written_down_before_the_verdict(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Both signals, separately, in that order — so their disagreement stays legible."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 1")
+		await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		written = service.ledger.entries()
+		claim = next(entry.index for entry in written if entry.kind is LedgerKind.CLAIM_DECLARED)
+		verdict = next(
+			entry.index for entry in written if entry.kind is LedgerKind.VERDICT_RENDERED
+		)
+		assert claim < verdict
+
+	async def test_a_lying_producer_is_measured_not_believed(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The clause has teeth, so it is corroborated, and the producer is refuted."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 1")
+		step = first_clause_bearing(plan)
+		record = await service.dispatch_step(plan.id, step.id)
+		assert record.outcome is StepOutcome.COMPLETED, "the producer was happy"
+		assert record.declared_complete, "and said so"
+
+		report = await service.latest_report(plan.contract_id)
+		assert report is not None
+		assert report.outcome is VerdictOutcome.VIOLATED
+		assert all(verdict.outcome is VerdictOutcome.VIOLATED for verdict in report.verdicts)
+		precision = await service.declaration_precision()
+		assert precision.declarations == 1
+		assert precision.corroborated == 0, "a refuted claim must not be counted as corroborated"
+		assert precision.precision == 0.0
+
+	async def test_a_dispatch_that_declares_nothing_triggers_nothing(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A failed or silent session asserts nothing about the artefact, so there is
+		nothing to check and no verdict is invented for it."""
+		service, plan = await plan_and_service(home, tmp_path, "plain", commands="exit 0")
+		record = await service.dispatch_step(plan.id, first_clause_bearing(plan).id)
+		assert not record.declared_complete
+		assert await service.check_declaration(plan.id, record.id) is None
+		counts = Counter(kinds(service))
+		assert counts["claim.declared"] == 0
+		assert counts["evidence.recorded"] == 0
+		assert counts["verdict.rendered"] == 0
+
+	async def test_an_unknown_dispatch_is_refused(self, home: Path, tmp_path: Path) -> None:
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		with pytest.raises(KeyError, match="has no dispatch"):
+			await service.check_declaration(plan.id, "01920000-0000-7000-8000-0000000000ff")
+
+	async def test_precision_now_measures_instead_of_reporting_zero(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Before the trigger existed this instrument had nothing to divide by.
+
+		It still refuses to credit a step that carries no clause: the bootstrap step is
+		the gap between the two counts, because "no oracle objects" is not corroboration.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		records = await service.dispatch_plan(plan.id)
+		precision = await service.declaration_precision()
+		steps = [plan.step_by_id(record.step_id) for record in records]
+		assert all(step is not None for step in steps), "every record names a real step"
+		bearing = [step for step in steps if step is not None and step.clause_ids]
+		assert precision.declarations == len(records)
+		assert precision.corroborated == len(bearing)
+		assert 0 < precision.corroborated < precision.declarations
 
 
 # --------------------------------------------------------------------------- #

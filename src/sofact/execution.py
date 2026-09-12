@@ -38,7 +38,13 @@ class OracleNotExecutableError(ValueError):
 
 
 class OracleRunner:
-	"""Runs a contract's executable oracles inside one workspace."""
+	"""Runs a contract's executable oracles inside one workspace.
+
+	``run_id`` is stamped on every observation this runner produces, so that a later
+	attempt can be told apart from an earlier one. Identity is injected rather than
+	generated here: a runner that invented its own id would make two runners
+	incomparable without ever saying so.
+	"""
 
 	def __init__(
 		self,
@@ -46,12 +52,15 @@ class OracleRunner:
 		*,
 		timeout: float = DEFAULT_TIMEOUT_SECONDS,
 		max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+		run_id: str | None = None,
 	) -> None:
 		assert timeout > 0, f"timeout must be positive, got {timeout}"
 		assert max_output_bytes > 0, f"max_output_bytes must be positive, got {max_output_bytes}"
+		assert run_id is None or run_id, "a run id, when given, must name a run"
 		self.workspace = Path(workspace)
 		self.timeout = timeout
 		self.max_output_bytes = max_output_bytes
+		self.run_id = run_id
 
 	def __repr__(self) -> str:
 		return f"OracleRunner(workspace={self.workspace}, timeout={self.timeout})"
@@ -99,6 +108,7 @@ class OracleRunner:
 			kind=EvidenceKind.COMMAND_OUTPUT,
 			produced_by=PRODUCER_NAME,
 			payload=payload,
+			run_id=self.run_id,
 		)
 		assert evidence.content_hash, "recorded evidence must carry a payload hash"
 		return evidence

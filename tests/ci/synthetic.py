@@ -174,22 +174,33 @@ def synthetic_service(
 	return FactoryService(home=home, llm=None, specs={name: spec})
 
 
-async def elicitation_to_contract(service: FactoryService) -> tuple[str, str]:
-	"""Run P0 to completion and produce a contract. Returns ``(goal_id, contract_id)``."""
+async def elicitation_to_contract(
+	service: FactoryService, *, commands: str | None = None
+) -> tuple[str, str]:
+	"""Run P0 to completion and produce a contract. Returns ``(goal_id, contract_id)``.
+
+	``commands`` attaches one executable oracle to every clause stem. Without it every
+	oracle is a *suggestion* naming no command, so there is nothing to run — the right
+	default for tests about planning, and the wrong one for tests about verification.
+	"""
 	goal = await service.start("Ship a reminder dashboard.")
 	await answer_everything(service, goal.id)
 	await service.draft(goal.id)
-	contract = await service.contract(goal.id)
+	contract = await service.contract(goal.id, commands=commands)
 	return goal.id, contract.id
 
 
 async def plan_and_service(
-	home: Path, tmp_path: Path, mode: str
+	home: Path,
+	tmp_path: Path,
+	mode: str,
+	*,
+	commands: str | None = None,
 ) -> tuple[FactoryService, GoalPlan]:
 	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
 	registered = synthetic_service(home, tmp_path, mode)
 	await registered.probe_harness(None)
-	_, contract_id = await elicitation_to_contract(registered)
+	_, contract_id = await elicitation_to_contract(registered, commands=commands)
 	return registered, await registered.compile_plan(contract_id)
 
 

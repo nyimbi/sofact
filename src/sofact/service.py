@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,7 @@ from sofact.elicitation import (
 	next_open,
 	spec_for,
 )
+from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
@@ -69,7 +70,14 @@ from sofact.views import (
 	now,
 )
 
-__all__ = ["DEFAULT_HARNESS", "DEFAULT_HOME_DIRNAME", "FactoryService", "resolve_home"]
+__all__ = [
+	"DEFAULT_HARNESS",
+	"DEFAULT_HOME_DIRNAME",
+	"FactoryService",
+	"latest_run_id",
+	"refuted_steps",
+	"resolve_home",
+]
 
 DEFAULT_HOME_DIRNAME = ".sofact"
 
@@ -83,6 +91,41 @@ non-interactive argv is unverified (``--profile headless`` is broken in 0.1.5rc1
 defaulting to an argv nobody has run would make the first dispatch a debugging session
 rather than a build.
 """
+
+
+def latest_run_id(contract: Contract, evidence: Iterable[Evidence]) -> str | None:
+	"""The run that most recently observed this contract, by log order.
+
+	``None`` when nothing has observed it yet, or when the observations carry no run
+	identity at all — a log written before run ids existed, or evidence recorded by
+	hand. Both cases mean "undifferentiated", which is the same meaning the absence of a
+	run has everywhere else, so the degenerate case needs no separate branch.
+	"""
+	clause_ids = {clause.id for clause in contract.clauses}
+	identified = [
+		item.run_id for item in evidence if item.run_id is not None and item.clause_id in clause_ids
+	]
+	return identified[-1] if identified else None
+
+
+def refuted_steps(plan: GoalPlan, report: VerificationReport | None) -> tuple[str, ...]:
+	"""Steps whose own clauses the latest verdict **refutes** (FR-142).
+
+	The distinction between a refutation and a gap is the whole point. ``VIOLATED`` is
+	evidence that the step's clauses do not hold, so a dependent must not build on it.
+	``INSUFFICIENT`` is the absence of an oracle, which grants no autonomy (FR-109) but
+	is not a refutation — halting on it would make Mode G, whose oracles are weaker by
+	construction, unbuildable. A step covering no clause is never refuted: there is
+	nothing to refute, and a bootstrap step would otherwise block the build forever.
+	"""
+	if report is None:
+		return ()
+	verdicts = {verdict.clause_id: verdict.outcome for verdict in report.verdicts}
+	return tuple(
+		step.id
+		for step in plan.steps
+		if any(verdicts.get(clause_id) is VerdictOutcome.VIOLATED for clause_id in step.clause_ids)
+	)
 
 
 def resolve_home(home: Path | None = None) -> Path:
@@ -292,6 +335,14 @@ class FactoryService:
 		draft = await self.latest_draft(goal_id)
 		if draft is None:
 			raise ValueError(f"no draft for goal {goal_id}; draft one first")
+		# An untyped caller can hand this a list, and ``model_copy`` would store it
+		# without validating: the ledger would then hold an entry that cannot fold,
+		# because the replay validates what the write did not. Constructing through
+		# validation makes the refusal happen here, where the message can name the
+		# parameter, instead of at the next read of the log.
+		assert commands is None or isinstance(commands, str), (
+			f"commands must be one shell command, got {type(commands).__name__}"
+		)
 
 		oracles: dict[str, OracleDeclaration] = {}
 		for stem in draft.stems:
@@ -299,7 +350,9 @@ class FactoryService:
 			oracles[stem.id] = (
 				suggested
 				if commands is None
-				else suggested.model_copy(update={"command_hint": commands})
+				else OracleDeclaration.model_validate(
+					{**suggested.model_dump(mode="python"), "command_hint": commands},
+				)
 			)
 
 		built = Contract.from_draft(draft, oracles, version=version)
@@ -329,7 +382,7 @@ class FactoryService:
 		contract_id: str,
 		*,
 		workspace: Path | None = None,
-		timeout: float = 300.0,
+		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
 	) -> tuple[Evidence, ...]:
 		"""Execute the contract's executable oracles and record the observations.
 
@@ -339,7 +392,11 @@ class FactoryService:
 		contract = await self.contract_by_id(contract_id)
 		workdir = workspace or (self.home / "workspace")
 		assert workdir.is_dir(), f"workspace does not exist: {workdir}"
-		produced = await OracleRunner(workdir, timeout=timeout).run_all(contract)
+		produced = await OracleRunner(
+			workdir,
+			timeout=timeout,
+			run_id=uuid7str(),
+		).run_all(contract)
 		for item in produced:
 			self._commit(
 				LedgerKind.EVIDENCE_RECORDED,
@@ -349,16 +406,79 @@ class FactoryService:
 
 	# ------------------------------------------------------------ P6: the verdict
 
-	async def verify_contract(self, contract_id: str) -> VerificationReport:
+	async def verify_contract(
+		self,
+		contract_id: str,
+		*,
+		run_id: str | None = None,
+	) -> VerificationReport:
 		"""Render a verdict for every clause, from the evidence in the log.
 
 		Distinct from :meth:`verify_ledger`: this judges the *artefact*, that one
 		judges the *record*. Conflating them would let a tampered log masquerade as a
 		passing build.
+
+		Scoped to the most recent *run* of this contract's oracles unless one is named
+		(FR-006: a result older than the change under test is invalid). A verdict that
+		weighed the entire history would answer "has this clause ever failed?" and would
+		leave a repaired clause permanently refuted — an unrepairable build reported as a
+		dishonest producer.
 		"""
 		contract = await self.contract_by_id(contract_id)
 		state = await self.state()
-		report = verify(contract, state.evidence)
+		selected = run_id if run_id is not None else latest_run_id(contract, state.evidence)
+		report = verify(contract, state.evidence, run_id=selected)
+		self._commit(
+			LedgerKind.VERDICT_RENDERED,
+			{"report": report.model_dump(mode="json")},
+		)
+		return report
+
+	async def check_declaration(
+		self,
+		plan_id: str,
+		dispatch_id: str,
+		*,
+		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
+	) -> VerificationReport | None:
+		"""Run P6 because a producer declared completion (FR-138).
+
+		The declaration is the *trigger*, never the input: the verdict is rendered by
+		:func:`sofact.verification.verify`, whose signature has nowhere to put a claim.
+		Returns ``None`` when the dispatch declared nothing — a failed or
+		budget-exhausted session is not an assertion about the artefact, so there is no
+		claim to check, and the run's own outcome already says what happened.
+
+		The oracles run in the *dispatch's* workspace, because that is where the producer
+		worked; checking a different tree would produce a verdict about an artefact nobody
+		claimed. A contract whose clauses are all unexecutable runs zero commands and still
+		renders a verdict, all ``INSUFFICIENT`` — the absence of a report and a report that
+		corroborates nothing are different facts, and ``declaration_precision`` must be
+		able to tell them apart.
+		"""
+		plan = await self.plan_by_id(plan_id)
+		state = await self.state()
+		record = state.dispatch(dispatch_id)
+		if record is None or record.plan_id != plan.id:
+			raise KeyError(f"plan {plan_id} has no dispatch {dispatch_id}")
+		if not record.declared_complete:
+			return None
+
+		contract = await self.contract_by_id(plan.contract_id)
+		workdir = Path(record.workspace)
+		assert workdir.is_dir(), f"dispatch workspace does not exist: {workdir}"
+		run_id = uuid7str()
+		produced = await OracleRunner(
+			workdir,
+			timeout=timeout,
+			run_id=run_id,
+		).run_all(contract)
+		for item in produced:
+			self._commit(
+				LedgerKind.EVIDENCE_RECORDED,
+				{"evidence": item.model_dump(mode="json")},
+			)
+		report = verify(contract, produced, run_id=run_id)
 		self._commit(
 			LedgerKind.VERDICT_RENDERED,
 			{"report": report.model_dump(mode="json")},
@@ -571,6 +691,11 @@ class FactoryService:
 					).model_dump(mode="json"),
 				},
 			)
+			# FR-138: the declaration triggers P6. The claim is written down first and the
+			# verdict second, as separate rows, so a disagreement between the producer's
+			# word and the artefact's behaviour stays legible in the log rather than being
+			# resolved by whichever ran last.
+			await self.check_declaration(plan.id, record.id)
 		return record
 
 	async def dispatch_plan(
@@ -585,11 +710,13 @@ class FactoryService:
 	) -> tuple[DispatchRecord, ...]:
 		"""Dispatch a plan wave by wave, stopping at the first wave that stalls (FR-142).
 
-		A step may start only once every step it depends on has *completed*, so a stalled
-		wave ends the run rather than letting dependents build on nothing. ``concurrent``
-		is off by default and is not a performance setting: two sessions editing one
-		workspace is a merge conflict, and whether a wave may run together is a question
-		about worktrees (FR-141) that the operator owns, not the scheduler.
+		A step may start only once every step it depends on has *completed* **and** not been
+		refuted by a verdict: FR-142 says a dependent must not start on an "unverified"
+		dependency, so a producer's claim is a trigger to check rather than a licence to
+		proceed. A wave also ends the run when a step did not complete. ``concurrent`` is
+		off by default and is not a performance setting: two sessions editing one workspace
+		is a merge conflict, and whether a wave may run together is a question about
+		worktrees (FR-141) that the operator owns, not the scheduler.
 		"""
 		assert max_steps is None or max_steps > 0, "max_steps must be positive"
 		plan = await self.plan_by_id(plan_id)
@@ -625,6 +752,10 @@ class FactoryService:
 				]
 			produced.extend(records)
 			if any(record.outcome is not StepOutcome.COMPLETED for record in records):
+				break
+			state = await self.state()
+			refuted = refuted_steps(plan, state.latest_report(plan.contract_id))
+			if any(record.step_id in refuted for record in records):
 				break
 			if max_steps is not None and len(produced) >= max_steps:
 				break
