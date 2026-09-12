@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Environment — recreated by `uv sync`, never committed
+.venv/
+
+# SoFact's own state directory (the default SOFACT_HOME). A ledger is per-operator
+# data, not source; it is append-only and hash-chained, so committing one would make
+# every run a diff against someone else's history (ADR-0003).
+.sofact/
+
+# Harness session transcripts dumped into the working tree
+pi-session-*.html
