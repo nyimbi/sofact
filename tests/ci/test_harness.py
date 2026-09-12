@@ -111,7 +111,7 @@ class TestMeasuredSpecs:
 		assert "--offline" in PI_SPEC.argv
 		assert "--no-context-files" in PI_SPEC.argv
 		assert PI_SPEC.session_is_zstd is False
-		assert PI_SPEC.usage_path == ()
+		assert PI_SPEC.usage_path == ("message", "usage", "output")
 
 	def test_pi_has_no_completion_signal_so_precision_stays_unmeasured(self) -> None:
 		"""The asymmetry with dsh is a measured fact, not an oversight."""
@@ -121,7 +121,7 @@ class TestMeasuredSpecs:
 	def test_dsh_requires_explicit_home_and_writes_zstd(self) -> None:
 		assert DSH_SPEC.env == (("DSH_HOME", "{session_dir}"),)
 		assert DSH_SPEC.session_is_zstd is True
-		assert DSH_SPEC.completion_reason_path == ("reason", "kind")
+		assert DSH_SPEC.completion_reason_path == ("data", "reason", "kind")
 		assert DSH_SPEC.completion_reason_value == "completed"
 
 	def test_dsh_notes_record_the_headless_blocker_and_the_egress(self) -> None:
@@ -242,9 +242,32 @@ class TestParseUsage:
 		"""A harness that reports nothing is unmeasured; zero would be a fabrication."""
 		assert parse_usage(_records({"type": "a", "data": {}}), DSH_SPEC) is None
 
-	def test_pi_reports_no_usage_at_all(self) -> None:
-		rows = _records({"type": "a", "data": {"usage": {"outputTokens": 10}}})
-		assert parse_usage(rows, PI_SPEC) is None
+	def test_pi_usage_is_read_from_the_message_envelope(self) -> None:
+		"""Measured on pi 0.85.1: usage sits in ``message``, and the key is ``output``.
+
+		[S19] recorded that pi reports no usage at all. That was true of the version
+		measured then and is false now, and the probe's ``telemetry`` row is what caught
+		it -- which is the whole argument for the table being data (FR-161).
+		"""
+		rows = _records(
+			{"type": "message", "message": {"role": "assistant", "usage": {"output": 3}}},
+			{"type": "message", "message": {"role": "user"}},
+			{"type": "message", "message": {"role": "assistant", "usage": {"output": 7}}},
+		)
+		assert parse_usage(rows, PI_SPEC) == 10
+
+	def test_a_data_envelope_is_named_not_assumed(self) -> None:
+		"""A dsh-shaped record read through a pi-shaped path finds nothing, and vice versa.
+
+		That is the point: the root is stated once, so a wrong path reads nothing rather
+		than reading the wrong number.
+		"""
+		pi_shaped = _records({"message": {"usage": {"output": 3}}})
+		dsh_shaped = _records({"data": {"usage": {"outputTokens": 5}}})
+		assert parse_usage(pi_shaped, DSH_SPEC) is None
+		assert parse_usage(dsh_shaped, PI_SPEC) is None
+		assert parse_usage(pi_shaped, PI_SPEC) == 3
+		assert parse_usage(dsh_shaped, DSH_SPEC) == 5
 
 	def test_a_boolean_is_not_a_token_count(self) -> None:
 		rows = _records({"type": "a", "data": {"usage": {"outputTokens": True}}})
@@ -252,7 +275,10 @@ class TestParseUsage:
 
 	def test_max_reduction_takes_the_largest_single_record(self) -> None:
 		spec = HarnessSpec(
-			name="m", argv=("true",), usage_path=("usage", "outputTokens"), usage_reduce="max"
+			name="m",
+			argv=("true",),
+			usage_path=("data", "usage", "outputTokens"),
+			usage_reduce="max",
 		)
 		rows = _records(
 			{"data": {"usage": {"outputTokens": 10}}},
@@ -310,6 +336,23 @@ class TestProbe:
 	async def test_usage_in_the_record_confirms_telemetry(self, tmp_path: Path) -> None:
 		profile = await adapter_for(tmp_path, "complete").probe()
 		assert profile.observation(HarnessCapability.TELEMETRY) is ProbeOutcome.CONFIRMED
+
+	async def test_a_path_that_reads_nothing_is_absent_rather_than_zero(
+		self, tmp_path: Path
+	) -> None:
+		"""The branch the real `pi` defect lived in, kept reachable on purpose.
+
+		A spec that names no usage path is the honest stand-in for a wrong one: the probe
+		reports `ABSENT` and says spend cannot be attributed, rather than reporting `0`
+		(NFR-024). A real 0.85.1 `pi` record containing a usage block sat behind exactly
+		this row and read `absent` -- see ADR-0016.
+		"""
+		spec = dataclasses.replace(base_spec(tmp_path, "complete"), usage_path=())
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.TELEMETRY)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.ABSENT
+		assert "cannot be attributed" in finding.observed
 
 	async def test_goal_mode_is_inconclusive_from_one_invocation(self, tmp_path: Path) -> None:
 		"""One session cannot separate 'the harness cannot' from 'the model declined'."""

@@ -13,6 +13,14 @@ tags: [harness, adapter, isolation, telemetry, sandbox, reproducibility, prompt-
 
 ## Precis
 
+`pi` as measured, and one measured claim in [S19] corrected. The absence of any
+structured completion stands. The claim that `pi` reports no usage does not: recorded
+against an earlier version, it is false for 0.85.1, where an assistant `message` record
+carries `usage: {input, output, cacheRead, cacheWrite, reasoning, totalTokens, cost}`.
+The adapter was corrected by editing one row of its spec table, and the `telemetry` probe
+row now reads `confirmed (observed 3)` against a real invocation — see the note under
+Telemetry below.
+
 Second `content-verified` entry, and the second non-web one. `pi`'s own CLI was read
 directly (`pi --help`, `pi list`) to answer a question SoFact depends on: **can a
 harness be driven, restricted, and observed entirely from outside, by a program?**
@@ -73,6 +81,20 @@ evidence that the adapter boundary (FR-058) is achievable without forking.
   (observed live), under `<session-dir>/<project-slug>/<timestamp>_<uuid>.jsonl`.
 - This means **telemetry is readable by SoFact without harness cooperation**
   (FR-143) — the transcript is a file, not an API.
+- **Re-measured 2026-09-12 at 0.85.1** (corrects the first bullet, which is a claim
+  about the invocation shape rather than the record's contents). Two corrections:
+  with an explicit `--session-dir <dir>`, the record is a **direct child** of that
+  directory, `<iso-timestamp>_<session-id>.jsonl`, with no project-slug level; and an
+  assistant `message` record carries a **full usage block** —
+  `message: {role, content, provider, model, usage, stopReason}` with
+  `usage: {input, output, cacheRead, cacheWrite, reasoning, totalTokens, cost}`.
+  Top-level keys are `{cwd|id|message|modelId|parentId|provider|thinkingLevel|timestamp|type|version}`
+  depending on record type; observed types were `session`, `model_change`,
+  `thinking_level_change`, `message`.
+- **Consequence for the adapter:** spend *is* attributable for `pi`, so a `pi`
+  dispatch can carry a token count after all. The quantity that matches `dsh`'s
+  `data.usage.outputTokens` is `message.usage.output` — the same measure under a
+  different key, which is precisely why the path is a spec row and not code.
 
 ### Installed capabilities on this machine
 

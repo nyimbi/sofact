@@ -90,7 +90,7 @@ verified one — and `verify` remains the command that renders a verdict on dema
 			"argv": ["my-harness", "--goal", "{goal}", "--session", "{session_id}"],
 			"session_glob": "**/*{session_id}*.jsonl",
 			"completion_event": "turn/end",
-			"completion_reason_path": ["reason", "kind"],
+			"completion_reason_path": ["data", "reason", "kind"],
 			"goal_event_types": ["goal/created"]
 		}
 	}
@@ -102,6 +102,13 @@ fields and bare strings where a sequence belongs are refused **by name**. A miss
 key that silently defaulted would produce a plausible, wrong number rather than an
 error (FR-161). A malformed file, an unknown harness name, or a table holding several
 harnesses with no default all exit non-zero instead of guessing.
+
+`completion_reason_path` and `usage_path` are walked **from the record root**, and the
+envelope is named explicitly when there is one — `dsh` events are
+`{seq, time, type, data}`, so its paths begin `data`; `pi` writes `{type, message}` and
+its usage path begins `message`. Nothing is stripped implicitly, because a fixed
+envelope silently reads nothing on a harness that has no such block, and "no usage" is
+indistinguishable from "wrong path" once that happens.
 
 ## Model
 
@@ -116,7 +123,11 @@ Default: `deepseek-v4.1-flash:cloud` via Ollama's OpenAI-compatible endpoint —
 uv run pytest -vxs tests/ci
 uv run pyright
 uv run ruff format --check .
+npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
 ```
+
+The markdown lint takes explicit paths on purpose: an unanchored `**/*.md` also lints
+`.venv`, which is not this repository's prose and fails on third-party files.
 
 Conventions: async throughout, tabs, Pydantic v2 with `extra="forbid"`, UUID7 string
 ids, immutable value objects in `views.py`, orchestration in `service.py`.

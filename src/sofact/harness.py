@@ -135,9 +135,13 @@ class HarnessSpec:
 		that routinely contains braces, and running it through ``str.format`` would either
 		explode or silently mangle the objective it is SoFact's job to pin (FR-139).
 
-		``completion_reason_path`` and ``usage_path`` are both **relative to a record's
-		``data`` block**, not to the record itself: every event on the wire is
-		``{seq, time, type, data}``, so the envelope is stripped before either is walked.
+		``completion_reason_path`` and ``usage_path`` are both walked from the **record
+		root**, and a path names its envelope explicitly when there is one: a ``dsh`` event
+		is ``{seq, time, type, data}``, so its paths begin ``data``; ``pi`` writes
+		``{type, message}`` with no ``data`` block at all, so its usage path begins
+		``message``. One rule, no implicit stripping -- a fixed envelope cannot describe
+		both shapes, and a path that meant "relative to ``data``" would silently read
+		nothing on a harness that has no such block.
 	"""
 
 	name: str
@@ -393,26 +397,34 @@ PI_SPEC: Final = HarnessSpec(
 	session_is_zstd=False,
 	version_argv=("pi", "--version"),
 	completion_event=None,
-	usage_path=(),
+	usage_path=("message", "usage", "output"),
+	usage_reduce="sum",
 	goal_event_types=(),
 	goal_entry=GoalEntry.PROMPT,
 	supports_context_file_flag=True,
 	notes=(
-		"Measured 2026-09-12 against pi with a local ollama model. The session record is "
-		"plain JSONL at <session-dir>/<iso-timestamp>_<session-id>.jsonl with top-level "
-		"keys {cwd,id,timestamp,type,version}; observed types were session, model_change, "
-		"thinking_level_change, message. It emits NO usage block and NO completion event, "
-		"so this adapter can never corroborate a declaration and DeclarationPrecision "
-		"stays unmeasured for it — 'unmeasured', not 'wrong'. This is FR-144's reduced-mode "
-		"adapter and exists to test the interface (FR-058), not to be the production "
-		"harness."
+		"Measured 2026-09-12 against pi 0.85.1 with a local ollama model. The session "
+		"record is plain JSONL at <session-dir>/<iso-timestamp>_<session-id>.jsonl with "
+		"top-level keys {cwd,id,timestamp,type,version}; observed types were session, "
+		"model_change, thinking_level_change, message. An assistant message carries "
+		"{message: {role, content, provider, model, usage, stopReason}}, and usage holds "
+		"{input, output, cacheRead, cacheWrite, reasoning, totalTokens} -- note "
+		"'output', not 'outputTokens', so the path is not the dsh path with a different "
+		"prefix. It emits NO completion event and NO goal event, so this adapter can "
+		"never corroborate a declaration and DeclarationPrecision stays unmeasured for "
+		"it -- 'unmeasured', not 'wrong'. This is FR-144's reduced-mode adapter and "
+		"exists to test the interface (FR-058), not to be the production harness."
 	),
 )
-"""``pi`` as measured: JSONL session record, no usage, no completion signal.
+"""``pi`` as measured: JSONL session record, usage inside ``message``, no completion
+signal.
 
-Supersedes the ``reported`` description in [S19] on the two points that matter to the
-adapter — usage reporting and the absence of any structured completion — both of which
-were observed directly rather than read.
+Supersedes the ``reported`` description in [S19] on both points that matter to the
+adapter, and corrects one of them. The absence of any structured completion stands, and
+is confirmed. The claim that ``pi`` reports no usage does **not**: [S19] was measured
+against an earlier version, and a 0.85.1 message carries a full usage block. That is why
+the path is data rather than code -- the correction was one row of this table, and the
+probe that caught it was the ``telemetry`` row reading a real record (FR-148, FR-161).
 """
 
 
@@ -433,9 +445,9 @@ DSH_SPEC: Final = HarnessSpec(
 	session_is_zstd=True,
 	version_argv=("dsh", "--version"),
 	completion_event="turn/end",
-	completion_reason_path=("reason", "kind"),
+	completion_reason_path=("data", "reason", "kind"),
 	completion_reason_value="completed",
-	usage_path=("usage", "outputTokens"),
+	usage_path=("data", "usage", "outputTokens"),
 	usage_reduce="sum",
 	goal_event_types=(),
 	goal_entry=GoalEntry.PROMPT,
@@ -494,12 +506,6 @@ def _walk(payload: Mapping[str, object], path: Sequence[str]) -> object | None:
 	return current
 
 
-def _data_of(record: Mapping[str, object]) -> Mapping[str, object] | None:
-	"""The ``data`` block of a session record, or ``None`` if it has none."""
-	value = record.get("data")
-	return value if _is_mapping(value) else None
-
-
 #: A goal shorter than this is a substring of ordinary absolute paths, so containment
 #: cannot distinguish "the objective was baked into argv" from "a directory happens to
 #: contain these letters". Real objectives are generated prose of hundreds of characters.
@@ -518,10 +524,7 @@ def parse_completion(records: Iterable[Mapping[str, object]], spec: HarnessSpec)
 	for record in records:
 		if record.get("type") != spec.completion_event:
 			continue
-		data = _data_of(record)
-		if data is None:
-			continue
-		if _walk(data, spec.completion_reason_path) == spec.completion_reason_value:
+		if _walk(record, spec.completion_reason_path) == spec.completion_reason_value:
 			return True
 	return False
 
@@ -529,8 +532,10 @@ def parse_completion(records: Iterable[Mapping[str, object]], spec: HarnessSpec)
 def parse_usage(records: Iterable[Mapping[str, object]], spec: HarnessSpec) -> int | None:
 	"""Tokens the producer reported spending, or ``None`` if it reports nothing.
 
-	``spec.usage_path`` is walked against each record's ``data`` block, so a ``dsh``
-	path is ``("usage", "outputTokens")`` and not ``("data", "usage", ...)``.
+	``spec.usage_path`` is walked from the record root, so a ``dsh`` path is
+	``("data", "usage", "outputTokens")`` and ``pi``'s is ``("message", "usage",
+	"output")`` -- different envelopes and different key names for the same quantity.
+	The path is not guessed at: it was read off a real record for each harness.
 
 	``None`` and ``0`` are different answers. A harness that exposes no usage is
 	*unmeasured*; reporting zero would be inventing a measurement, which NFR-024
@@ -540,10 +545,7 @@ def parse_usage(records: Iterable[Mapping[str, object]], spec: HarnessSpec) -> i
 		return None
 	observed: list[int] = []
 	for record in records:
-		data = _data_of(record)
-		if data is None:
-			continue
-		value = _walk(data, spec.usage_path)
+		value = _walk(record, spec.usage_path)
 		if isinstance(value, int) and not isinstance(value, bool):
 			observed.append(value)
 	if not observed:

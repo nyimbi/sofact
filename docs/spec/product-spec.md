@@ -1003,6 +1003,19 @@ table**, then the sole entry when the table holds exactly one, and otherwise
 unattended build to an arbitrary producer, which is not a decision a factory may make
 silently.
 
+Both path fields — the completion-reason path and the usage path — are walked **from the
+record root**, and the envelope is named explicitly when there is one: a `dsh` event is
+`{seq, time, type, data}`, so its paths begin `data`; `pi` writes `{type, message}` with
+no `data` block at all, so its usage path begins `message` and its token key is `output`
+rather than `outputTokens`. Nothing may be stripped implicitly. The failure mode is not a
+crash but a **plausible wrong answer**: a path that means "relative to `data`" reads
+nothing on a harness without that block, and the probe then reports `telemetry absent`
+for a harness that reports every token it spends — `unmeasured` masquerading as `none`,
+which is the one direction NFR-024 forbids. This was a real defect, found by running the
+probe against a real harness and noticing that an `ABSENT` row contradicted a record
+already on disk, and it is fixed in the spec table rather than in a branch — the
+correction was one row, which is the argument for the table being data (FR-161).
+
 ### 8.6 The harness decision (D11 resolved)
 
 **v1 drives `dsh` as the primary harness and `pi` as the second adapter.** The
