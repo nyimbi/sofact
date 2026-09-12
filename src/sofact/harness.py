@@ -420,6 +420,7 @@ PI_SPEC: Final = HarnessSpec(
 		"-p",
 		"--offline",
 		"--no-context-files",
+		"--no-extensions",
 		"--model",
 		"{model}",
 		"--session-dir",
@@ -456,7 +457,11 @@ PI_SPEC: Final = HarnessSpec(
 		"--model is resolved against its own curated registry rather than against what "
 		"the model server serves, and a tag it does not list exits 1 with 'Model "
 		'"qwen3.6-coding:latest" not found. Use --list-models to see available models.\', '
-		"hence model_error_pattern. Measured 2026-09-12."
+		"hence model_error_pattern. Measured 2026-09-12. --no-extensions freezes the "
+		"producer's composition (FR-154): installed pi packages auto-load into every "
+		"session, so an unextended argv would hand a build producer whatever the "
+		"operator happens to have installed. A session that needs an extension gets a "
+		"spec that names it, not a default that carries everything."
 	),
 )
 """``pi`` as measured: JSONL session record, usage inside ``message``, no completion

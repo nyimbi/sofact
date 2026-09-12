@@ -110,6 +110,10 @@ class TestMeasuredSpecs:
 		assert PI_SPEC.argv[:2] == ("pi", "--mode")
 		assert "--offline" in PI_SPEC.argv
 		assert "--no-context-files" in PI_SPEC.argv
+		assert "--no-extensions" in PI_SPEC.argv, (
+			"installed packages auto-load into every pi session, so an unextended argv "
+			"would hand a build producer whatever the operator has installed (FR-154)"
+		)
 		assert PI_SPEC.session_is_zstd is False
 		assert PI_SPEC.usage_path == ("message", "usage", "output")
 
