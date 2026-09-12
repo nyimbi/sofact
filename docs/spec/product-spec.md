@@ -885,17 +885,17 @@ The probe must **attempt** each capability and observe the outcome, read the
 installed package manifest, and record the version it observed. Help text may
 propose a probe; it may not answer one.
 
-**Which rows one bounded invocation actually decides** (v0.1, measured):
+**Which rows a probe actually decides** (v0.1, measured):
 `non_interactive` (the child either exits or had to be killed), `telemetry` (a
 usage block in the record or none), `context_files_disabled` (the flag either ran
 cleanly or did not), `model_resolved` (FR-164), `goal_mode` **on positive evidence
 only** (FR-153), and `bootstrap_empty_repo` **on positive evidence only** — the
 probe invokes the harness with its workspace as `cwd`, so a cold start is counted
 *before* the child runs, and a workspace that is not empty is reported as an
-unwitnessed capability rather than as a failure to bootstrap. Four rows —
-`sandboxable`, `concurrent`, `budget_control`, `goal_survives_compaction` — remain
-**coverage gaps in the probe** and say so in their own reason string, which is a
-statement about the probe and not about the harness.
+unwitnessed capability rather than as a failure to bootstrap. The remaining four
+rows — `sandboxable`, `concurrent`, `budget_control`, `goal_survives_compaction` —
+are **attempted** (FR-165), each by a *differential* rather than by a longer look at
+one run, and each reports the attempt it made even when the answer is inconclusive.
 
 **Two rows gate, and they gate differently.** `non_interactive` refuses dispatch
 (FR-145); `model_resolved` also refuses it, but only for the model the refusal was
@@ -920,6 +920,54 @@ observation of refusal is `ABSENT`, and a clean exit that left a readable record
 is `CONFIRMED` (FR-153). A profile records the model it was probed with, and a
 dispatch whose model differs from the profile's is refused, because a capability
 finding describes the configuration that was measured, not the harness's name.
+
+**FR-165** A capability row that one bounded invocation cannot decide must be
+**measured by a differential**, not left as an unmeasured default. A probe is what a
+dispatch is allowed to assume, so a row the probe did not attempt has to be
+*indistinguishable from a row it attempted and could not decide* — and the two are
+different statements about different things. Four rows are attempted this way:
+
+- **`sandboxable`** — one child, handed a tool set that cannot write outside its
+  directory, is told to work there and then to **attempt an escape** one directory
+  up. The escape file appearing is `ABSENT` (the confinement did not hold); the
+  inside write appearing with no escape file is `CONFIRMED`; neither is
+  `INCONCLUSIVE`, because a child that did no work proves nothing either way. The
+  finding **names the tool set it used**, because confinement here is SoFact's
+  restriction of the producer's tools (FR-158), not a property of the harness: an
+  operator can narrow the set and probe again.
+- **`concurrent`** — two children run **simultaneously** with distinct session ids,
+  and the question is only whether their session records land on distinct paths.
+  Distinct records are `CONFIRMED`; one shared path is `ABSENT`, because a step that
+  overwrote its sibling's history would destroy the evidence for half a wave
+  (FR-142).
+- **`budget_control`** — only attempted when the spec **declares a budget flag**
+  (FR-161); a harness that declares none is `INCONCLUSIVE` *for that reason*, since
+  there is nothing to attempt. Where one is declared, the same goal runs twice in two
+  scratch directories — once with the flag rendered at a cap nothing can do work
+  inside of, once without it — and the observable is the artefact: written under the
+  cap is `ABSENT` (the flag is accepted and not honoured), written only without the
+  cap is `CONFIRMED`, and neither is `INCONCLUSIVE`, because absence under a cap
+  proves nothing while the uncapped run did no work. By FR-140 nothing depends on
+  this row: SoFact holds the wall clock either way.
+- **`goal_survives_compaction`** — costs no child, because it reads the **primary**
+  run's own record: a declared compaction event (FR-161) with at least one turn the
+  harness itself numbered is `CONFIRMED`, and either half alone is `INCONCLUSIVE`. A
+  short probe goal never reaches a context limit, so this row is decided on positive
+  evidence only — as FR-153 requires.
+
+The extra attempts run **after** the primary attempt and only when the primary
+actually did work (exit 0, not timed out, a readable record); a run that was skipped
+says **which** of those failed, naming the primary's exit code. They never run
+*concurrently with* the primary: the extras share one local model and one machine, so
+contention between generations would be indistinguishable from incapability, and the
+row it would corrupt is the one deciding whether anything can run unattended at all.
+Each extra also gets its own scratch directory, so a stale file can never be read as
+this run's evidence.
+
+`probe --quick` skips exactly the rows that need a second child and records the skip
+**in each row's own reason**, since an attempt never made and an attempt that found
+nothing are different facts. `goal_survives_compaction` is not skipped: it costs no
+child.
 
 **FR-149** Harness invocations must be **hermetic**: every flag that could cause a
 session to read operator state, ambient configuration, or network resources must be
@@ -1706,6 +1754,20 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
   **empty** set is refused rather than forwarded: an empty allowlist disables every tool,
   so the producer could not write, and the failure would surface later as a broken step
   with no cause attached.
+- **`--quick`** (on `probe`) — skip the capability rows that need a second child
+  (`sandboxable`, `concurrent`, `budget_control`) when a full probe is slower than the
+  question is worth (FR-165). The rows are still **reported**, each saying that the
+  attempt was not made, so a quick probe cannot be mistaken for a clean one. The
+  `goal_survives_compaction` row is not skipped: it reads the record the probe already
+  has.
+- **Spec fields a deployment declares, not code it writes** (FR-161): `confinement_tools`
+  is the tool set the `sandboxable` probe hands its child (empty means the operator's
+  resolved `--tools`, so the row measures the configuration actually in force);
+  `budget_argv` is the harness's budget flag, rendered with a `{budget}` slot, and its
+  absence is what makes `budget_control` report *nothing to attempt* rather than a gap;
+  `compaction_event` is the record type that means a compaction happened, and a spec that
+  declares none can never confirm survival across one. All three are optional, and each
+  one narrows what the probe can decide rather than being assumed (FR-153).
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an

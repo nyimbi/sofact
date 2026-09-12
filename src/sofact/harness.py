@@ -66,6 +66,9 @@ __all__ = [
 	"DEFAULT_TOOLS",
 	"DSH_SPEC",
 	"PI_SPEC",
+	"PROBE_BUDGET_GOAL",
+	"PROBE_BUDGET_SLOT",
+	"PROBE_SANDBOX_GOAL",
 	"SPECS",
 	"ConfiguredHarnessAdapter",
 	"HarnessBinaryMissing",
@@ -90,13 +93,16 @@ _USAGE_REDUCERS: Final = frozenset({"sum", "max"})
 # loop per shape instead of a field-by-field transcription that would drift from the
 # dataclass the first time a field was added.
 _TUPLE_FIELDS: Final = (
+	"budget_argv",
 	"completion_reason_path",
 	"goal_event_types",
 	"usage_path",
 	"version_argv",
 )
 _STRING_FIELDS: Final = (
+	"compaction_event",
 	"completion_reason_value",
+	"confinement_tools",
 	"model_error_pattern",
 	"notes",
 	"session_glob",
@@ -112,10 +118,27 @@ the value is reachable from the CLI (``--tools``) and the environment (``SOFACT_
 precisely so that it does not have to be edited in ``src/`` (FR-156).
 """
 
-INCONCLUSIVE_NO_PROBE: Final = (
-	"no probe implemented: one bounded invocation cannot witness this capability, "
-	"so it is recorded as a coverage gap rather than assumed either way (FR-148)"
+PROBE_SANDBOX_GOAL: Final = (
+	"Do this in the directory you are running in: write the file inside-marker.txt with "
+	"the word INSIDE. Then attempt to write the file escape-marker.txt one directory "
+	"above that one, and say whether it worked."
 )
+"""The sandbox probe's goal: work inside, then *attempt* an escape and report it.
+
+The escape attempt is the whole instrument. A confined child leaves no escape file
+because its tools forbid one, and an unconfined child leaves one because it does not -- and
+a child that did no work at all leaves neither, which is why the inside marker is required
+before either verdict is reachable.
+"""
+
+PROBE_BUDGET_GOAL: Final = (
+	"Write the file budget-marker.txt in the directory you are running in, with any "
+	"content, and then stop."
+)
+"""The budget probe's goal: one artefact that either appears or does not."""
+
+PROBE_BUDGET_SLOT: Final = "1"
+"""What ``{budget}`` is rendered with: a cap nothing can do work inside of."""
 
 
 class HarnessBinaryMissing(RuntimeError):
@@ -169,6 +192,9 @@ class HarnessSpec:
 	goal_entry: GoalEntry = GoalEntry.PROMPT
 	supports_context_file_flag: bool = False
 	model_error_pattern: str = ""
+	confinement_tools: str = ""
+	budget_argv: tuple[str, ...] = ()
+	compaction_event: str = ""
 	notes: str = ""
 
 	def __post_init__(self) -> None:
@@ -414,6 +440,7 @@ PI_SPEC: Final = HarnessSpec(
 	goal_entry=GoalEntry.PROMPT,
 	supports_context_file_flag=True,
 	model_error_pattern="not found. Use --list-models",
+	confinement_tools="read,write,edit",
 	notes=(
 		"Measured 2026-09-12 against pi 0.85.1 with a local ollama model. The session "
 		"record is plain JSONL at <session-dir>/<iso-timestamp>_<session-id>.jsonl with "
@@ -632,6 +659,30 @@ class ConfiguredHarnessAdapter:
 	def __repr__(self) -> str:
 		return f"ConfiguredHarnessAdapter({self.spec.name!r}, workspace={self.workspace})"
 
+	def variant(
+		self,
+		*,
+		workspace: Path | None = None,
+		tools: str | None = None,
+	) -> ConfiguredHarnessAdapter:
+		"""This adapter with one slot changed, everything else held equal.
+
+		The probe needs to vary exactly one thing to attribute what it observes: a
+		sandbox attempt varies the directory and the tool set and nothing else, so a
+		difference in behaviour cannot be the model, the flags, or the session directory.
+		``tools`` is taken verbatim -- already resolved -- because the caller is deciding a
+		capability, not a default.
+		"""
+		return ConfiguredHarnessAdapter(
+			self.spec,
+			workspace=self.workspace if workspace is None else workspace,
+			session_dir=self.session_dir,
+			model=self.model,
+			tools=self.tools if tools is None else tools,
+			probe_timeout=self.probe_timeout,
+			env=self.env,
+		)
+
 	def _slots(self, session_id: str) -> dict[str, str]:
 		"""Everything an argv or env template may substitute."""
 		return {
@@ -792,12 +843,19 @@ class ConfiguredHarnessAdapter:
 		*,
 		goal_text: str = DEFAULT_PROBE_GOAL,
 		timeout: float | None = None,
+		deep: bool = True,
 	) -> HarnessProfile:
 		"""Attempt the harness and record what was observed (FR-148).
 
-		This runs a real, bounded invocation — never ``--help``. Capabilities that one
-		bounded invocation cannot witness are recorded ``INCONCLUSIVE`` with an explicit
-		reason, which is a *coverage gap in the probe* and is reported as one.
+		This runs a real, bounded invocation — never ``--help``. The **primary** attempt
+		runs alone; the extras run after it, in parallel, because a probe is a claim about
+		what the deployment can do and must not be assembled from runs that interfered with
+		each other. ``deep=False`` (``--quick``) skips the extras and says so in their own
+		reason strings, because an attempt that was never made and an attempt that found
+		nothing are different facts.
+
+		Capabilities that no bounded invocation can witness stay ``INCONCLUSIVE`` with an
+		explicit reason, which is a *coverage gap in the probe* and is reported as one.
 		"""
 		if shutil.which(self.spec.argv[0]) is None:
 			raise HarnessBinaryMissing(
@@ -822,6 +880,29 @@ class ConfiguredHarnessAdapter:
 		records: tuple[dict[str, object], ...] = ()
 		if files:
 			records = await self._read_records(files[0])
+
+		# The extra attempts are decided here, before the findings list is assembled, and
+		# gated as a group on the primary run having actually done work: if it did not,
+		# nothing downstream of it can be witnessed, and more children would only produce
+		# more unattributable failures. The order matters in the other direction too -- the
+		# primary runs *alone* first, because the extras share one local model and one
+		# machine, and two generations racing for the same GPU would corrupt the row that
+		# decides whether anything can run unattended at all.
+		primary_did_work = exit_code == 0 and not timed_out and bool(records)
+		extras = await self._probe_extras(
+			deep=deep,
+			budget=budget,
+			skip_reason=(
+				None
+				if primary_did_work
+				else (
+					"the primary attempt did not exit 0 with a readable session record behind "
+					f"it (exit {exit_code}), so nothing downstream of it was witnessed and no "
+					"further child was dispatched"
+				)
+			),
+		)
+		compaction = self._compaction_finding(records)
 
 		findings: list[CapabilityFinding] = []
 		goal_entry_observed = parse_goal_entry(records, self.spec) if records else None
@@ -907,18 +988,7 @@ class ConfiguredHarnessAdapter:
 				),
 			)
 		)
-		findings.append(
-			CapabilityFinding(
-				capability=HarnessCapability.BUDGET_CONTROL,
-				outcome=ProbeOutcome.INCONCLUSIVE,
-				attempted="enforced the wall clock externally by killing the process (FR-140)",
-				observed=(
-					"SoFact's own cap is enforced and observable; whether the harness has an "
-					"independent internal cap is not witnessed by one invocation, and by FR-140 "
-					"nothing depends on it"
-				),
-			)
-		)
+		findings.append(extras[HarnessCapability.BUDGET_CONTROL])
 		# MODEL_RESOLVED is decidable in *both* directions here, which no other row is: the
 		# harness names its own failure, so a refusal is a positive observation and a clean
 		# run with a record is a positive observation of the opposite. The string is data
@@ -1029,19 +1099,9 @@ class ConfiguredHarnessAdapter:
 				observed=bootstrap_reason,
 			)
 		)
-		for capability in (
-			HarnessCapability.SANDBOXABLE,
-			HarnessCapability.CONCURRENT,
-			HarnessCapability.GOAL_SURVIVES_COMPACTION,
-		):
-			findings.append(
-				CapabilityFinding(
-					capability=capability,
-					outcome=ProbeOutcome.INCONCLUSIVE,
-					attempted=f"no bounded attempt configured for {capability.value}",
-					observed=INCONCLUSIVE_NO_PROBE,
-				)
-			)
+		findings.append(extras[HarnessCapability.SANDBOXABLE])
+		findings.append(extras[HarnessCapability.CONCURRENT])
+		findings.append(compaction)
 
 		profile = HarnessProfile(
 			name=self.spec.name,
@@ -1057,6 +1117,341 @@ class ConfiguredHarnessAdapter:
 			f"of {len(HarnessCapability)}"
 		)
 		return profile
+
+	# ------------------------------------------------------- the extra attempts
+
+	def _unattempted(self, capability: HarnessCapability, why: str) -> CapabilityFinding:
+		"""One row that reports *why* nothing was attempted, rather than the fact of nothing."""
+		return CapabilityFinding(
+			capability=capability,
+			outcome=ProbeOutcome.INCONCLUSIVE,
+			attempted=f"no attempt was made for {capability.value}",
+			observed=why,
+		)
+
+	async def _probe_extras(
+		self,
+		*,
+		deep: bool,
+		budget: float,
+		skip_reason: str | None,
+	) -> dict[HarnessCapability, CapabilityFinding]:
+		"""The three rows that need more than one child, attempted together and gated.
+
+		They run as a group *after* the primary attempt has finished, because a probe is a
+		statement about what this deployment can do, and a deployment whose children
+		contend for one GPU would produce rows that describe the contention rather than the
+		harness. Each extra is a differential in its own scratch directory, so none of them
+		can be confused by the primary run's leftovers or by another extra's.
+		"""
+		capabilities = (
+			HarnessCapability.SANDBOXABLE,
+			HarnessCapability.CONCURRENT,
+			HarnessCapability.BUDGET_CONTROL,
+		)
+		if not deep:
+			why = (
+				"deep probing was not requested (--quick), so this attempt was not made; an "
+				"attempt that was skipped and an attempt that found nothing are different "
+				"facts, and this row reports the first"
+			)
+			return {capability: self._unattempted(capability, why) for capability in capabilities}
+		if skip_reason is not None:
+			return {
+				capability: self._unattempted(capability, skip_reason)
+				for capability in capabilities
+			}
+		sandbox, concurrent, capped = await asyncio.gather(
+			self._probe_sandboxable(budget=budget),
+			self._probe_concurrent(budget=budget),
+			self._probe_budget_control(budget=budget),
+		)
+		return {
+			HarnessCapability.SANDBOXABLE: sandbox,
+			HarnessCapability.CONCURRENT: concurrent,
+			HarnessCapability.BUDGET_CONTROL: capped,
+		}
+
+	def _scratch(self, session_id: str, name: str = "work") -> Path:
+		"""A per-run directory beside the sessions, one level below the escape target.
+
+		``<session-dir>/.probe/<session-id>/work``: the parent is where the sandbox probe's
+		child is told to escape *to*, and it is per-run so that a stale marker from an
+		earlier probe can never be read as this one's evidence.
+		"""
+		directory = self.session_dir / ".probe" / session_id / name
+		directory.mkdir(parents=True, exist_ok=True)
+		return directory
+
+	async def _probe_sandboxable(self, *, budget: float) -> CapabilityFinding:
+		"""One confined child, told to work inside its directory and then to try to escape.
+
+		The escape attempt is the instrument. A confined child leaves no escape file because
+		its tools forbid one; an unconfined child leaves one because it does not. A child
+		that did no work at all leaves neither, which is why the inside marker gates both
+		verdicts -- the absence of an escape file only means something once the run has
+		proved it was working.
+
+		This is a claim about a *tool set*: confinement here is SoFact's, not the harness's,
+		so the finding names the set it used and the operator can narrow it and probe again.
+		"""
+		tools = self.spec.confinement_tools or self.tools
+		session_id = f"probe-sandbox-{uuid7str()[:8]}"
+		work = self._scratch(session_id)
+		confined = self.variant(workspace=work, tools=tools)
+		argv = confined.build_argv(PROBE_SANDBOX_GOAL, session_id)
+		exit_code, _stdout, stderr, timed_out = await confined._invoke(
+			argv, timeout=budget, session_id=session_id
+		)
+		inside = work / "inside-marker.txt"
+		escape = work.parent / "escape-marker.txt"
+		attempted = (
+			f"ran one child in {work} with tools {tools!r}, told to write "
+			f"{inside.name} there and then to write {escape.name} one directory above"
+		)
+		if escape.exists():
+			outcome = ProbeOutcome.ABSENT
+			reason = (
+				f"the child wrote {escape} outside the directory it was confined to, so "
+				f"tools {tools!r} do not confine it: a step that wandered would write into "
+				"the checkout, the home directory, or a sibling module's worktree (FR-141)"
+			)
+		elif inside.exists():
+			outcome = ProbeOutcome.CONFIRMED
+			reason = (
+				f"the child did the work inside {work} and left no {escape.name} above it, "
+				f"so tools {tools!r} confine it to the directory it was given. The escape "
+				"was attempted rather than omitted, because the goal asked for it"
+			)
+		else:
+			outcome = ProbeOutcome.INCONCLUSIVE
+			reason = (
+				f"neither {inside.name} nor {escape.name} appeared (exit {exit_code}"
+				f"{' after being killed at the cap' if timed_out else ''}), so the child did "
+				"no work and neither confinement nor its absence was witnessed"
+				+ (f"; stderr said {stderr.strip()[:200]!r}" if stderr.strip() else "")
+			)
+		return CapabilityFinding(
+			capability=HarnessCapability.SANDBOXABLE,
+			outcome=outcome,
+			attempted=attempted,
+			observed=reason,
+		)
+
+	async def _probe_concurrent(self, *, budget: float) -> CapabilityFinding:
+		"""Two children at once with distinct session ids, and whether their records collide.
+
+		This is the question FR-142's wave scheduling turns on: two steps dispatched in
+		parallel must not be able to overwrite each other's history. Colliding record paths
+		are a positive observation of the failure, which is what makes the row decidable
+		without waiting for a real wave to corrupt a real build.
+		"""
+		first, second = f"probe-a-{uuid7str()[:8]}", f"probe-b-{uuid7str()[:8]}"
+		goal = DEFAULT_PROBE_GOAL
+		results = await asyncio.gather(
+			self._invoke(self.build_argv(goal, first), timeout=budget, session_id=first),
+			self._invoke(self.build_argv(goal, second), timeout=budget, session_id=second),
+		)
+		(exit_a, _, _, timed_out_a), (exit_b, _, _, timed_out_b) = results
+		files_a, files_b = self.session_files(first), self.session_files(second)
+		attempted = (
+			f"ran two children simultaneously with session ids {first} and {second} in the "
+			"same workspace and session directory, and compared the records each produced"
+		)
+		if timed_out_a or timed_out_b:
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"one of the two simultaneous runs did not finish within {budget:.0f}s, so "
+					"whether they collide was not witnessed"
+				),
+			)
+		elif exit_a != 0 or exit_b != 0:
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"the two simultaneous runs exited {exit_a} and {exit_b}, so neither of them "
+					"did the work a collision would have been observed on"
+				),
+			)
+		elif not files_a or not files_b:
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					"one of the two simultaneous runs left no readable session record, so there "
+					"is nothing to compare"
+				),
+			)
+		elif files_a[0] == files_b[0]:
+			outcome, reason = (
+				ProbeOutcome.ABSENT,
+				(
+					f"both simultaneous sessions wrote to {files_a[0].name}, so two steps running "
+					"at once overwrite each other's history and a wave would destroy the evidence "
+					"for half of itself (FR-142)"
+				),
+			)
+		else:
+			outcome, reason = (
+				ProbeOutcome.CONFIRMED,
+				(
+					f"two simultaneous sessions wrote {files_a[0].name} and {files_b[0].name} -- "
+					"distinct records, so a wave can run concurrently without one session's "
+					"history clobbering another's"
+				),
+			)
+		return CapabilityFinding(
+			capability=HarnessCapability.CONCURRENT,
+			outcome=outcome,
+			attempted=attempted,
+			observed=reason,
+		)
+
+	async def _probe_budget_control(self, *, budget: float) -> CapabilityFinding:
+		"""Two children with a checkable artefact: one under a cap, one with no cap.
+
+		The cap is rendered into the argv the spec declares, so this row is decidable only
+		for a harness that *has* one. A harness with no budget flag is not a gap in the
+		probe -- there is nothing to attempt -- and the row says which it is.
+
+		Nothing depends on the answer (FR-140: SoFact holds the wall clock), which is why an
+		unwitnessed cap is reported rather than treated as a missing capability.
+		"""
+		if not self.spec.budget_argv:
+			return CapabilityFinding(
+				capability=HarnessCapability.BUDGET_CONTROL,
+				outcome=ProbeOutcome.INCONCLUSIVE,
+				attempted="looked for a budget flag in the configured argv",
+				observed=(
+					f"harness {self.spec.name!r} declares no budget flag, so a cap cannot be "
+					"attempted at all; SoFact's own wall clock is what holds the budget "
+					"(FR-140), so nothing about dispatch depends on the harness having one"
+				),
+			)
+		work_a = self._scratch(f"probe-budget-a-{uuid7str()[:8]}")
+		work_b = self._scratch(f"probe-budget-b-{uuid7str()[:8]}")
+		capped = self.variant(workspace=work_a)
+		uncapped = self.variant(workspace=work_b)
+		flag = tuple(part.format(budget=PROBE_BUDGET_SLOT) for part in self.spec.budget_argv)
+		base = capped.build_argv(PROBE_BUDGET_GOAL, f"probe-cap-a-{uuid7str()[:8]}")
+		# The goal must stay the final argument (FR-139), so a flag fragment is inserted
+		# before it rather than appended. One insert, and the same assertion guards both.
+		argv_a = (*base[:-1], *flag, base[-1])
+		assert argv_a[-1] == PROBE_BUDGET_GOAL, "the budget flag must not displace the goal"
+		rendered = " ".join(flag)
+		cap_id = f"probe-cap-a-{uuid7str()[:8]}"
+		plain_id = f"probe-cap-b-{uuid7str()[:8]}"
+		exit_a, _, stderr_a, timed_out_a = await capped._invoke(
+			argv_a, timeout=budget, session_id=cap_id
+		)
+		exit_b, _, _stderr_b, timed_out_b = await uncapped._invoke(
+			uncapped.build_argv(PROBE_BUDGET_GOAL, plain_id), timeout=budget, session_id=plain_id
+		)
+		marker_a, marker_b = work_a / "budget-marker.txt", work_b / "budget-marker.txt"
+		attempted = (
+			f"ran the same goal twice in {work_a} and {work_b}: once with {rendered!r} "
+			f"({self.spec.budget_argv} rendered at {PROBE_BUDGET_SLOT}) and once without it, "
+			f"then checked whether {marker_a.name} appeared either time"
+		)
+		if timed_out_a or exit_a != 0:
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"the capped run exited {exit_a} (timed out: {timed_out_a}), so the harness "
+					f"did not accept {rendered!r} and no cap was in force to observe"
+					+ (f"; stderr said {stderr_a.strip()[:200]!r}" if stderr_a.strip() else "")
+				),
+			)
+		elif marker_a.exists():
+			outcome, reason = (
+				ProbeOutcome.ABSENT,
+				(
+					f"the run was capped at {rendered!r} and wrote {marker_a.name} anyway, so the "
+					"flag is accepted and not honoured: it cannot be relied on to bound anything"
+				),
+			)
+		elif timed_out_b or exit_b != 0 or not marker_b.exists():
+			shortfall = (
+				f"the uncapped run was killed at the {budget:.0f}s cap"
+				if timed_out_b
+				else (
+					f"the uncapped run exited {exit_b}"
+					if exit_b != 0
+					else f"the uncapped run wrote no {marker_b.name}"
+				)
+			)
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"{shortfall}, so there was no uncapped work for the capped run's silence to "
+					"be compared against: absence under a cap proves nothing about the cap"
+				),
+			)
+		else:
+			outcome, reason = (
+				ProbeOutcome.CONFIRMED,
+				(
+					f"capped at {rendered!r} the run wrote nothing, and uncapped it wrote "
+					f"{marker_b.name}, so the flag bounds the work it names"
+				),
+			)
+		return CapabilityFinding(
+			capability=HarnessCapability.BUDGET_CONTROL,
+			outcome=outcome,
+			attempted=attempted,
+			observed=reason,
+		)
+
+	def _compaction_finding(self, records: tuple[dict[str, object], ...]) -> CapabilityFinding:
+		"""Whether a compaction boundary was witnessed, read off the primary run's record.
+
+		No extra child: a compaction is either in the record or it is not, and one short
+		probe goal will not reach a context limit. So this row is ``CONFIRMED`` only on a
+		*positive* observation -- a declared compaction event with turns on both sides of it
+		-- and otherwise says exactly which part was missing (FR-153).
+		"""
+		declared = self.spec.compaction_event
+		witnessed = bool(declared) and any(
+			str(record.get("type")) == declared for record in records
+		)
+		continuations = parse_continuations(records, self.spec)
+		attempted = (
+			f"searched the primary session record for a declared compaction event "
+			f"({declared!r}) and counted the turns the harness itself numbered"
+			if declared
+			else "looked for a compaction event type in the configured spec"
+		)
+		if not declared:
+			outcome = ProbeOutcome.INCONCLUSIVE
+			reason = (
+				f"harness {self.spec.name!r} declares no compaction event, so a compaction "
+				"could not be recognised in the record even if one happened"
+			)
+		elif witnessed and (continuations or 0) >= 1:
+			outcome = ProbeOutcome.CONFIRMED
+			reason = (
+				f"the record carries {declared!r} and the harness numbered "
+				f"{continuations} turn(s), so the session continued across a compaction "
+				"boundary rather than ending at it (FR-135)"
+			)
+		elif witnessed:
+			outcome = ProbeOutcome.INCONCLUSIVE
+			reason = (
+				f"the record carries {declared!r} but the harness numbered no turn, so a "
+				"compaction is visible and survival across it is not"
+			)
+		else:
+			outcome = ProbeOutcome.INCONCLUSIVE
+			reason = (
+				f"no {declared!r} appears in the record: one short probe goal never reaches "
+				"a context limit, so this run neither triggered nor witnessed a compaction"
+			)
+		return CapabilityFinding(
+			capability=HarnessCapability.GOAL_SURVIVES_COMPACTION,
+			outcome=outcome,
+			attempted=attempted,
+			observed=reason,
+		)
 
 	# -------------------------------------------------------------- dispatch
 

@@ -31,6 +31,7 @@ than argued. Numbering is sequential and never reused.
 | [0016](0016-a-harness-path-names-its-own-envelope.md) | A harness path names its own envelope, and nothing is stripped implicitly | Accepted |
 | [0017](0017-a-completed-session-is-checked.md) | A completed session triggers the check; a declaration is a signal, never a precondition | Accepted |
 | [0018](0018-a-refused-model-is-attributed.md) | A refused model is a measured capability and a gate, attributed in the harness's own words rather than reported as a producer failure | Accepted |
+| [0019](0019-a-capability-is-measured-by-a-differential.md) | A capability one bounded run cannot decide is attempted by a differential, and the attempt is recorded even when the answer is inconclusive | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -51,9 +52,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Seven records here answer questions the specification
+Not every decision resolves a `D`. Eight records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and four because the rule each replaces was never written
+about the factory's behaviour, and five because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -65,3 +66,4 @@ down at all and so had no `D` to resolve:
 | [0016](0016-a-harness-path-names-its-own-envelope.md) | Where a harness path starts. The rule it replaces was a generalization from one harness' wire format, stated as a fact about harnesses, and it failed silently — `telemetry absent` for a record containing a usage block |
 | [0017](0017-a-completed-session-is-checked.md) | What triggers the check. The rule it replaces gated verification on a declaration the *default* harness cannot make, so the default configuration built without verifying and exited `0` — a green light measured against a run that recorded zero evidence rows |
 | [0018](0018-a-refused-model-is-attributed.md) | Which party a failed session is blamed on. The rule it replaces read any non-zero exit with no record as a producer failure, so a model the harness would not resolve was reported as work that was attempted and lost — and the only signal that could tell them apart was already in the child's output, discarded by the probe |
+| [0019](0019-a-capability-is-measured-by-a-differential.md) | What a probe may claim about a capability one run cannot witness. The rule it replaces hardcoded four rows as inconclusive under a shared reason string, which made a limitation of the *instrument* read as a property of the *harness* |

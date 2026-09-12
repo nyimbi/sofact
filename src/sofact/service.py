@@ -649,17 +649,23 @@ class FactoryService:
 		tools: str | None = None,
 		timeout: float | None = None,
 		goal_text: str | None = None,
+		deep: bool = True,
 	) -> HarnessProfile:
 		"""Attempt a harness and record what was observed (FR-148).
 
 		Raises :class:`~sofact.harness.HarnessBinaryMissing` when the executable is
 		absent — that is a fact about this machine, not about the harness, and recording
 		it as an unprobed capability would libel the harness.
+
+		``deep=False`` (``--quick``) skips the rows that need a second child. That is a
+		deliberate trade of coverage for time, and it is recorded as such: the skipped rows
+		say they were skipped rather than pretending they were looked at.
 		"""
 		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
 		profile = await adapter.probe(
 			goal_text=goal_text or DEFAULT_PROBE_GOAL,
 			timeout=timeout,
+			deep=deep,
 		)
 		self._commit(
 			LedgerKind.CAPABILITY_PROBED,

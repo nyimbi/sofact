@@ -50,7 +50,14 @@ import sys
 import time
 
 session_dir, session_id, mode = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+tools = sys.argv[4] if len(sys.argv) > 4 else ""
+goal = sys.argv[-1]
 target = session_dir / f"{session_id}.jsonl"
+if mode.startswith("shared"):
+	# One fixed record path for every session: a harness whose records collide when two
+	# steps run at once. It has to be a real file on disk for the probe to observe the
+	# collision at all, and the mode is the negative of the CONCURRENT row.
+	target = session_dir / "shared.jsonl"
 
 if mode.startswith("badmodel"):
 	# The harness's own registry rejects the identifier and it exits before writing any
@@ -79,6 +86,16 @@ if mode.startswith("slow"):
 	time.sleep(30)
 	sys.exit(0)
 
+if mode.startswith("quiet-after-first"):
+	# Clean and record-writing on the first call, then slow. This is what lets a probe
+	# watch a *primary* run succeed and an *extra* run fail to finish, which is the only
+	# way to reach the branch where a child did no work at all.
+	counter = session_dir / ".calls"
+	seen = int(counter.read_text()) if counter.exists() else 0
+	counter.write_text(str(seen + 1))
+	if seen > 0:
+		time.sleep(30)
+
 if mode.startswith("malformed"):
 	target.write_text('{"seq": 1, "type": "session"\\n not json\\n', encoding="utf-8")
 	sys.exit(0)
@@ -97,6 +114,32 @@ if "-nap-" in mode:
 	# sequential one. Timing is the only observable that separates the two.
 	time.sleep(float(mode.split("-nap-", 1)[1]))
 
+if "inside-marker.txt" in goal:
+	# The sandbox goal: work inside the directory, then *attempt* an escape. Whether the
+	# escape happens is decided by the tool set this child was handed, which is exactly how
+	# a real harness confines a producer -- so it refuses for the reason a real one would,
+	# rather than for a synthetic one.
+	pathlib.Path("inside-marker.txt").write_text("INSIDE", encoding="utf-8")
+	if "escape-marker.txt" in goal:
+		if "bash" in tools:
+			try:
+				pathlib.Path("..", "escape-marker.txt").write_text("ESCAPED", encoding="utf-8")
+			except OSError:
+				pass
+		else:
+			print(
+				f"refused: {tools!r} holds no tool that writes outside the working directory",
+				file=sys.stderr,
+			)
+
+if "budget-marker.txt" in goal:
+	# A cap is honoured when the harness was handed one and does not ignore it. The
+	# uncapped run and the flag-ignoring run both do the work, which is what makes the
+	# capped run's silence mean something.
+	capped_and_honoured = "--cap" in sys.argv and not mode.startswith("budget-ignore")
+	if not capped_and_honoured:
+		pathlib.Path("budget-marker.txt").write_text("WORK", encoding="utf-8")
+
 records = [{"seq": 1, "type": "session", "data": {}}]
 records.append({"seq": 2, "type": "turn/start", "data": {"turn": 1}})
 records.append({"seq": 3, "type": "assistant/message", "data": {"usage": {"outputTokens": 120}}})
@@ -107,6 +150,9 @@ elif mode.startswith("goal"):
 	records.append({"seq": 5, "type": "turn/end", "data": {"reason": {"kind": "completed"}}})
 elif mode.startswith("aborted"):
 	records.append({"seq": 4, "type": "turn/end", "data": {"reason": {"kind": "aborted"}}})
+elif mode.startswith("compact"):
+	records.append({"seq": 4, "type": "compaction", "data": {}})
+	records.append({"seq": 5, "type": "turn/end", "data": {"reason": {"kind": "completed"}}})
 
 target.write_text("".join(json.dumps(r) + "\\n" for r in records), encoding="utf-8")
 if mode.endswith("-zstd") or mode.endswith("-zst"):
@@ -167,7 +213,7 @@ def base_spec(
 	glob = f"**/*{{session_id}}*.jsonl.{zstd_ext}" if zstd else "**/*{session_id}*.jsonl"
 	return HarnessSpec(
 		name=name,
-		argv=(sys.executable, str(script), "{session_dir}", "{session_id}", suffix),
+		argv=(sys.executable, str(script), "{session_dir}", "{session_id}", suffix, "{tools}"),
 		env=(("SYNTHETIC_HOME", "{session_dir}"),),
 		session_glob=glob,
 		session_is_zstd=zstd,
@@ -181,6 +227,11 @@ def base_spec(
 		goal_entry=GoalEntry.PROMPT,
 		supports_context_file_flag=True,
 		model_error_pattern="not found. Use --list-models",
+		# Confinement by tool allowlist, exactly as the default harness confines a producer:
+		# the child cannot write outside its directory without a tool that writes freely, and
+		# this set has none.
+		confinement_tools="read,write,edit",
+		compaction_event="compaction",
 		notes="a real subprocess, not a mock",
 	)
 

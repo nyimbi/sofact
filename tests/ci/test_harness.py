@@ -767,9 +767,12 @@ class TestDispatch:
 
 		The child is fast on the probe and hangs on the dispatch, so the probe really
 		succeeds and the timeout is really the dispatch budget rather than a dead probe.
+		The probe is shallow here on purpose: this child naps for 30s once the counter is
+		consumed, and the extra rows would each spend the probe timeout to learn nothing
+		about the dispatch budget this test is actually about.
 		"""
 		adapter = adapter_for(tmp_path, "slow-after-first", probe_timeout=20.0)
-		profile = await adapter.probe()
+		profile = await adapter.probe(deep=False)
 		assert profile.is_usable is True
 		step = _step(plan, 0)
 		tight = step.model_copy(
@@ -865,3 +868,160 @@ class TestDispatch:
 		record = await adapter.dispatch(_step(plan, 0), plan, profile=profile)
 		assert record.outcome is StepOutcome.NOT_DISPATCHED
 		assert "no longer on PATH" in (record.note or "")
+
+
+# --------------------------------------------------------------------------- #
+# the rows that need a second child
+# --------------------------------------------------------------------------- #
+
+
+class TestTheExtraAttempts:
+	"""(FR-148) Four rows an earlier probe left unmeasured, now attempted.
+
+	Each of these needs more than one child, and each is a *differential*: the claim is
+	about a difference between two runs, or about a file that either appeared or did not.
+	That is what makes the negative decidable here, where a single bounded invocation
+	could only ever show that nothing was witnessed.
+	"""
+
+	async def test_a_confined_child_works_inside_and_cannot_escape(self, tmp_path: Path) -> None:
+		"""The positive: the child did the work and no escape file exists above it."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.SANDBOXABLE)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "read,write,edit" in finding.observed
+		assert "escape-marker.txt" in finding.observed
+
+	async def test_an_unconfined_child_escapes_and_the_row_names_the_tool_set(
+		self, tmp_path: Path
+	) -> None:
+		"""The negative is a *file that appeared*, not an absence nobody can read."""
+		spec = dataclasses.replace(base_spec(tmp_path, "complete"), confinement_tools="")
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.SANDBOXABLE)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.ABSENT
+		assert "escape-marker.txt" in finding.observed
+		assert "bash" in finding.observed
+
+	async def test_the_sandbox_probe_leaves_the_workspace_untouched(self, tmp_path: Path) -> None:
+		"""Confinement is asserted about a scratch directory, never the build's."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		assert profile.finding(HarnessCapability.SANDBOXABLE) is not None
+		workspace = tmp_path / "workspace"
+		assert list(workspace.iterdir()) == []
+
+	async def test_a_child_that_did_no_work_proves_nothing_about_confinement(
+		self, tmp_path: Path
+	) -> None:
+		"""Neither marker is a coverage gap: the escape's absence means nothing yet."""
+		adapter = adapter_for(tmp_path, "quiet-after-first", probe_timeout=1.0)
+		profile = await adapter.probe()
+		finding = profile.finding(HarnessCapability.SANDBOXABLE)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "did no work" in finding.observed
+
+	async def test_two_sessions_do_not_collide_on_one_record(self, tmp_path: Path) -> None:
+		"""Distinct records is what lets a wave run without erasing half its own evidence."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.CONCURRENT)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+
+	async def test_a_harness_that_writes_one_shared_record_cannot_run_a_wave(
+		self, tmp_path: Path
+	) -> None:
+		"""The negative: two simultaneous sessions landing on the same path (FR-142)."""
+		spec = dataclasses.replace(base_spec(tmp_path, "shared"), session_glob="**/shared.jsonl")
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.CONCURRENT)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.ABSENT
+		assert "shared.jsonl" in finding.observed
+		assert "FR-142" in finding.observed
+
+	async def test_a_spec_with_no_budget_flag_reports_that_rather_than_a_gap(
+		self, tmp_path: Path
+	) -> None:
+		"""Nothing depends on this row (FR-140), so "there is nothing to attempt" is right."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.BUDGET_CONTROL)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "declares no budget flag" in finding.observed
+
+	async def test_a_cap_that_bounds_the_work_is_confirmed(self, tmp_path: Path) -> None:
+		spec = dataclasses.replace(base_spec(tmp_path, "budget"), budget_argv=("--cap", "{budget}"))
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.BUDGET_CONTROL)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "--cap 1" in finding.attempted
+
+	async def test_a_cap_that_is_accepted_and_ignored_is_absent(self, tmp_path: Path) -> None:
+		"""A flag the harness parses but does not honour would silently bound nothing."""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, "budget-ignore"), budget_argv=("--cap", "{budget}")
+		)
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.BUDGET_CONTROL)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.ABSENT
+		assert "not honoured" in finding.observed
+
+	async def test_a_compaction_the_session_survived_is_confirmed(self, tmp_path: Path) -> None:
+		profile = await adapter_for(tmp_path, "compact").probe()
+		finding = profile.finding(HarnessCapability.GOAL_SURVIVES_COMPACTION)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "compaction" in finding.observed
+
+	async def test_a_spec_with_no_compaction_event_cannot_recognise_one(
+		self, tmp_path: Path
+	) -> None:
+		spec = dataclasses.replace(base_spec(tmp_path, "compact"), compaction_event="")
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.GOAL_SURVIVES_COMPACTION)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "declares no compaction event" in finding.observed
+
+	async def test_a_quick_probe_says_which_rows_it_skipped(self, tmp_path: Path) -> None:
+		"""An attempt that was never made is reported as one, not as a gap in the harness."""
+		profile = await adapter_for(tmp_path, "complete").probe(deep=False)
+		for capability in (
+			HarnessCapability.SANDBOXABLE,
+			HarnessCapability.CONCURRENT,
+			HarnessCapability.BUDGET_CONTROL,
+		):
+			finding = profile.finding(capability)
+			assert finding is not None
+			assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+			assert "not requested" in finding.observed
+			assert "no attempt was made" in finding.attempted
+
+	async def test_a_quick_probe_still_reads_the_record_it_already_has(
+		self, tmp_path: Path
+	) -> None:
+		"""The compaction row costs no child, so --quick does not excuse it."""
+		profile = await adapter_for(tmp_path, "compact").probe(deep=False)
+		finding = profile.finding(HarnessCapability.GOAL_SURVIVES_COMPACTION)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+
+	async def test_a_primary_that_failed_is_why_the_extras_were_not_attempted(
+		self, tmp_path: Path
+	) -> None:
+		"""Gated as a group, and the gate names the primary's exit code."""
+		profile = await adapter_for(tmp_path, "fail").probe()
+		for capability in (
+			HarnessCapability.SANDBOXABLE,
+			HarnessCapability.CONCURRENT,
+			HarnessCapability.BUDGET_CONTROL,
+		):
+			finding = profile.finding(capability)
+			assert finding is not None
+			assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+			assert "exit 7" in finding.observed

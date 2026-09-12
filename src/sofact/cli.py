@@ -76,6 +76,11 @@ _STYLE_OPTION = typer.Option(
 _PROBE_TIMEOUT_OPTION = typer.Option(
 	None, "--timeout", help="Seconds to allow the capability probe."
 )
+_QUICK_OPTION = typer.Option(
+	False,
+	"--quick",
+	help="Skip the probe rows that need a second child. Faster, and less covered.",
+)
 _STEP_OPTION = typer.Option(
 	None, "--step", help="Dispatch one step by ordinal or id instead of the whole plan."
 )
@@ -456,9 +461,19 @@ def probe(
 	model: str | None = _MODEL_OPTION,
 	tools: str | None = _TOOLS_OPTION,
 	timeout: float | None = _PROBE_TIMEOUT_OPTION,
+	quick: bool = _QUICK_OPTION,
 ) -> None:
 	"""Attempt a harness and record what was actually observed (FR-148)."""
-	asyncio.run(_probe(_service(_home_of(ctx, home)), harness, model, timeout, tools=tools))
+	asyncio.run(
+		_probe(
+			_service(_home_of(ctx, home)),
+			harness,
+			model,
+			timeout,
+			tools=tools,
+			deep=not quick,
+		)
+	)
 
 
 async def _probe(
@@ -468,6 +483,7 @@ async def _probe(
 	timeout: float | None,
 	*,
 	tools: str | None = None,
+	deep: bool = True,
 ) -> None:
 	_require_known(svc, harness)
 	resolved_tools = _require_tools(tools)
@@ -480,6 +496,7 @@ async def _probe(
 			model=model,
 			tools=resolved_tools,
 			timeout=timeout,
+			deep=deep,
 		)
 	except HarnessBinaryMissing as exc:
 		typer.secho(f"cannot probe: {exc}", fg="red")

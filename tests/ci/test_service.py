@@ -383,14 +383,41 @@ class TestProbeHarness:
 		profile = await registered.probe_harness(None)
 		assert len(profile.findings) == len(HarnessCapability)
 
-	async def test_an_unprobed_capability_is_inconclusive_not_absent(
+	async def test_the_extra_rows_are_measured_rather_than_defaulted(
 		self, home: Path, tmp_path: Path
 	) -> None:
-		""" "Nobody looked" must not be reported as "it is not there"."""
+		"""A skipped attempt and an attempt that found nothing are different facts.
+
+		These four rows need more than one child, and an earlier probe recorded them as
+		unmeasured. "Nobody looked" is still not "it is not there" -- an empty profile
+		holds that line in ``TestProbe.test_an_unprobed_capability_reads_inconclusive_not_
+		absent`` -- but these rows are now looked at, so the reason has to say what was
+		attempted rather than that nothing was.
+		"""
 		registered = synthetic_service(home, tmp_path, "complete")
 		profile = await registered.probe_harness(None)
-		assert profile.observation(HarnessCapability.SANDBOXABLE) is ProbeOutcome.INCONCLUSIVE
+		for capability in (
+			HarnessCapability.SANDBOXABLE,
+			HarnessCapability.CONCURRENT,
+			HarnessCapability.BUDGET_CONTROL,
+			HarnessCapability.GOAL_SURVIVES_COMPACTION,
+		):
+			finding = profile.finding(capability)
+			assert finding is not None
+			assert "no attempt was made" not in finding.attempted
+			assert finding.observed != ""
+
+	async def test_a_quick_probe_skips_the_rows_that_need_a_second_child(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The service forwards the flag, so a caller can trade coverage for time."""
+		registered = synthetic_service(home, tmp_path, "complete")
+		profile = await registered.probe_harness(None, deep=False)
 		assert profile.observation(HarnessCapability.CONCURRENT) is ProbeOutcome.INCONCLUSIVE
+		assert profile.observation(HarnessCapability.SANDBOXABLE) is ProbeOutcome.INCONCLUSIVE
+		finding = profile.finding(HarnessCapability.SANDBOXABLE)
+		assert finding is not None
+		assert "not requested" in finding.observed
 
 	async def test_a_missing_binary_is_an_error_not_an_unprobed_capability(
 		self, home: Path, tmp_path: Path

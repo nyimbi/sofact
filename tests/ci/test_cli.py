@@ -463,6 +463,28 @@ class TestTheModelIsPartOfTheConfiguration:
 		assert "not checked: an incomplete session" not in refused.output
 
 
+class TestTheQuickProbe:
+	"""``--quick`` trades coverage for time, and says which rows it traded away.
+
+	A probe is what a dispatch is allowed to assume, so a row it skipped has to be
+	distinguishable from a row it measured and found wanting. The flag must make a visible
+	difference rather than quietly doing less.
+	"""
+
+	def test_the_full_probe_measures_the_rows_the_quick_one_skips(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		full = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert full.exit_code == 0, full.output
+		assert "not requested" not in full.output, full.output
+		assert "sandboxable" in full.output
+
+		quick = RUNNER.invoke(app, ["--home", str(home), "probe", "--quick"])
+		assert quick.exit_code == 0, quick.output
+		assert "not requested" in quick.output, "the skipped rows must say they were skipped"
+
+
 class TestMisconfiguration:
 	def test_an_unknown_harness_is_reported(self, home: Path) -> None:
 		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--harness", "nosuch"])
