@@ -16,6 +16,7 @@ unreachable — which is what it was before this suite existed.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -416,3 +417,49 @@ class TestLoadSpecs:
 		path.write_text(json.dumps({"harnesses": {"synthetic": "pi -p"}}), encoding="utf-8")
 		with pytest.raises(ValueError, match="must be an object"):
 			load_specs(path)
+
+
+class TestTheDocumentedTable:
+	"""README.md's example table is executed by the real loader.
+
+	Documentation that is never run is documentation that is eventually wrong, and this
+	particular document is load-bearing: it is the only place the table's *shape* is shown
+	to someone pointing SoFact at a new harness. A drift here is not a typo, it is a user
+	writing a file that SoFact refuses.
+	"""
+
+	ROOT = Path(__file__).resolve().parents[2]
+
+	def load_documented_tables(self, tmp_path: Path) -> dict[str, HarnessSpec]:
+		"""Every JSON fence in README.md, through the loader the CLI calls.
+
+		A fence the loader refuses is skipped rather than failed, because the README is
+		allowed to show a deliberately broken example. What must not happen is that *no*
+		fence loads, which the callers assert by requiring the documented name.
+		"""
+		text = (self.ROOT / "README.md").read_text(encoding="utf-8")
+		blocks = re.findall(r"```json\n(.*?)```", text, re.S)
+		assert blocks, "README.md no longer shows a JSON harness table"
+
+		loaded: dict[str, HarnessSpec] = {}
+		for index, block in enumerate(blocks):
+			path = tmp_path / f"readme-{index}.json"
+			path.write_text(block, encoding="utf-8")
+			try:
+				loaded.update(load_specs(path))
+			except ValueError:
+				continue
+		return loaded
+
+	def test_the_readme_example_loads_through_the_real_loader(self, tmp_path: Path) -> None:
+		loaded = self.load_documented_tables(tmp_path)
+		assert "my-harness" in loaded, sorted(loaded)
+
+	def test_the_documented_placeholders_are_the_ones_the_adapter_fills(
+		self, tmp_path: Path
+	) -> None:
+		"""The prose promises ``{goal}`` and ``{session_id}``; the example must show them."""
+		spec = self.load_documented_tables(tmp_path)["my-harness"]
+
+		assert "{goal}" in spec.argv
+		assert "{session_id}" in spec.argv

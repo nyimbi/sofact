@@ -24,6 +24,9 @@ than argued. Numbering is sequential and never reused.
 | [0009](0009-no-oracle-no-autonomy.md) | No oracle, no autonomy; termination is not verification | Accepted |
 | [0010](0010-delegation-to-a-third-party-harness-is-an-accepted-disadvantage.md) | Delegation to a third-party harness is an accepted structural disadvantage | Accepted |
 | [0011](0011-the-factory-refuses-to-claim-maintainability.md) | The factory refuses to claim maintainability | Accepted |
+| [0012](0012-the-harness-table-is-data-not-code.md) | The harness adapter table is data, not code | Accepted |
+| [0013](0013-a-version-claim-is-checked-against-the-floor.md) | A version claim is checked against the minimum supported version | Accepted |
+| [0014](0014-markdown-fence-ownership.md) | Markdown code fences belong to ruff, prose whitespace to markdownlint | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -41,3 +44,15 @@ The product specification uses `D<n>` identifiers for open questions. Where a
 
 `FR-xxx` identifiers refer to the specification's functional requirements. `[Snn]`
 refers to an entry in the [source ledger](../sources/README.md).
+
+## Records that are not resolutions of an open decision
+
+Not every decision resolves a `D`. Three records here answer questions the specification
+never had to ask, because they are about this repository's own tooling rather than about
+the factory's behaviour:
+
+| ADR | What it settles |
+| ----- | ----------------- |
+| [0012](0012-the-harness-table-is-data-not-code.md) | That FR-161 is enforced at all — a table read from an untrusted file is validated by name rather than defaulted |
+| [0013](0013-a-version-claim-is-checked-against-the-floor.md) | Which interpreter's version each checker validates against, and that no tool gets two configuration files |
+| [0014](0014-markdown-fence-ownership.md) | Which tool owns which bytes in Markdown, after two of them spent several turns undoing each other |
