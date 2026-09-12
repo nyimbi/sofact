@@ -2,8 +2,9 @@
 
 This is not a test module: it holds no tests. It exists so the suites that drive the
 FR-058 adapter against a real child process — ``test_harness.py`` for the wire-format
-matrix, ``test_service.py`` for the dispatch and claim bookkeeping — agree on what that
-child *is*, rather than each growing a slightly different one.
+matrix, ``test_service.py`` for the dispatch and claim bookkeeping — and the suites
+that need a *fully exercised* service — ``test_state.py`` for the fold — agree on what
+that child *is*, rather than each growing a slightly different one.
 
 The program is deliberately a real Python file executed by a real interpreter: the
 project forbids mocks, so "the harness" has to be something the OS can schedule. The
@@ -18,10 +19,24 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
-from sofact.harness import HarnessSpec
-from sofact.views import GoalEntry
+from conftest import answer_everything
 
-__all__ = ["SCRIPT", "SCRIPT_NAME", "base_spec", "reset_calls", "spec_json", "write_script"]
+from sofact.harness import HarnessSpec
+from sofact.service import FactoryService
+from sofact.views import GoalEntry, GoalPlan
+
+__all__ = [
+	"SCRIPT",
+	"SCRIPT_NAME",
+	"base_spec",
+	"elicitation_to_contract",
+	"kinds",
+	"plan_and_service",
+	"reset_calls",
+	"spec_json",
+	"synthetic_service",
+	"write_script",
+]
 
 SCRIPT_NAME = "synthetic_harness.py"
 
@@ -145,6 +160,42 @@ def base_spec(
 		supports_context_file_flag=True,
 		notes="a real subprocess, not a mock",
 	)
+
+
+def synthetic_service(
+	home: Path,
+	tmp_path: Path,
+	mode: str,
+	*,
+	name: str = "synthetic",
+) -> FactoryService:
+	"""A service whose only configured harness is the shared real script."""
+	spec = base_spec(tmp_path, mode, name=name)
+	return FactoryService(home=home, llm=None, specs={name: spec})
+
+
+async def elicitation_to_contract(service: FactoryService) -> tuple[str, str]:
+	"""Run P0 to completion and produce a contract. Returns ``(goal_id, contract_id)``."""
+	goal = await service.start("Ship a reminder dashboard.")
+	await answer_everything(service, goal.id)
+	await service.draft(goal.id)
+	contract = await service.contract(goal.id)
+	return goal.id, contract.id
+
+
+async def plan_and_service(
+	home: Path, tmp_path: Path, mode: str
+) -> tuple[FactoryService, GoalPlan]:
+	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
+	registered = synthetic_service(home, tmp_path, mode)
+	await registered.probe_harness(None)
+	_, contract_id = await elicitation_to_contract(registered)
+	return registered, await registered.compile_plan(contract_id)
+
+
+def kinds(service: FactoryService) -> list[str]:
+	"""Ledger kinds in append order, for asserting what got written down."""
+	return [entry.kind.value for entry in service.ledger.entries()]
 
 
 def spec_json(spec: HarnessSpec) -> dict[str, object]:

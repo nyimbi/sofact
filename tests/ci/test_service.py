@@ -20,7 +20,14 @@ from pathlib import Path
 
 import pytest
 from conftest import GOOD_ANSWERS, answer_everything
-from synthetic import base_spec, reset_calls
+from synthetic import (
+	base_spec,
+	elicitation_to_contract,
+	kinds,
+	plan_and_service,
+	reset_calls,
+	synthetic_service,
+)
 
 from sofact.harness import DSH_SPEC, PI_SPEC, SPECS
 from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home
@@ -35,27 +42,6 @@ from sofact.views import (
 	StepOutcome,
 	VerdictOutcome,
 )
-
-
-def synthetic_service(home: Path, tmp_path: Path, mode: str, *, name: str = "synthetic"):
-	"""A service whose only configured harness is the shared real script."""
-	spec = base_spec(tmp_path, mode, name=name)
-	return FactoryService(home=home, llm=None, specs={name: spec})
-
-
-async def elicitation_to_contract(service: FactoryService) -> tuple[str, str]:
-	"""Run P0 to completion and produce a contract. Returns ``(goal_id, contract_id)``."""
-	goal = await service.start("Ship a reminder dashboard.")
-	await answer_everything(service, goal.id)
-	await service.draft(goal.id)
-	contract = await service.contract(goal.id)
-	return goal.id, contract.id
-
-
-def kinds(service: FactoryService) -> list[str]:
-	"""Ledger kinds in append order, for asserting what got written down."""
-	return [entry.kind.value for entry in service.ledger.entries()]
-
 
 # --------------------------------------------------------------------------- #
 # goal lifecycle
@@ -477,14 +463,6 @@ class TestTheCompletionClaim:
 # --------------------------------------------------------------------------- #
 # wave scheduling (FR-142)
 # --------------------------------------------------------------------------- #
-
-
-async def plan_and_service(home: Path, tmp_path: Path, mode: str):
-	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
-	registered = synthetic_service(home, tmp_path, mode)
-	await registered.probe_harness(None)
-	_, contract_id = await elicitation_to_contract(registered)
-	return registered, await registered.compile_plan(contract_id)
 
 
 class TestDispatchPlan:
