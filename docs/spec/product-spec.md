@@ -885,6 +885,23 @@ The probe must **attempt** each capability and observe the outcome, read the
 installed package manifest, and record the version it observed. Help text may
 propose a probe; it may not answer one.
 
+**Which rows one bounded invocation actually decides** (v0.1, measured):
+`non_interactive` (the child either exits or had to be killed), `telemetry` (a
+usage block in the record or none), `context_files_disabled` (the flag either ran
+cleanly or did not), `goal_mode` **on positive evidence only** (FR-153), and
+`bootstrap_empty_repo` **on positive evidence only** — the probe invokes the
+harness with its workspace as `cwd`, so a cold start is counted *before* the child
+runs, and a workspace that is not empty is reported as an unwitnessed capability
+rather than as a failure to bootstrap. Four rows — `sandboxable`, `concurrent`,
+`budget_control`, `goal_survives_compaction` — remain **coverage gaps in the
+probe** and say so in their own reason string, which is a statement about the
+probe and not about the harness. Exactly one row gates anything:
+`non_interactive` refuses dispatch (FR-145). `goal_mode` **downgrades** a step to
+single-shot and records the capability loss rather than refusing it (FR-144). Every
+other row is reported. No capability may be promoted to a gate while its probe
+row still reads `INCONCLUSIVE`, and none may be demoted to a report once it
+decides whether a build can run unattended.
+
 **FR-149** Harness invocations must be **hermetic**: every flag that could cause a
 session to read operator state, ambient configuration, or network resources must be
 explicitly set rather than defaulted. A build that depends on an unset default is

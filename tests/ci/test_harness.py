@@ -352,6 +352,47 @@ class TestProbe:
 		profile = await adapter_for(tmp_path, "complete").probe()
 		assert profile.version == "synthetic 1.2.3"
 
+	async def test_a_cold_workspace_confirms_the_harness_starts_an_empty_repo(
+		self, tmp_path: Path
+	) -> None:
+		"""The probe runs with the workspace as cwd, so a fresh deployment already has
+		the experiment this row asks for; it only needed to be read."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.BOOTSTRAP_EMPTY_REPO)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "no repository" in finding.observed
+
+	async def test_a_used_workspace_cannot_witness_a_cold_start(self, tmp_path: Path) -> None:
+		"""A probe that ran after a dispatch is not the experiment, and says so rather
+		than reporting the capability either way."""
+		adapter = adapter_for(tmp_path, "complete")
+		(adapter.workspace / "already-here.txt").write_text("x", encoding="utf-8")
+		profile = await adapter.probe()
+		finding = profile.finding(HarnessCapability.BOOTSTRAP_EMPTY_REPO)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "already held 1 entries" in finding.observed
+
+	async def test_a_failure_in_an_empty_repo_is_not_a_verdict_on_the_harness(
+		self, tmp_path: Path
+	) -> None:
+		"""FR-153 again: the negative is undecidable, so it is not rounded to ABSENT."""
+		profile = await adapter_for(tmp_path, "fail").probe()
+		finding = profile.finding(HarnessCapability.BOOTSTRAP_EMPTY_REPO)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "exited 7 in an empty workspace" in finding.observed
+
+	async def test_a_run_that_left_no_record_claims_nothing(self, tmp_path: Path) -> None:
+		"""A clean exit with nothing to inspect is not evidence of a capability."""
+		profile = await adapter_for(tmp_path, "silent").probe()
+		assert profile.manifest_path is None, "the harness wrote no record at all"
+		finding = profile.finding(HarnessCapability.BOOTSTRAP_EMPTY_REPO)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "no readable session record" in finding.observed
+
 	async def test_the_session_record_path_is_kept(self, tmp_path: Path) -> None:
 		profile = await adapter_for(tmp_path, "complete").probe()
 		assert profile.manifest_path is not None

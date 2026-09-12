@@ -70,6 +70,11 @@ if mode.startswith("notobject"):
 	target.write_text("[1, 2, 3]\\n", encoding="utf-8")
 	sys.exit(0)
 
+if mode.startswith("silent"):
+	# Exit cleanly having written nothing: a harness that reports success but leaves no
+	# record is not a capability, and its exit code must not be read as one.
+	sys.exit(0)
+
 if "-nap-" in mode:
 	# Sleep long enough that a *concurrent* wave is observably faster than a
 	# sequential one. Timing is the only observable that separates the two.

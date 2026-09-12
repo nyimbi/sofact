@@ -755,6 +755,18 @@ class ConfiguredHarnessAdapter:
 		lines = stdout.decode("utf-8", errors="replace").strip().splitlines()
 		return lines[0].strip() if lines and lines[0].strip() else None
 
+	def _workspace_entries(self) -> int | None:
+		"""Count the workspace's entries now, or ``None`` if there is no workspace yet.
+
+		``BOOTSTRAP_EMPTY_REPO`` is the one capability whose *positive* case is a fact
+		about the starting state rather than about the run, so it is counted before the
+		child starts: reading it afterwards would count whatever the harness wrote
+		itself, and a harness that scaffolds a project would look like a used workspace.
+		"""
+		if not self.workspace.is_dir():
+			return None
+		return sum(1 for _ in self.workspace.iterdir())
+
 	# ----------------------------------------------------------------- probe
 
 	async def probe(
@@ -782,6 +794,7 @@ class ConfiguredHarnessAdapter:
 		session_id = f"probe-{uuid7str()[:8]}"
 		argv = self.build_argv(goal_text, session_id)
 		assert argv[-1] == goal_text, "probe must dispatch a real goal"
+		entries_before = self._workspace_entries()
 		exit_code, _stdout, _stderr, timed_out = await self._invoke(
 			argv, timeout=budget, session_id=session_id
 		)
@@ -887,10 +900,60 @@ class ConfiguredHarnessAdapter:
 				),
 			)
 		)
+		# BOOTSTRAP_EMPTY_REPO is observable, because the probe runs with the workspace as
+		# cwd and therefore starts cold on a fresh deployment. The outcome is the predicate
+		# below -- one source of truth -- and the chain only explains the reason it failed.
+		bootstrapped = entries_before == 0 and exit_code == 0 and not timed_out and bool(records)
+		if entries_before is None:
+			bootstrap_reason = (
+				"the workspace did not exist when the run started, so the harness created "
+				"it and the cold start this row is about was never entered"
+			)
+		elif entries_before > 0:
+			bootstrap_reason = (
+				f"the workspace already held {entries_before} entries when the run started, "
+				"so this invocation is not a cold start and cannot witness one; the first "
+				"probe on a fresh deployment is, and a used workspace is not the question "
+				"this row answers"
+			)
+		elif timed_out:
+			bootstrap_reason = (
+				f"the run did not finish within {budget:.0f}s in an empty workspace, so "
+				"nothing about bootstrapping was witnessed"
+			)
+		elif exit_code != 0:
+			bootstrap_reason = (
+				f"the run exited {exit_code} in an empty workspace; one invocation cannot "
+				"separate 'the harness cannot bootstrap' from 'the model declined' "
+				"(FR-153) -- a positive observation is decidable and is taken, and only the "
+				"negative is left inconclusive"
+			)
+		elif not records:
+			bootstrap_reason = (
+				"the run exited 0 in an empty workspace but left no readable session "
+				"record, so there is nothing to inspect and no capability to claim"
+			)
+		else:
+			bootstrap_reason = (
+				"the workspace held nothing when the run started and the harness exited 0 "
+				"with a session record, so it does begin work in a tree with no repository "
+				"and no files (FR-135)"
+			)
+		findings.append(
+			CapabilityFinding(
+				capability=HarnessCapability.BOOTSTRAP_EMPTY_REPO,
+				outcome=(ProbeOutcome.CONFIRMED if bootstrapped else ProbeOutcome.INCONCLUSIVE),
+				attempted=(
+					"dispatched a real goal with the workspace as cwd and counted its entries "
+					"immediately before the run (found "
+					f"{'no directory' if entries_before is None else entries_before})"
+				),
+				observed=bootstrap_reason,
+			)
+		)
 		for capability in (
 			HarnessCapability.SANDBOXABLE,
 			HarnessCapability.CONCURRENT,
-			HarnessCapability.BOOTSTRAP_EMPTY_REPO,
 			HarnessCapability.GOAL_SURVIVES_COMPACTION,
 		):
 			findings.append(
