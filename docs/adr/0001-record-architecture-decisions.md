@@ -34,7 +34,7 @@ affect the inside of one module are comments, not ADRs.
 ## Consequences
 
 - The specification's `D<n>` identifiers and the ADR numbers are two namespaces for
-  overlapping material. [README.md](README.md) carries the mapping so neither has to
+  overlapping material. [The ADR index](./README.md) carries the mapping so neither has to
   be the single source of truth.
 - Writing an ADR is a real cost at the moment of deciding, paid to avoid a larger
   cost at the moment of remembering.
