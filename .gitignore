@@ -17,3 +17,6 @@ __pycache__/
 
 # Harness session transcripts dumped into the working tree
 pi-session-*.html
+
+# zvec-grep local workspace index
+.zvec-grep/
