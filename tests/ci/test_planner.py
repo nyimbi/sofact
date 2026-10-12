@@ -523,6 +523,36 @@ class TestBudgetAndStyle:
 			assert goal.iteration_policy
 			assert goal.blocked_stop_condition
 
+	def test_no_goal_claims_a_worktree_or_branch_nothing_assigns(
+		self, make_contract: MakeContract, make_oracle: Make
+	) -> None:
+		"""A constraint the child cannot satisfy is worse than a missing one (FR-100/141).
+
+		Every dispatched goal used to instruct the producer to "Work in the assigned
+		worktree on the assigned branch, never in place". No code assigns either: the
+		dispatch workspace is ``mkdir``-ed by ``FactoryService.dispatch_step`` and never
+		``git init``-ed, and ``GoalStep`` carries no module or branch field. So the
+		instruction named a tree that does not exist, in a directory that is not a
+		repository, on a branch nothing created — and a producer that follows it must
+		either invent a worktree or silently ignore its own instructions.
+
+		Worktree-per-module needs the P3 decomposition that would give a step a module
+		identity, so the requirement is not implemented. This test does not ask for it.
+		It asks that the goal text not assert it: the constraint is the operator's
+		precondition, stated as one, and the boundary SoFact can actually enforce — stay
+		inside the workspace it was given — is stated as the child's.
+		"""
+		contract = contract_of(
+			make_contract, OracleClass.CONTRACT, OracleClass.PROPERTY, OracleClass.SCHEMA
+		)
+		plan = compile_plan(contract)
+		for step in plan.steps:
+			joined = " ".join(step.goal.constraints).lower()
+			assert "assigned worktree" not in joined, (
+				"no worktree is assigned; the child cannot satisfy this and will ignore it"
+			)
+			assert "assigned branch" not in joined, "no branch is assigned either"
+
 
 # --------------------------------------------------------------------------- #
 # the pinned hashes (FR-139)

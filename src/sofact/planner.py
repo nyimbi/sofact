@@ -112,13 +112,13 @@ _SHARED_CONSTRAINTS: tuple[str, ...] = (
 	"assertion that serves as one. Editing your own completion criteria is detected "
 	"by hash and rejects the work (FR-139).",
 	"Work idempotently: re-running this goal must be safe and must not compound changes (FR-099).",
-	"Work in the assigned worktree on the assigned branch, never in place (FR-100, FR-141).",
 	"Context-file loading is disabled and stays disabled: do not create or rely on "
 	"AGENTS.md or CLAUDE.md (FR-150).",
 )
 
 _SHARED_BOUNDARIES: tuple[str, ...] = (
-	"Stay inside the assigned workspace.",
+	"Stay inside the workspace you were given. That directory is where your work is "
+	"verified, so an edit outside it is an edit no oracle will see (FR-141).",
 	"Do not read the oracle corpus, holdout scenarios, or factory credentials (FR-059).",
 	"Change nothing outside the clauses this step covers.",
 )
