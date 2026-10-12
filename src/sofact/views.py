@@ -64,6 +64,8 @@ __all__ = [
 	"ProbeOutcome",
 	"ProjectState",
 	"Readiness",
+	"RepairAttempt",
+	"RepairOutcome",
 	"SpecificationDraft",
 	"StepBudget",
 	"StepOutcome",
@@ -777,9 +779,8 @@ class GoalStep(View):
 class GoalPlan(View):
 	"""A frozen contract compiled into ordered goal sessions (FR-136).
 
-		Carries the hash of the contract it was compiled against, so a plan can later be
-		shown to still describe the contract it claims to (FR-139) rather than silently
-
+	Carries the hash of the contract it was compiled against, so a plan can later be
+	shown to still describe the contract it claims to (FR-139) rather than silently
 	dispatching sessions against an objective that has since moved.
 	"""
 
@@ -1154,6 +1155,75 @@ class DispatchRecord(View):
 		return "goal mode unavailable; step ran single-shot with no continuation (FR-144)"
 
 
+class RepairOutcome(StrEnum):
+	"""How one attempt at repairing a refuted clause ended.
+
+	``ESCALATED`` is the one that must exist. FR-101 forbids an unbounded retry loop,
+	and the honest alternative to retrying forever is not retrying never — it is
+	retrying under a bound and *saying so* when the bound is reached. A loop that
+	stopped silently would make "ran out of attempts" indistinguishable from "nothing
+	to do", which is the same defect as an unrun oracle reading as a satisfied one.
+	"""
+
+	REPAIRED = "repaired"
+	"""A later check found every clause the attempt covered no longer refuted."""
+
+	STILL_REFUTED = "still_refuted"
+	"""The attempt ran and completed, and a later check still refutes the clause."""
+
+	NOT_COMPLETED = "not_completed"
+	"""The repair session itself did not complete, so nothing was attempted."""
+
+	EXHAUSTED = "exhausted"
+	"""The attempt budget ran out with the clause still refuted (FR-101's bound)."""
+
+
+class RepairAttempt(View):
+	"""One pass of the repair loop: a refuted clause, an authored goal, and its result.
+
+	Written as its own ledger row rather than folded into the dispatch it produced,
+	because the *reason* a goal exists is not recoverable from the dispatch: a repair
+	session and a plan-authored session look identical on the wire, and a reader of the
+	log has to be able to tell "the producer was asked to fix a refutation" from "the
+	producer was asked to implement a clause". It also carries the diagnosis the goal
+	was authored from, which is the only place the refutation's own words survive.
+
+	``attempt`` is 1-based and counts attempts at *this clause*, so a clause refuted,
+	repaired, refuted again is legible as two rows rather than one clause with two
+	unrelated dispatches.
+
+	Two plan ids, because a repair step lives in a *revision* of the plan the operator
+	dispatched and both are worth asking about. ``plan_id`` is the origin — the plan
+	:meth:`~sofact.service.FactoryService.repair_plan` was called with — so
+	"what repairs ran for this plan?" has an answer that does not require walking the
+	revision chain. ``revision_id`` is the plan the repair step actually belongs to,
+	which is what a reader needs to look the step up. Collapsing them would make the
+	repair invisible to the operator's own plan id.
+	"""
+
+	id: UUID7
+	plan_id: UUID7
+	revision_id: UUID7
+	step_id: UUID7
+	clause_ids: tuple[UUID7, ...]
+	attempt: int
+	diagnosis: NonEmptyStr
+	goal_hash: str
+	outcome: RepairOutcome
+	dispatch_id: UUID7 | None = None
+	at: datetime
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.attempt < 1:
+			raise ValueError(f"attempt must be 1-based, got {self.attempt}")
+		if not self.clause_ids:
+			raise ValueError("a repair attempt that repairs no clause repairs nothing")
+		if self.outcome is RepairOutcome.REPAIRED and self.dispatch_id is None:
+			raise ValueError("a repair cannot be repaired without a dispatch that did it")
+		return self
+
+
 class DeclarationPrecision(View):
 	"""Goal-declaration precision (§20.4, FR-143, FR-147).
 
@@ -1213,6 +1283,7 @@ class LedgerKind(StrEnum):
 	INTEGRITY_CHECKED = "integrity.checked"
 	VERDICT_REUSED = "verdict.reused"
 	RESEARCH_RUN = "research.run"
+	REPAIR_ATTEMPTED = "repair.attempted"
 
 
 class LedgerEntry(View):
@@ -1317,6 +1388,7 @@ class ProjectState(View):
 	integrity: tuple[IntegrityCheck, ...] = ()
 	claims: tuple[CompletionClaim, ...] = ()
 	research: tuple[ResearchRecord, ...] = ()
+	repairs: tuple[RepairAttempt, ...] = ()
 	notes: tuple[str, ...] = ()
 
 	def goal(self, goal_id: str) -> Goal | None:
@@ -1374,6 +1446,19 @@ class ProjectState(View):
 	def dispatches_for_step(self, step_id: str) -> tuple[DispatchRecord, ...]:
 		"""Every attempt at one step, in log order. Retries appear as separate rows."""
 		return tuple(d for d in self.dispatches if d.step_id == step_id)
+
+	def repairs_for_plan(self, plan_id: str) -> tuple[RepairAttempt, ...]:
+		"""Every repair attempt made against a plan, in log order."""
+		return tuple(r for r in self.repairs if r.plan_id == plan_id)
+
+	def attempts_at_clause(self, clause_id: str) -> tuple[RepairAttempt, ...]:
+		"""Every repair attempt at one clause, in log order.
+
+		The bound FR-101 requires is a count of *attempts*, and a count that cannot be
+		read off the log is not a bound. Counting here rather than in a scheduler keeps
+		the number derivable from what was written down.
+		"""
+		return tuple(r for r in self.repairs if clause_id in r.clause_ids)
 
 	def integrity_for(self, plan_id: str) -> tuple[IntegrityCheck, ...]:
 		"""Integrity checks recorded against a plan, in log order."""

@@ -772,3 +772,111 @@ class TestTheResearchVerb:
 		assert "searches 2" in result.output
 		assert "no source URLs were recorded" in result.output
 		assert "not research that found nothing" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# the repair loop — the difference between a factory that stops and one that ends
+# --------------------------------------------------------------------------- #
+
+REPAIR_ORACLE = "test -f repair-marker.txt"
+"""An oracle the first dispatch cannot satisfy and a repair session can.
+
+The synthetic child writes ``repair-marker.txt`` only for a goal phrased as a repair,
+so this command separates the two sessions on the artefact itself rather than on an
+argument the test passed. The loop's convergence is then a real filesystem fact.
+"""
+
+
+class TestTheRepairVerb:
+	"""``sofact repair`` turns a refuted verdict into another session, from the CLI.
+
+	The loop's own behaviour is measured in ``test_service.py``. What is under test
+	here is reachability: a capability the operator cannot invoke is a constant, and
+	the exit code is the contract — clean means 0, still refuted means non-zero.
+	"""
+
+	def _refuted_pipeline(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		"""Drive the real CLI to a refuted verdict, the way an operator would."""
+		configure(tmp_path, monkeypatch, mode=mode)
+		conversation(home)
+		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", REPAIR_ORACLE])
+		assert contract.exit_code == 0, contract.output
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		probed = RUNNER.invoke(app, ["--home", str(home), "probe"])
+		assert probed.exit_code == 0, probed.output
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		# Exit 1 has several causes here, and only one of them leaves anything to
+		# repair: a model-resolution refusal or an unprobed harness also exits 1. Naming
+		# the reason is what makes this fixture a precondition rather than a coincidence.
+		assert dispatched.exit_code == 1, dispatched.output
+		assert "a step was refuted" in dispatched.output, dispatched.output
+
+	def test_a_refuted_run_is_repaired_and_the_verb_exits_clean(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._refuted_pipeline(home, tmp_path, monkeypatch, "goal-repair")
+		result = RUNNER.invoke(app, ["--home", str(home), "repair"])
+		assert result.exit_code == 0, result.output
+		assert "repaired" in result.output
+		assert "satisfied" in result.output, result.output
+
+	def test_a_repair_that_cannot_work_exits_nonzero(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The session runs and leaves the tree alone, so the clause is refuted again.
+
+		``--max-attempts 1`` makes the budget spend in one round, which is the branch
+		where the verb has to say "out of attempts" rather than "nothing to repair".
+		"""
+		self._refuted_pipeline(home, tmp_path, monkeypatch, "goal-repair-never")
+		result = RUNNER.invoke(app, ["--home", str(home), "repair", "--max-attempts", "1"])
+		assert result.exit_code == 1, result.output
+		assert "exhausted" in result.output, result.output
+		assert "not a factory that stopped trying" in result.output
+
+	def test_a_clean_contract_repairs_nothing(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A repair run against a clean contract must not invent work."""
+		configure(tmp_path, monkeypatch, mode="goal")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"]).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "repair"])
+		assert result.exit_code == 0, result.output
+		assert "nothing is refuted" in result.output
+
+	def test_repair_without_a_verdict_says_so(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""No verdict means no diagnosis, and a goal authored from nothing is a guess."""
+		configure(tmp_path, monkeypatch, mode="goal")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "repair"])
+		assert result.exit_code == 1
+		assert "no verdict yet" in result.output
+		assert "the diagnosis has to come from the verifier" in result.output
+
+	def test_repair_refuses_an_unprobed_harness(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The same gate as dispatch: a repair is a session and needs the same evidence."""
+		self._refuted_pipeline(home, tmp_path, monkeypatch, "goal-repair")
+		unprobed = tmp_path / "other.json"
+		unprobed.write_text(
+			json.dumps({"harnesses": {"ghost": spec_json(base_spec(tmp_path, "goal"))}}),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_HARNESS_SPECS", str(unprobed))
+		result = RUNNER.invoke(app, ["--home", str(home), "repair", "--harness", "ghost"])
+		assert result.exit_code == 1
+		assert "has never been probed here" in result.output

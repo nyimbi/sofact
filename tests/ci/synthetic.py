@@ -132,6 +132,20 @@ if "inside-marker.txt" in goal:
 				file=sys.stderr,
 			)
 
+if "repair" in mode:
+	# The repair loop needs a tree that changes *because a repair session ran*, and the
+	# discriminator has to be something only a repair goal carries. It cannot be the
+	# oracle command: every goal's verification surface names the oracle it will be
+	# judged by, so keying on the command would make the *operation* step write the
+	# marker and the loop would look like it converged without repairing anything.
+	# "Repair N refuted clause(s)" is in the repair goal's outcome and nowhere else, so
+	# it is the honest signal -- the same one an operator reading the goal would use.
+	# `repair-never` is the negative: the repair session runs and leaves the tree as it
+	# found it, which is what makes STILL_REFUTED and EXHAUSTED testable rather than
+	# assumed.
+	if "Repair" in goal and "refuted" in goal and "repair-never" not in mode:
+		pathlib.Path("repair-marker.txt").write_text("REPAIRED", encoding="utf-8")
+
 if "budget-marker.txt" in goal:
 	# A cap is honoured when the harness was handed one and does not ignore it. The
 	# uncapped run and the flag-ignoring run both do the work, which is what makes the

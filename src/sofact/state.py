@@ -6,9 +6,13 @@ dependence beyond the log's own order. That purity is what makes replay meaningf
 if state could be assembled by anything other than the log, the log would not be the
 record of what happened.
 
-Unknown event kinds raise rather than being skipped. A fold that silently ignores
-events it does not understand would report stale state after a downgrade, and stale
-state that *looks* current is worse than a crash.
+An unknown event kind cannot reach this function. ``LedgerEntry.kind`` is typed
+``LedgerKind``, so a line naming a kind this build does not know fails pydantic
+validation inside :meth:`~sofact.ledger.Ledger.entries` and surfaces as
+``LedgerCorruptError`` — the log from a newer SoFact is refused at parse, which is
+earlier and louder than a skip here would be. That is why the ``match`` below has no
+``case _`` arm: the type system proves it total, and a guard that can never fire is a
+claim about behaviour that nothing tests.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from sofact.views import (
 	LedgerEntry,
 	LedgerKind,
 	ProjectState,
+	RepairAttempt,
 	ResearchRecord,
 	SpecificationDraft,
 	VerificationReport,
@@ -51,6 +56,12 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	profiles: list[HarnessProfile] = []
 	integrity: list[IntegrityCheck] = []
 	research: list[ResearchRecord] = []
+	# Repair attempts are keyed by id with last-write-wins, like a re-answered
+	# elicitation dimension (ADR-0007): an attempt is written when its session ends and
+	# *settled* later against the verdict that session's check rendered, so the same
+	# attempt appears twice and only its final outcome is current. The full history stays
+	# in the log; the fold reports the settled value.
+	repairs: dict[str, RepairAttempt] = {}
 
 	for entry in entries:
 		payload = entry.payload
@@ -69,6 +80,9 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				reports.append(VerificationReport.model_validate(payload["report"]))
 			case LedgerKind.RESEARCH_RUN:
 				research.append(ResearchRecord.model_validate(payload["research"]))
+			case LedgerKind.REPAIR_ATTEMPTED:
+				settled = RepairAttempt.model_validate(payload["repair"])
+				repairs[settled.id] = settled
 			case LedgerKind.CLAIM_DECLARED:
 				claims.append(CompletionClaim.model_validate(payload["claim"]))
 			case LedgerKind.ADVISOR_NOTE:
@@ -81,11 +95,6 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				dispatches.append(DispatchRecord.model_validate(payload["dispatch"]))
 			case LedgerKind.INTEGRITY_CHECKED:
 				integrity.append(IntegrityCheck.model_validate(payload["check"]))
-			case _:  # pragma: no cover - exhaustive by construction; guards future kinds
-				raise ValueError(
-					f"event {entry.index} has unknown kind {entry.kind!r}; this log was "
-					"written by a newer SoFact and cannot be folded safely",
-				)
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -101,6 +110,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		profiles=tuple(profiles),
 		integrity=tuple(integrity),
 		research=tuple(research),
+		repairs=tuple(repairs.values()),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

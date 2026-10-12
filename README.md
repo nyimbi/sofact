@@ -16,7 +16,7 @@ to believe a producer's own claim that it is done.
 | **P0 — Elicit** | **Working.** Interactive Socratic dialogue with a deterministic resolution gate. |
 | **P2/P4 — Specify & contract** | **Working.** Clause stems are drafted from the conversation; `contract` assigns one oracle to every stem. Without a `--command` it reports **100% ground-truth debt** rather than hiding it. |
 | **P6 — Verify** | **Working.** `run` executes the oracles out-of-process and records observations; `verify` renders the verdict — and takes **no completion claim**, by signature (FR-138). A verdict describes one *run* (FR-006/FR-162), so a repaired clause can turn green. |
-| **P3/P5 — Decompose & dispatch** | **Partial.** `plan` compiles the contract into ordered goal sessions with pinned hashes (FR-136/139); `probe` measures a harness instead of trusting it (FR-148); `dispatch` runs the plan in waves, one out-of-process session per step, and stops at the first **refuted** wave (FR-142/FR-163). Single-module only — worktree isolation (FR-141) is not implemented. |
+| **P3/P5 — Decompose & dispatch** | **Partial.** `plan` compiles the contract into ordered goal sessions with pinned hashes (FR-136/139); `probe` measures a harness instead of trusting it (FR-148); `dispatch` runs the plan in waves, one out-of-process session per step, and stops at the first **refuted** wave (FR-142/FR-163); `repair` turns that refutation into another session, bounded per clause, with the diagnosis and every attempt recorded (FR-098 diagnostic mode, FR-101, FR-102). Single-module only — worktree isolation (FR-141) is not implemented. |
 | **P1 — Research** | Not implemented. |
 
 This is a deliberate vertical slice of the part that survives every argument in
@@ -66,9 +66,21 @@ uv run sofact contract --command 'pytest -q'   # every stem needs an oracle
 uv run sofact plan                             # contract → ordered goal sessions
 uv run sofact probe                            # attempt a harness; record observations
 uv run sofact dispatch --all                   # run the plan; stops at the first refuted wave
+uv run sofact repair                           # hand each refuted clause back to the producer
 uv run sofact integrity                        # re-verify the pinned hashes (FR-139)
 uv run sofact precision                        # did the claims survive verification?
 ```
+
+`dispatch` stops at the first refuted wave, which is correct — a dependent must not build
+on an unverified dependency. `repair` is the next move: a refutation is *information*, and
+a verdict naming which obligation does not hold is exactly what another session needs. It
+authors a **new plan revision** per round (an edited plan would make FR-139 compare the
+plan against itself), hands the producer the verifier's own words as the diagnosis, and
+re-runs the oracles. The loop is bounded twice — `--max-attempts` per clause and the clause
+set itself — and when a clause spends its budget the attempt is recorded `exhausted` rather
+than the run quietly ending, because "ran out of attempts" and "nothing to repair" must not
+look alike. The repair goal forbids editing the oracle and is pinned by hash like any other,
+so the loop cannot become a producer editing its own completion criteria.
 
 `probe` is not optional: dispatching against an assumed capability is exactly what
 FR-148 forbids, so `dispatch` refuses until a profile exists.

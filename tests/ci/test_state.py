@@ -19,12 +19,11 @@ import pytest
 from pydantic import ValidationError
 from synthetic import plan_and_service
 
-from sofact.ledger import Ledger
+from sofact.ledger import Ledger, LedgerCorruptError
 from sofact.service import FactoryService
 from sofact.state import fold
 from sofact.views import (
 	ElicitationDimension,
-	LedgerEntry,
 	LedgerKind,
 	ProjectState,
 )
@@ -44,6 +43,7 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.STEP_DISPATCHED: "dispatches",
 	LedgerKind.RESEARCH_RUN: "research",
 	LedgerKind.INTEGRITY_CHECKED: "integrity",
+	LedgerKind.REPAIR_ATTEMPTED: "repairs",
 }
 """Which event kind lands in which state field. Transcribed from ``fold``'s arms so
 that adding a kind without a field (or a field without a kind) fails a test."""
@@ -79,7 +79,7 @@ def test_every_event_kind_lands_in_a_field_and_every_field_has_a_kind() -> None:
 def test_an_empty_log_folds_to_a_state_with_every_field_empty() -> None:
 	state = fold(())
 
-	assert len(ProjectState.model_fields) == 13, "a new state field must be folded too"
+	assert len(ProjectState.model_fields) == 14, "a new state field must be folded too"
 	for name in ProjectState.model_fields:
 		value = getattr(state, name)
 		assert value == (), f"{name} should be empty, got {value!r}"
@@ -190,21 +190,34 @@ async def test_the_answers_field_holds_only_answers_for_the_goal(
 # --------------------------------------------------------------------------- #
 
 
-def test_an_unknown_kind_is_refused_rather_than_skipped() -> None:
+def test_an_unknown_kind_is_refused_rather_than_skipped(tmp_path: Path) -> None:
 	"""Stale state that *looks* current is worse than a crash.
 
-	The ledger's own validation normally catches an unreadable kind first; this guard
-	is what stops a widened enum from being absorbed as a silent no-op.
-	"""
-	entry = LedgerEntry.model_construct(index=7, kind="future.kind", payload={})
+	The refusal happens at the *parse*, not inside :func:`fold`. ``LedgerEntry.kind`` is
+	typed ``LedgerKind``, so a line naming a kind this build does not know fails
+	validation before the fold is ever reached — which is earlier and louder than a
+	guard in the match would be, and is why the fold carries no wildcard arm.
 
-	with pytest.raises(ValueError) as caught:
-		fold((entry,))
+	This test used ``model_construct`` to smuggle a string past that validation, which
+	tested the fold's guard by bypassing the layer that makes the guard unreachable.
+	The refusal is exercised where a real log would hit it: through
+	:meth:`Ledger.entries`, on a line actually written to disk.
+	"""
+	ledger = Ledger(tmp_path / "log.jsonl")
+	ledger.append(LedgerKind.ADVISOR_NOTE, {"text": "a real entry first"})
+	forged = (
+		'{"index":1,"at":"2026-01-01T00:00:00Z","kind":"future.kind",'
+		'"payload":{},"prev_hash":"' + "0" * 64 + '","entry_hash":"x"}'
+	)
+	with ledger.path.open("a", encoding="utf-8") as handle:
+		handle.write(forged + "\n")
+	ledger.invalidate()
+
+	with pytest.raises(LedgerCorruptError) as caught:
+		ledger.entries()
 
 	message = str(caught.value)
-	assert "unknown kind" in message
-	assert "7" in message
-	assert "newer SoFact" in message
+	assert "future.kind" in message, "the refusal must name the kind it did not understand"
 
 
 def test_a_payload_missing_its_key_is_not_coerced(tmp_path: Path) -> None:

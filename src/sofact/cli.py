@@ -38,6 +38,7 @@ from sofact.views import (
 	HarnessProfile,
 	IntegrityOutcome,
 	ProbeOutcome,
+	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
 	SpecificationDraft,
@@ -97,6 +98,11 @@ _FRESH_OPTION = typer.Option(
 	False,
 	"--fresh",
 	help="Re-run the oracles even when the artefact and oracle set are unchanged (FR-006).",
+)
+_MAX_ATTEMPTS_OPTION = typer.Option(
+	2,
+	"--max-attempts",
+	help="How many times one refuted clause may be handed back before it is called exhausted.",
 )
 
 
@@ -199,6 +205,16 @@ _OUTCOME_STYLE: dict[VerdictOutcome, str] = {
 	VerdictOutcome.SATISFIED: "green",
 	VerdictOutcome.VIOLATED: "red",
 	VerdictOutcome.INSUFFICIENT: "yellow",
+}
+
+# REPAIRED is green because the *session* succeeded; whether the clause now holds is
+# the verdict's question, printed separately. Colouring this by the contract would make
+# the two lines say the same thing twice and hide which one moved.
+_REPAIR_STYLE: dict[RepairOutcome, str] = {
+	RepairOutcome.REPAIRED: "green",
+	RepairOutcome.STILL_REFUTED: "red",
+	RepairOutcome.NOT_COMPLETED: "yellow",
+	RepairOutcome.EXHAUSTED: "red",
 }
 
 _OUTCOME_MARK: dict[VerdictOutcome, str] = {
@@ -855,6 +871,143 @@ async def _precision(svc: FactoryService, harness: str | None) -> None:
 		"the dispatch itself.",
 		fg="bright_black",
 	)
+
+
+@app.command()
+def repair(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	harness: str | None = _HARNESS_OPTION,
+	model: str | None = _MODEL_OPTION,
+	tools: str | None = _TOOLS_OPTION,
+	workspace: Path | None = _WORKSPACE_OPTION,
+	max_attempts: int = _MAX_ATTEMPTS_OPTION,
+	fresh: bool = _FRESH_OPTION,
+) -> None:
+	"""Hand each refuted clause back to the producer, until clean or out of attempts."""
+	asyncio.run(
+		_repair(
+			_service(_home_of(ctx, home)),
+			harness,
+			model,
+			workspace,
+			max_attempts=max_attempts,
+			tools=tools,
+			fresh=fresh,
+		)
+	)
+
+
+async def _repair(
+	svc: FactoryService,
+	harness: str | None,
+	model: str | None,
+	workspace: Path | None,
+	*,
+	max_attempts: int,
+	tools: str | None = None,
+	fresh: bool = False,
+) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	plan = await svc.latest_plan(built.id)
+	if plan is None:
+		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+
+	# Same gates as `dispatch`, for the same reason: a repair is a session like any
+	# other, so it needs the same evidence that this harness can run one unattended.
+	# Skipping them here would make the repair path the way around FR-148.
+	resolved = _require_known(svc, harness)
+	resolved_tools = _require_tools(tools)
+	profile = await svc.latest_profile(harness)
+	if profile is None:
+		typer.secho(
+			f"{resolved} has never been probed here. Run `sofact probe` first: dispatching "
+			"against an assumed capability is what FR-148 forbids.",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+	if not profile.is_usable:
+		typer.secho(f"{resolved} is not usable unattended (FR-145).", fg="red")
+		raise typer.Exit(code=1)
+	if not profile.supports_goal_dispatch:
+		typer.secho(
+			f"{resolved} does not force goal mode (FR-144): each repair will run "
+			"single-shot, and every record will say so.",
+			fg="yellow",
+		)
+
+	report = await svc.latest_report(built.id)
+	if report is None:
+		typer.secho(
+			"no verdict yet. Run `sofact verify` first: a repair authored from nothing "
+			"would be guessing, and the diagnosis has to come from the verifier.",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+	if report.is_clean:
+		typer.secho(
+			f"\n  contract {report.outcome.value}: nothing is refuted, so there is nothing "
+			"to repair. A repair run against a clean contract must not invent work.",
+			fg="green",
+		)
+		return
+
+	workdir = workspace or (svc.home / "workspace")
+	if not workdir.is_dir():
+		typer.secho(f"workspace does not exist: {workdir}", fg="red")
+		raise typer.Exit(code=1)
+
+	typer.secho(
+		f"\nrepairing plan {plan.id} against {len(report.violated)} refuted clause(s), "
+		f"at most {max_attempts} attempt(s) each.",
+		fg="cyan",
+		bold=True,
+	)
+	attempts = await svc.repair_plan(
+		plan.id,
+		name=harness,
+		workspace=workdir,
+		model=model,
+		tools=resolved_tools,
+		max_attempts=max_attempts,
+		fresh=fresh,
+	)
+	if not attempts:
+		typer.secho("  no attempt was made.", fg="yellow")
+		raise typer.Exit(code=1)
+	for attempt in attempts:
+		_style = _REPAIR_STYLE[attempt.outcome]
+		typer.secho(f"\n  attempt {attempt.attempt} — {attempt.outcome.value}", fg=_style)
+		typer.echo(f"      {len(attempt.clause_ids)} clause(s), goal {attempt.goal_hash[:12]}")
+		typer.secho(f"      diagnosis: {attempt.diagnosis}", fg="bright_black")
+
+	# The verdict is re-read rather than inferred from the outcomes: an attempt that
+	# completed is not an attempt that worked, and only the oracles say which. The
+	# outcomes above describe what the producer did; this line describes what holds.
+	final = await svc.latest_report(built.id)
+	assert final is not None, "a repair ran, so a verdict exists"
+	typer.secho(
+		f"\n  contract {final.outcome.value}: "
+		f"{len(final.satisfied)} of {len(final.verdicts)} clauses hold.",
+		fg=_OUTCOME_STYLE[final.outcome],
+	)
+	exhausted = [a for a in attempts if a.outcome is RepairOutcome.EXHAUSTED]
+	if exhausted:
+		typer.secho(
+			f"  {len(exhausted)} clause(s) ran out of attempts. That is a producer that "
+			"cannot do the work, not a factory that stopped trying (FR-101).",
+			fg="red",
+		)
+	if not final.is_clean:
+		raise typer.Exit(code=1)
 
 
 @app.command(name="contract")

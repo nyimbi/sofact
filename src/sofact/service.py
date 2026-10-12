@@ -44,12 +44,20 @@ from sofact.harness import (
 )
 from sofact.ledger import LEDGER_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
-from sofact.planner import check_integrity, compile_plan
+from sofact.planner import (
+	DEFAULT_REPAIR_ATTEMPTS,
+	check_integrity,
+	compile_plan,
+	refutation_diagnosis,
+	revised_plan,
+)
 from sofact.state import fold
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	Advice,
 	ChainStatus,
+	Clause,
+	ClauseVerdict,
 	CompletionClaim,
 	Contract,
 	DeclarationPrecision,
@@ -59,6 +67,7 @@ from sofact.views import (
 	Evidence,
 	Goal,
 	GoalPlan,
+	GoalStep,
 	GoalStyle,
 	HarnessProfile,
 	IntegrityCheck,
@@ -66,6 +75,8 @@ from sofact.views import (
 	OracleDeclaration,
 	ProjectState,
 	Readiness,
+	RepairAttempt,
+	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
 	SpecificationDraft,
@@ -887,6 +898,251 @@ class FactoryService:
 			if max_steps is not None and len(produced) >= max_steps:
 				break
 		return tuple(produced)
+
+	# ------------------------------------------------- FR-101: the repair loop
+
+	async def repair_plan(
+		self,
+		plan_id: str,
+		*,
+		name: str | None = None,
+		workspace: Path | None = None,
+		model: str | None = None,
+		tools: str | None = None,
+		max_attempts: int = DEFAULT_REPAIR_ATTEMPTS,
+		fresh: bool = False,
+	) -> tuple[RepairAttempt, ...]:
+		"""Turn a refuted verdict into another session, until clean or out of attempts.
+
+		This is the difference between a factory that stops and one that finishes.
+		:meth:`dispatch_plan` halts at the first refuted wave, which is right — a
+		dependent must not build on an unverified dependency (FR-142). What it left
+		undone is the next move: the refutation is *information*, and information about
+		which obligation does not hold is exactly what a repair session needs.
+
+		The loop is bounded twice over, and both bounds are FR-101's answer to the most
+		expensive failure mode an unattended factory has — wall clock. ``max_attempts``
+		caps how many times one clause may be handed back; the clause set being finite
+		bounds the whole run. When the cap is reached the attempt is recorded as
+		``EXHAUSTED`` rather than the loop quietly ending, because "ran out of attempts"
+		and "nothing to repair" must not look the same in the log.
+
+		Each round authors a **new plan revision** rather than mutating the existing one.
+		The plan is what FR-139 pins hashes against; an edited plan would make the
+		integrity check compare the plan with itself. A revision keeps every prior step's
+		id, ordinal and goal hash, so the log's ordinals stay stable and only the tail
+		grows.
+
+		Nothing here touches the oracle, the contract, or the pinned goal text. The
+		producer is asked to make the refutation stop reproducing, and a producer that
+		edits its own completion criteria is caught by the hash check, not by this
+		method's good intentions.
+		"""
+		assert max_attempts >= 1, f"max_attempts must be >= 1, got {max_attempts}"
+		plan = await self.plan_by_id(plan_id)
+		origin_id = plan.id
+		contract = await self.contract_by_id(plan.contract_id)
+		by_clause = {clause.id: clause for clause in contract.clauses}
+		attempts: list[RepairAttempt] = []
+
+		while True:
+			state = await self.state()
+			report = state.latest_report(contract.id)
+			if report is None:
+				# Nothing has been verified, so there is nothing to repair. Authoring a
+				# repair goal from an absent verdict would be inventing a refutation.
+				break
+			grouped = self._group_refutations(plan, tuple(report.violated))
+			if not grouped:
+				# Clean, or refuted only on clauses no step owns — which the compiler
+				# asserts cannot happen, so it is not this method's to repair.
+				break
+			acted = False
+			for step, verdicts in grouped:
+				clauses = tuple(by_clause[v.clause_id] for v in verdicts)
+				spent = max(
+					(len(state.attempts_at_clause(clause.id)) for clause in clauses),
+					default=0,
+				)
+				diagnosis = refutation_diagnosis(verdicts)
+				if spent >= max_attempts:
+					# The bound FR-101 requires, made visible. Recording EXHAUSTED rather
+					# than stopping quietly is what keeps "out of attempts" distinguishable
+					# from "nothing to repair" — the same distinction an unrun oracle must
+					# keep from a satisfied one.
+					attempts.append(
+						self._record_repair(
+							origin_id=origin_id,
+							plan=plan,
+							step=step,
+							clauses=clauses,
+							diagnosis=diagnosis,
+							attempt=max_attempts,
+							outcome=RepairOutcome.EXHAUSTED,
+						),
+					)
+					continue
+				attempt = spent + 1
+				plan = revised_plan(
+					plan,
+					contract,
+					clauses,
+					diagnosis=diagnosis,
+					attempt=attempt,
+					max_attempts=max_attempts,
+				)
+				self._commit(
+					LedgerKind.PLAN_COMPILED,
+					{"plan": plan.model_dump(mode="json")},
+				)
+				repair_step = plan.steps[-1]
+				record = await self.dispatch_step(
+					plan.id,
+					repair_step.id,
+					name=name,
+					workspace=workspace,
+					model=model,
+					tools=tools,
+					fresh=fresh,
+				)
+				# The row is written when the session ends, so a crash still leaves a
+				# record; whether the repair *worked* is settled below, from the verdict
+				# the session's own check rendered. An exit code is not a verdict (FR-138).
+				attempts.append(
+					self._record_repair(
+						origin_id=origin_id,
+						plan=plan,
+						step=repair_step,
+						clauses=clauses,
+						diagnosis=diagnosis,
+						attempt=attempt,
+						outcome=(
+							RepairOutcome.REPAIRED
+							if record.outcome is StepOutcome.COMPLETED
+							else RepairOutcome.NOT_COMPLETED
+						),
+						dispatch_id=record.id,
+					),
+				)
+				acted = True
+			if not acted:
+				# Every refuted clause is out of attempts. Looping again would be the
+				# unbounded retry FR-101 forbids, so this is where the loop ends.
+				break
+			await self._settle_repairs(plan, attempts)
+
+		await self._settle_repairs(plan, attempts)
+		return tuple(attempts)
+
+	def _group_refutations(
+		self,
+		plan: GoalPlan,
+		refuted: tuple[ClauseVerdict, ...],
+	) -> list[tuple[GoalStep, tuple[ClauseVerdict, ...]]]:
+		"""Bucket refuted clauses by the step that owns them, in plan order.
+
+		Grouping by owning step rather than repairing clause-by-clause keeps the repair
+		goal the same size as the step that failed: a step covering one invariant gets a
+		one-clause repair, and a step whose clauses all failed is repaired as one session
+		rather than three sessions that each half-fix the same file.
+
+		A clause no step covers is skipped here — it cannot happen for a plan the compiler
+		produced (it asserts non-omission), and inventing a step for it would hide a
+		compiler defect behind a repair.
+		"""
+		buckets: dict[str, list[ClauseVerdict]] = {}
+		order: list[str] = []
+		for verdict in refuted:
+			for step in plan.steps:
+				if verdict.clause_id in step.clause_ids:
+					if step.id not in buckets:
+						buckets[step.id] = []
+						order.append(step.id)
+					buckets[step.id].append(verdict)
+					break
+		return [
+			(step, tuple(buckets[step.id]))
+			for step in (plan.step_by_id(step_id) for step_id in order)
+			if step is not None
+		]
+
+	def _record_repair(
+		self,
+		*,
+		origin_id: str,
+		plan: GoalPlan,
+		step: GoalStep,
+		clauses: tuple[Clause, ...],
+		diagnosis: str,
+		attempt: int,
+		outcome: RepairOutcome,
+		dispatch_id: str | None = None,
+	) -> RepairAttempt:
+		"""Write one repair attempt to the log and return it.
+
+		``origin_id`` is the plan the caller asked to repair; ``plan`` is the revision
+		the step lives in. Both are recorded so a repair is findable by the id the
+		operator holds as well as by the id that locates the step.
+		"""
+		repair = RepairAttempt(
+			id=uuid7str(),
+			plan_id=origin_id,
+			revision_id=plan.id,
+			step_id=step.id,
+			clause_ids=tuple(clause.id for clause in clauses),
+			attempt=attempt,
+			diagnosis=diagnosis,
+			goal_hash=step.goal_hash,
+			outcome=outcome,
+			dispatch_id=dispatch_id,
+			at=now(),
+		)
+		self._commit(
+			LedgerKind.REPAIR_ATTEMPTED,
+			{"repair": repair.model_dump(mode="json")},
+		)
+		return repair
+
+	async def _settle_repairs(
+		self,
+		plan: GoalPlan,
+		attempts: list[RepairAttempt],
+	) -> None:
+		"""Re-label completed attempts against the verdict their own session rendered.
+
+		A repair dispatch that completed is not yet a repair that worked: the session's
+		check renders a verdict, and only that verdict says whether the refutation
+		stopped reproducing. The row is written when the session ends (so a crash still
+		leaves a record) and settled here, which is why ``REPAIRED`` is decided by a
+		verdict rather than by an exit code.
+
+		Settling is idempotent: an attempt already carrying a terminal outcome is left
+		alone, so calling this twice cannot rewrite history into something more
+		flattering.
+		"""
+		state = await self.state()
+		report = state.latest_report(plan.contract_id)
+		if report is None:
+			return
+		verdicts = {v.clause_id: v.outcome for v in report.verdicts}
+		for position, attempt in enumerate(attempts):
+			if attempt.outcome is not RepairOutcome.REPAIRED:
+				continue
+			if attempt.dispatch_id is None:
+				continue
+			settled = all(
+				verdicts.get(clause_id) is not VerdictOutcome.VIOLATED
+				for clause_id in attempt.clause_ids
+			)
+			if settled:
+				continue
+			attempts[position] = attempt.model_copy(
+				update={"outcome": RepairOutcome.STILL_REFUTED},
+			)
+			self._commit(
+				LedgerKind.REPAIR_ATTEMPTED,
+				{"repair": attempts[position].model_dump(mode="json")},
+			)
 
 	# ------------------------------------------------------------ P1: research
 

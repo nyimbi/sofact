@@ -44,6 +44,7 @@ from sofact.views import (
 	LedgerKind,
 	PlanStepKind,
 	ProbeOutcome,
+	RepairOutcome,
 	StepOutcome,
 	VerdictOutcome,
 )
@@ -733,6 +734,207 @@ class TestDispatchPlan:
 		report = await service.latest_report(plan.contract_id)
 		assert report is not None
 		assert report.outcome is VerdictOutcome.SATISFIED
+
+
+# --------------------------------------------------------------------------- #
+# the repair loop (FR-101's bound on a loop that otherwise does not exist)
+# --------------------------------------------------------------------------- #
+
+REPAIR_ORACLE = "test -f repair-marker.txt"
+"""An oracle that is refuted until a repair session writes the marker.
+
+The refutation is real: the command runs, exits non-zero, and the verifier reports
+VIOLATED from its own observation. The repair is real too — the marker appears only
+because a session whose goal text names it wrote it, and only a repair goal names it.
+Nothing here is mocked; the state transition is a file on disk.
+"""
+
+
+class TestTheRepairLoop:
+	async def test_a_refuted_clause_is_handed_back_and_the_loop_converges(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The whole point: a refuted build becomes a repaired one, unattended.
+
+		Before this loop existed, ``dispatch_plan`` halted at the first refuted wave and
+		the operator dispatched again by hand. Here the refutation is turned into a
+		session, the session writes the file the oracle was missing, and the contract
+		comes back clean — with every step of that recorded.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		first = await service.dispatch_plan(plan.id)
+		refuted = await service.latest_report(plan.contract_id)
+		assert refuted is not None and refuted.outcome is VerdictOutcome.VIOLATED
+		assert len(first) < len(plan.steps), "the plan stopped at the refuted wave"
+
+		attempts = await service.repair_plan(plan.id)
+
+		assert attempts, "a refuted clause must produce at least one repair attempt"
+		assert all(a.outcome is RepairOutcome.REPAIRED for a in attempts), [
+			a.outcome for a in attempts
+		]
+		after = await service.latest_report(plan.contract_id)
+		assert after is not None
+		assert after.outcome is VerdictOutcome.SATISFIED, (
+			"the loop exists to make the contract clean, not merely to try"
+		)
+
+	async def test_the_repair_goal_carries_the_verifiers_diagnosis(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The producer is handed the refutation, never its own summary of it.
+
+		An exit code and a clause statement are the two facts a repair session needs, and
+		both come from the verifier. A goal authored from the producer's account of its
+		own failure aims at the failure the producer can describe.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id)
+
+		assert attempts
+		diagnosis = attempts[0].diagnosis
+		assert "exit code" in diagnosis, f"the oracle's observation must survive: {diagnosis}"
+		assert attempts[0].goal_hash, "a repair goal is pinned like any other"
+
+	async def test_the_repair_goal_forbids_editing_the_oracle(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The constraint that makes a loop safe: the check is out of the producer's reach.
+
+		Without this a repair loop is a producer editing its own completion criteria,
+		which is R22 — the reason ``DEFAULT_STEP_ATTEMPTS`` was 1. The constraint is in
+		the rendered goal text, and FR-139's hash check is what enforces it.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id)
+		revised = await service.latest_plan(plan.contract_id)
+
+		assert revised is not None
+		step = revised.step_by_id(attempts[0].step_id)
+		assert step is not None
+		text = step.goal.render(revised.goal_style)
+		assert "pinned by hash" in text
+		assert "Do not weaken, skip, delete or rewrite" in text
+
+	async def test_a_repair_that_does_not_work_is_recorded_as_still_refuted(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A session that completes is not a repair that worked.
+
+		``repair-never`` runs and leaves the tree alone, so the clause is refuted again
+		by the next check. Reporting that as REPAIRED would be reading an exit code as a
+		verdict, which is the FR-138 defect one level down.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair-never", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id)
+
+		assert attempts
+		assert RepairOutcome.STILL_REFUTED in {a.outcome for a in attempts}
+		after = await service.latest_report(plan.contract_id)
+		assert after is not None and after.outcome is VerdictOutcome.VIOLATED
+
+	async def test_the_loop_is_bounded_and_says_so_when_it_gives_up(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-101: the bound must be visible, not silent.
+
+		``max_attempts=1`` on a clause that never converges produces one attempt and then
+		an EXHAUSTED row. A loop that stopped without saying why would make "out of
+		attempts" indistinguishable from "nothing to repair" — the same defect as an
+		unrun oracle reading as a satisfied one.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair-never", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id, max_attempts=1)
+
+		assert attempts, "giving up is still an event"
+		assert RepairOutcome.EXHAUSTED in {a.outcome for a in attempts}, [
+			a.outcome for a in attempts
+		]
+		assert any(a.attempt == 1 for a in attempts)
+
+	async def test_a_clean_contract_needs_no_repair(self, home: Path, tmp_path: Path) -> None:
+		"""The loop must be a no-op on a contract that already holds."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		await service.dispatch_plan(plan.id)
+		assert await service.repair_plan(plan.id) == ()
+
+	async def test_nothing_verified_means_nothing_to_repair(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A repair goal authored from an absent verdict would be an invented refutation."""
+		service, plan = await plan_and_service(home, tmp_path, "complete", commands="exit 0")
+		assert await service.repair_plan(plan.id) == ()
+
+	async def test_every_attempt_is_in_the_log(self, home: Path, tmp_path: Path) -> None:
+		"""The loop's history is derivable from the log, like everything else."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id)
+
+		state = await service.state()
+		assert len(state.repairs_for_plan(plan.id)) >= len(attempts)
+		assert LedgerKind.REPAIR_ATTEMPTED.value in kinds(service)
+
+	async def test_a_repair_revision_keeps_the_original_steps(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A revision grows the tail; it never rewrites the plan FR-139 pinned."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		await service.repair_plan(plan.id)
+		revised = await service.latest_plan(plan.contract_id)
+
+		assert revised is not None
+		assert revised.id != plan.id, "a revision is a new plan, not an edited one"
+		assert revised.contract_hash == plan.contract_hash
+		assert revised.oracle_set_hash == plan.oracle_set_hash
+		originals = revised.steps[: len(plan.steps)]
+		assert [(s.id, s.ordinal, s.goal_hash) for s in originals] == [
+			(s.id, s.ordinal, s.goal_hash) for s in plan.steps
+		]
+		assert revised.steps[-1].kind is PlanStepKind.REPAIR
+		# The repair chains onto everything before it — including earlier repairs, since
+		# a second pass at the same clause must run after the first one's session.
+		assert revised.steps[-1].depends_on == tuple(s.id for s in revised.steps[:-1])
+
+	async def test_a_repair_step_covers_only_the_refuted_clauses(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""One session per owning step, so a repair is the size of what failed."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete-repair", commands=REPAIR_ORACLE
+		)
+		await service.dispatch_plan(plan.id)
+		attempts = await service.repair_plan(plan.id)
+		revised = await service.latest_plan(plan.contract_id)
+
+		assert revised is not None
+		contract = await service.contract_by_id(plan.contract_id)
+		by_id = {clause.id: clause for clause in contract.clauses}
+		for attempt in attempts:
+			assert attempt.clause_ids, "an attempt that covers nothing repairs nothing"
+			assert all(clause_id in by_id for clause_id in attempt.clause_ids)
+			step = revised.step_by_id(attempt.step_id)
+			assert step is not None
+			assert set(step.clause_ids) == set(attempt.clause_ids)
 
 
 # --------------------------------------------------------------------------- #

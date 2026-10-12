@@ -42,6 +42,7 @@ from sofact.contract import executable_clauses, oracle_set_hash, weak_oracle_cla
 from sofact.views import (
 	STRONG_ORACLE_MAX_RANK,
 	Clause,
+	ClauseVerdict,
 	Contract,
 	DispatchRecord,
 	GoalPlan,
@@ -59,6 +60,7 @@ from sofact.views import (
 )
 
 __all__ = [
+	"DEFAULT_REPAIR_ATTEMPTS",
 	"DEFAULT_STEP_ATTEMPTS",
 	"DEFAULT_STEP_BUDGET",
 	"DEFAULT_STEP_CONTINUATIONS",
@@ -66,6 +68,9 @@ __all__ = [
 	"GOAL_PLAN_TIERS",
 	"check_integrity",
 	"compile_plan",
+	"refutation_diagnosis",
+	"repair_goal",
+	"revised_plan",
 	"step_kind_for",
 ]
 
@@ -86,6 +91,18 @@ DEFAULT_STEP_BUDGET = StepBudget(
 	max_continuations=DEFAULT_STEP_CONTINUATIONS,
 	max_attempts=DEFAULT_STEP_ATTEMPTS,
 )
+
+DEFAULT_REPAIR_ATTEMPTS = 2
+"""How many times one refuted clause may be handed back to a producer.
+
+FR-101 forbids an *unbounded* retry loop because it consumes wall clock, the binding
+resource. A bound is the answer to that, not zero: a factory that halts at the first
+refutation cannot finish a system, and one that retries forever cannot be left
+unattended. Two is chosen so the loop is demonstrably a loop (one retry is not a
+loop) while a third pass over the same clause is left to the operator — a clause
+refuted twice is more likely to be a wrong contract than a wrong build, and that is a
+human's call rather than the scheduler's.
+"""
 
 _SHARED_CONSTRAINTS: tuple[str, ...] = (
 	"Declaring completion is the only authority you hold (FR-140). Report it when "
@@ -361,6 +378,86 @@ def _repair_goal(clauses: Sequence[Clause]) -> GoalSpec:
 	)
 
 
+def repair_goal(
+	clauses: Sequence[Clause],
+	diagnosis: str,
+	*,
+	attempt: int,
+	max_attempts: int,
+) -> GoalSpec:
+	"""Author a session that repairs clauses a verdict has **refuted** (the repair loop).
+
+	This is not :func:`_repair_goal`, and the difference is the whole point. ``_repair_goal``
+	is compiled from the contract *before* anything runs and asks for a stronger *oracle*;
+	it repairs the verification. This asks the producer to fix the *artefact*, and it is
+	authored *after* a verdict exists, from that verdict's own words. A clause whose oracle
+	passes but whose behaviour is wrong gets no step at all under ``_repair_goal`` — which
+	is precisely the gap between a factory that stops at the first refutation and one that
+	finishes.
+
+	Two things make this safe to loop, and both are structural rather than advisory.
+
+	**The diagnosis is the verifier's, not the producer's.** The producer is handed the
+	refutation the oracle produced — exit code, stderr — and told to make *that* stop
+	happening. It is never handed its own summary of what it did, because a producer
+	asked to describe its own failure will describe the failure it can fix.
+
+	**The oracle is out of reach.** The producer may not touch the oracle, the contract,
+	or this goal text: FR-139 pins all three to hashes and a mismatch rejects the work
+	rather than passing it. A repair loop without that pin is a producer editing its own
+	completion criteria, which is R22 and the reason ``DEFAULT_STEP_ATTEMPTS`` is 1.
+
+	The attempt counter is in the goal text so the producer can see the bound. A worker
+	that knows it is on attempt 2 of 2 stops proposing the fix that already failed.
+	"""
+	assert clauses, "a repair goal repairs at least one clause"
+	assert diagnosis.strip(), "a repair goal needs the refutation it was authored from"
+	assert attempt >= 1, f"attempt is 1-based, got {attempt}"
+	assert max_attempts >= attempt, (
+		f"attempt {attempt} exceeds the cap {max_attempts}; a goal past the bound is "
+		"not a repair, it is an unbounded retry (FR-101)"
+	)
+	plural = "clause" if len(clauses) == 1 else "clauses"
+	return GoalSpec(
+		outcome=(
+			f"Repair {len(clauses)} refuted {plural} (attempt {attempt} of {max_attempts}). "
+			"An oracle ran against this workspace and did not pass. Make it pass. The "
+			f"failure it reported is: {diagnosis.strip()} "
+			f"The obligation(s) it checks: {_statements(clauses)}"
+		),
+		verification_surface=(
+			*_oracle_lines(clauses),
+			f"the refutation above no longer reproduces: {diagnosis.strip()}",
+		),
+		constraints=(
+			*_SHARED_CONSTRAINTS,
+			"Fix the behaviour, not the check. The oracle, the contract and this goal "
+			"text are pinned by hash and compared after your session: a workaround that "
+			"makes the oracle stop complaining without making the obligation hold is "
+			"refused, and the module is rejected rather than accepted (FR-139).",
+			"Do not weaken, skip, delete or rewrite any test assertion that serves as an "
+			"oracle, and do not change the clause this step covers.",
+		),
+		boundaries=(
+			*_SHARED_BOUNDARIES,
+			"Change only what is needed to make the refuted obligation hold. The clauses "
+			"that already passed must still pass when you are done.",
+		),
+		iteration_policy=(
+			"Reproduce the failure first, then fix it, then re-run the oracle. Do not "
+			"propose a fix you have not observed working — a repair session that reports "
+			"success without watching the oracle pass has not repaired anything."
+		),
+		blocked_stop_condition=(
+			f"Stop and report if the refutation is not reproducible, if the obligation "
+			f"cannot hold without violating a clause this step does not cover, or if you "
+			f"have exhausted the approaches available to you on attempt {attempt} of "
+			f"{max_attempts}. Report the specific input needed to proceed. Do not attempt "
+			"to satisfy the oracle by editing it. " + _STOP_FLOOR
+		),
+	)
+
+
 _PER_CLAUSE_GOAL: dict[PlanStepKind, Callable[[Sequence[Clause]], GoalSpec]] = {
 	PlanStepKind.INVARIANT: _invariant_goal,
 	PlanStepKind.STATE_MACHINE: _state_machine_goal,
@@ -529,6 +626,75 @@ def compile_plan(
 	assert not uncovered, f"compiler dropped {len(uncovered)} clause(s): {uncovered}"
 	assert plan.steps[0].kind is PlanStepKind.BOOTSTRAP, "a plan must start by bootstrapping"
 	return plan
+
+
+def refutation_diagnosis(verdicts: Sequence[ClauseVerdict]) -> str:
+	"""The verifier's own words for why these clauses are refuted, joined.
+
+	Never the producer's. A repair goal authored from a producer's summary of its own
+	failure would be a goal aimed at the failure the producer can describe rather than
+	the one the oracle observed, and the two differ exactly when it matters.
+
+	Each line names the clause and its verdict reason, because the reason carries the
+	observation — an exit code, a missing stdout string, a timeout — and it is the
+	observation the producer has to make stop happening.
+	"""
+	assert verdicts, "a diagnosis needs at least one refuted verdict"
+	return " | ".join(f"{v.statement!r} — {v.reason}" for v in verdicts)
+
+
+def revised_plan(
+	plan: GoalPlan,
+	contract: Contract,
+	clauses: Sequence[Clause],
+	*,
+	diagnosis: str,
+	attempt: int,
+	max_attempts: int,
+	at: datetime | None = None,
+) -> GoalPlan:
+	"""Extend ``plan`` with one repair step covering ``clauses``, and return the new plan.
+
+	A *new* plan rather than a mutation, because the plan is the thing FR-139 pins
+	hashes against: an edited plan would make every integrity check a comparison of the
+	plan against itself. The revision carries the original's contract hash and oracle-set
+	hash unchanged — the contract did not move, only the plan grew a step — and it chains
+	the new step onto the whole previous plan so the repair runs strictly after
+	everything it might depend on.
+
+	Every existing step keeps its id, ordinal, goal text and pinned hash. That is what
+	lets the log hold two plans for one contract and still answer "which steps has this
+	contract already been through?" — the ordinals are stable across revisions, and only
+	the tail grows.
+	"""
+	assert clauses, "a repair revision must cover at least one clause"
+	assert diagnosis.strip(), "a repair revision needs the refutation it was authored from"
+	timestamp = at or now()
+	goal = repair_goal(clauses, diagnosis, attempt=attempt, max_attempts=max_attempts)
+	step = GoalStep(
+		id=uuid7str(),
+		ordinal=len(plan.steps),
+		kind=PlanStepKind.REPAIR,
+		goal=goal,
+		goal_hash=goal.text_hash(plan.goal_style),
+		budget=plan.steps[-1].budget,
+		exit_evidence=_EXIT_EVIDENCE[PlanStepKind.REPAIR],
+		clause_ids=tuple(c.id for c in clauses),
+		depends_on=tuple(s.id for s in plan.steps),
+	)
+	revised = GoalPlan(
+		id=uuid7str(),
+		goal_id=plan.goal_id,
+		contract_id=plan.contract_id,
+		contract_hash=plan.contract_hash,
+		oracle_set_hash=plan.oracle_set_hash,
+		goal_style=plan.goal_style,
+		created_at=timestamp,
+		steps=(*plan.steps, step),
+	)
+	uncovered = revised.uncovered_clause_ids(contract)
+	assert not uncovered, f"repair revision dropped {len(uncovered)} clause(s): {uncovered}"
+	return revised
 
 
 def _verdict_on(expected: str, observed: str | None) -> IntegrityOutcome:

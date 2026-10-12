@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from conftest import answer_everything
+from synthetic import plan_and_service
 
 from sofact.contract import ground_truth_debt
 from sofact.service import FactoryService
@@ -231,3 +232,54 @@ async def test_a_restarted_service_reconstructs_everything_from_the_log(
 	assert report is not None
 	assert report.outcome is VerdictOutcome.SATISFIED
 	assert report.contract_hash == contract.content_hash
+
+
+# --------------------------------------------------------------------------- #
+# the whole claim, once: a specification goes in and a working system comes out
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_specification_becomes_a_working_system_without_a_hand_on_it(
+	home: Path, tmp_path: Path
+) -> None:
+	"""The factory's headline claim, end to end and unattended.
+
+	Every other test in this suite checks one joint. This one checks the claim those
+	joints exist to support: a statement of intent goes in, sessions run, the artefact
+	comes back refuted, the factory repairs it *itself* from the verifier's diagnosis,
+	and what comes out satisfies the contract — with no operator step between the first
+	session and the last, and with the repair visible in the log rather than inferred.
+
+	The repair is real in the only sense that matters: the file the oracle asks for is
+	written by the repair session and by nothing else. The synthetic child writes it for
+	a goal phrased as a repair, so the oracle's first failure is the truth and its later
+	success is the session's work.
+	"""
+	service, plan = await plan_and_service(
+		home, tmp_path, "goal-repair", commands="test -f repair-marker.txt"
+	)
+	# The factory's own workspace, not the test's tmp dir: sessions and the tree they
+	# edit live under the SoFact home, and a test that pointed at tmp_path would be
+	# measuring a directory nothing wrote to.
+	built = service.home / "workspace"
+	assert not (built / "repair-marker.txt").exists(), "the oracle must start refuted"
+
+	dispatched = await service.dispatch_plan(plan.id)
+	refuted = await service.latest_report(plan.contract_id)
+	assert refuted is not None and refuted.outcome is VerdictOutcome.VIOLATED
+	assert len(dispatched) < len(plan.steps), "the plan stopped at the refuted wave"
+
+	attempts = await service.repair_plan(plan.id)
+
+	assert attempts, "a refuted specification must produce a repair attempt"
+	assert (built / "repair-marker.txt").read_text(encoding="utf-8") == "REPAIRED", (
+		"the artefact must be the repair session's work, not the test's"
+	)
+	final = await service.latest_report(plan.contract_id)
+	assert final is not None and final.is_clean, (
+		"the claim is a working system, not a verdict that says it does not work"
+	)
+
+	# And the whole thing survives being read back: nothing above is in memory.
+	replayed = await FactoryService(home=home, llm=None).latest_report(plan.contract_id)
+	assert replayed is not None and replayed.is_clean
