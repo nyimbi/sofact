@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
 from sofact import __version__
 from sofact._uuid7 import uuid7str
@@ -26,7 +27,6 @@ from sofact.elicitation import DIMENSIONS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.service import (
-	RESEARCH_TIMEOUT_SECONDS,
 	FactoryService,
 	refuted_steps,
 	resolve_tools,
@@ -49,6 +49,7 @@ from sofact.views import (
 	PhaseStatus,
 	ProbeOutcome,
 	RepairOutcome,
+	ResearchBudget,
 	ResearchMode,
 	ResearchRecord,
 	SourceLedger,
@@ -1645,13 +1646,28 @@ def research(
 		"--super",
 		help="Ask for the multi-phase research loop instead of the single deep one.",
 	),
-	timeout: float = typer.Option(
-		RESEARCH_TIMEOUT_SECONDS,
+	timeout: float | None = typer.Option(
+		None,
 		"--timeout",
-		help="Wall-clock ceiling for the research session.",
+		help="Override the budget's scaled wall clock for this run (FR-072).",
+	),
+	max_sources: int | None = typer.Option(
+		None,
+		"--max-sources",
+		help="Sources per intent clause. Default 5, the research loop's own floor.",
+	),
+	max_calls: int | None = typer.Option(
+		None,
+		"--max-calls",
+		help="Model calls per intent clause. Default 5, read from the loop's own meta.",
+	),
+	seconds: float | None = typer.Option(
+		None,
+		"--seconds",
+		help="Wall clock per intent clause. Default 300, above the loop's own ceiling.",
 	),
 ) -> None:
-	"""Dispatch a research run on the current goal and record what it left (FR-167)."""
+	"""Dispatch a research run on the current goal and record what it left (FR-167, FR-072)."""
 	asyncio.run(
 		_research(
 			_service(_home_of(ctx, home)),
@@ -1661,6 +1677,9 @@ def research(
 			tools,
 			super_mode,
 			timeout,
+			max_sources,
+			max_calls,
+			seconds,
 		),
 	)
 
@@ -1672,9 +1691,31 @@ async def _research(
 	model: str | None,
 	tools: str | None,
 	super_mode: bool,
-	timeout: float,
+	timeout: float | None,
+	max_sources: int | None,
+	max_calls: int | None,
+	seconds: float | None,
 ) -> None:
 	resolved_tools = _require_tools(tools)
+	# Built field by field rather than from a dict comprehension: the three overrides
+	# have different types, and a comprehension erases which value belongs to which
+	# parameter -- so a swapped pair would type-check and silently bound the wrong thing.
+	defaults = ResearchBudget()
+	try:
+		budget = ResearchBudget(
+			max_sources_per_clause=(
+				defaults.max_sources_per_clause if max_sources is None else max_sources
+			),
+			max_model_calls_per_clause=(
+				defaults.max_model_calls_per_clause if max_calls is None else max_calls
+			),
+			max_wall_clock_seconds_per_clause=(
+				defaults.max_wall_clock_seconds_per_clause if seconds is None else seconds
+			),
+		)
+	except ValidationError as exc:
+		typer.secho(f"bad research budget: {exc.errors()[0]['msg']}", fg="red")
+		raise typer.Exit(code=1) from exc
 	try:
 		record = await svc.research(
 			query,
@@ -1682,6 +1723,7 @@ async def _research(
 			model=model,
 			tools=resolved_tools,
 			mode=ResearchMode.SUPER if super_mode else ResearchMode.DEEP,
+			budget=budget,
 			timeout=timeout,
 		)
 	except KeyError as exc:
@@ -1702,6 +1744,14 @@ def _print_research(record: ResearchRecord) -> None:
 		bold=True,
 	)
 	typer.secho(f"  query   {record.query}", fg="bright_black")
+	if record.allowance is not None:
+		allowance = record.allowance
+		typer.secho(
+			f"  budget  {allowance.max_sources} source(s), {allowance.max_model_calls} "
+			f"call(s), {allowance.max_wall_clock_seconds:.0f}s "
+			f"({allowance.intent_clauses} intent clause(s), FR-072)",
+			fg="bright_black",
+		)
 	typer.secho(
 		f"  {record.outcome.value}"
 		+ (f" after {record.wall_clock_seconds:.0f}s" if record.wall_clock_seconds else ""),
@@ -1709,6 +1759,13 @@ def _print_research(record: ResearchRecord) -> None:
 	)
 	if record.note is not None:
 		typer.secho(f"  {record.note}", fg="yellow")
+	if record.budget_violations:
+		# FR-072's three caps are not enforced alike, and the message says which is
+		# which: wall clock was killed by SoFact, the other two were read off the
+		# artefacts afterwards. Printing them together without that distinction would
+		# make an observed overspend look like a bound that held.
+		for violation in record.budget_violations:
+			typer.secho(f"  over budget: {violation}", fg="red")
 	if record.report_path is not None:
 		typer.secho(
 			f"  report  {record.report_path} ({record.report_chars} characters)",
@@ -1716,6 +1773,14 @@ def _print_research(record: ResearchRecord) -> None:
 		)
 		if record.searches_observed is not None:
 			typer.secho(f"  searches {record.searches_observed}", fg="bright_black")
+		if record.model_calls_observed is not None:
+			typer.secho(f"  calls    {record.model_calls_observed}", fg="bright_black")
+		else:
+			typer.secho(
+				"  calls    unmeasured: the loop's meta carried no turn count, so the "
+				"model-call cap was not checked either way (NFR-024).",
+				fg="yellow",
+			)
 		if record.source_urls:
 			typer.secho(f"  sources {len(record.source_urls)}", fg="bright_black")
 			for url in record.source_urls:

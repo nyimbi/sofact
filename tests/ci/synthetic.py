@@ -255,6 +255,9 @@ if "research-report.md" in goal:
 		pathlib.Path("research-report.md").write_text(
 			"partial: the loop was cut before any search completed", encoding="utf-8"
 		)
+		# No `turns` key: the truncated meta the real loop wrote carried counts for the
+		# searches it managed and nothing for the model calls, so the FR-072 call cap
+		# must read as *unmeasured* here rather than as zero.
 		pathlib.Path("research-meta.json").write_text(
 			json.dumps({"stats": {"searches": 2}, "sources": []}), encoding="utf-8"
 		)
@@ -264,10 +267,14 @@ if "research-report.md" in goal:
 			"- https://example.com/two.",
 			encoding="utf-8",
 		)
+		# `turns` is the loop's own model-call count ([S25]); `research-greedy` reports
+		# more of them than any default per-clause cap allows, which is the FR-072
+		# overspend case -- an artefact that says the run cost more than it was allowed.
+		turns = 9 if mode.startswith("research-greedy") else 3
 		pathlib.Path("research-meta.json").write_text(
 			json.dumps(
 				{
-					"stats": {"searches": 5},
+					"stats": {"searches": 5, "turns": turns},
 					"sources": [
 						{"id": 1, "title": "one", "url": "https://example.com/one"},
 						{"id": 2, "title": "two", "url": "https://example.com/three"},

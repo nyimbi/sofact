@@ -239,6 +239,18 @@ and never rounds a report with no sources into research that happened: on a loca
 the extension's own timeout binds first, and that fact reads *unmeasured*, not *none
 found* (NFR-024).
 
+**And it is bounded before it starts** (FR-072, ADR-0036). The run is measured against a
+budget declared **per intent clause** — `--max-sources`, `--max-calls`, `--seconds`,
+defaulting to 5 sources, 5 model calls and 300 s for each clause the goal's draft has, so
+a five-clause goal gets 25/25/1500 s and the budget line says both figures. Of the three
+only wall clock is *enforced*: SoFact owns the timeout and kills the child. Sources and
+model calls are read off the producer's artefacts afterwards and, when they exceed the
+allowance, recorded in `budget_violations` — a cap enforced inside the producer's runtime
+would be the producer grading its own spend (FR-140). The default wall clock sits *above*
+the extension's own 240 s/360 s ceilings so a truncation is attributed to the extension
+that caused it, and `--timeout` overrides the scaled figure for one run without rewriting
+the declared budget. An overspend is recorded, not fatal: the ledger is still read.
+
 **The ledger is a graph, not a reading list** (`sofact sources`, FR-070, ADR-0035).
 `research_goal` asks the producer for `research-sources/sNN-slug.md` (front-matter
 provenance, a `## Precis`, and a `## Concerns / information quality` critique) plus

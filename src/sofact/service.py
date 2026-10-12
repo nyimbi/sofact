@@ -107,6 +107,8 @@ from sofact.views import (
 	Readiness,
 	RepairAttempt,
 	RepairOutcome,
+	ResearchAllowance,
+	ResearchBudget,
 	ResearchMode,
 	ResearchRecord,
 	SourceLedger,
@@ -138,8 +140,13 @@ DEFAULT_HARNESS = "pi"
 DEFAULT_RESEARCH_HARNESS = "pi-research"
 
 RESEARCH_TIMEOUT_SECONDS: Final = 900.0
-"""Wall clock for one research dispatch. The extension's own loop timeout (240 s deep,
-360 s super) is the tighter bound on a local model; this is the outer session's ceiling."""
+"""Wall clock for one research dispatch **when the scaled allowance is overridden**.
+
+Kept as the default for the ``--timeout`` flag, which now overrides the per-clause
+budget rather than being the only bound. FR-072's per-clause wall clock
+(:data:`~sofact.views.DEFAULT_RESEARCH_SECONDS_PER_CLAUSE`) is what bounds a run
+normally; this constant is what a caller gets when it says "ignore that for this one".
+"""
 
 
 research_url_pattern = re.compile(r"https?://[^\s()>]+")
@@ -155,7 +162,7 @@ def extract_source_urls(text: str) -> tuple[str, ...]:
 	return tuple(seen)
 
 
-def research_goal(query: str, *, mode: ResearchMode) -> str:
+def research_goal(query: str, *, mode: ResearchMode, allowance: ResearchAllowance) -> str:
 	"""The research session's goal, authored with zero model involvement (FR-167).
 
 	SoFact writes the prompt; the model performs the research. The goal names the tool,
@@ -166,6 +173,13 @@ def research_goal(query: str, *, mode: ResearchMode) -> str:
 	what makes the difference between a report and a ledger the producer's task rather
 	than a transcription SoFact performs on prose afterwards, and transcription from
 	prose is exactly what :mod:`sofact.research` refuses to do.
+
+	The allowance is named as well (FR-072), and this is the one part of the prompt that
+	is a *bound* rather than a request: FR-072 says unbounded research is a way to never
+	build, so the producer is told the totals it is being measured against. Telling it is
+	not enforcement — the wall-clock half is enforced by the timeout SoFact holds, and
+	the other two are read off the artefacts afterwards — but a producer that does not
+	know its budget cannot be said to have exceeded one.
 	"""
 	assert query.strip(), "a research query must not be empty"
 	tool = "super_deep_research" if mode is ResearchMode.SUPER else "deep_research"
@@ -173,6 +187,14 @@ def research_goal(query: str, *, mode: ResearchMode) -> str:
 		f"Research the following subject using the {tool} tool.\n\n"
 		f"Subject: {query}\n\n"
 		f"Call the {tool} tool exactly once, with the query: {query}\n\n"
+		f"Budget (FR-072): at most {allowance.max_sources} source(s), "
+		f"{allowance.max_model_calls} model call(s) and "
+		f"{allowance.max_wall_clock_seconds:.0f}s for the whole run, which is "
+		f"{allowance.intent_clauses} intent clause(s) at "
+		f"{allowance.max_sources // allowance.intent_clauses} source(s), "
+		f"{allowance.max_model_calls // allowance.intent_clauses} call(s) and "
+		f"{allowance.max_wall_clock_seconds / allowance.intent_clauses:.0f}s each. "
+		"Stay inside it: a run that exceeds it is recorded as having exceeded it.\n\n"
 		"When the tool finishes: write the full report text it returned, verbatim and "
 		"unchanged, to research-report.md in the working directory; then copy the file "
 		"~/.forecastx-reports/<the report id the tool reported>/meta.json to "
@@ -1792,9 +1814,10 @@ class FactoryService:
 		model: str | None = None,
 		tools: str | None = None,
 		mode: ResearchMode = ResearchMode.DEEP,
-		timeout: float = RESEARCH_TIMEOUT_SECONDS,
+		budget: ResearchBudget | None = None,
+		timeout: float | None = None,
 	) -> ResearchRecord:
-		"""Dispatch one research run and record what it left behind (FR-167).
+		"""Dispatch one research run and record what it left behind (FR-167, FR-072).
 
 		SoFact performs no research of its own: it authors the session's goal
 		deterministically — zero model involvement, the same discipline as a build
@@ -1804,6 +1827,15 @@ class FactoryService:
 		loop's own search count from ``research-meta.json``, and the source URLs the
 		report and the meta cite. A report with no sources is recorded as exactly
 		that, never rounded into research that happened (NFR-024).
+
+		**The run is bounded (FR-072).** ``budget`` is per intent clause and is scaled by
+		the clause count the current draft holds, so a goal with more clauses is allowed
+		more research rather than being held to one flat ceiling. ``timeout`` overrides
+		the scaled wall clock for a single run and is recorded as an override rather than
+		applied silently — an operator raising a cap has to be able to see that they did.
+		A goal with no draft yet counts as **one** clause and the record says so, because
+		the alternative — an allowance of zero — would make the first run on a fresh goal
+		violate its own budget by construction.
 
 		The harness resolves from the configured table like any other: explicit name,
 		then :data:`DEFAULT_RESEARCH_HARNESS` if the table contains it. Unlike a build
@@ -1817,6 +1849,14 @@ class FactoryService:
 			raise KeyError("no goal yet; research refines a goal, so start one first")
 		resolved_query = (query or goal.statement).strip()
 		assert resolved_query, "a research query must not be empty"
+		resolved_budget = budget if budget is not None else ResearchBudget()
+		draft = await self.latest_draft(goal.id)
+		clauses = len(draft.stems) if draft is not None else 1
+		allowance = resolved_budget.scaled(clauses)
+		# The scaled wall clock is the cap SoFact enforces; an explicit ``timeout``
+		# replaces it for this run only. Recorded, because a run whose bound differs
+		# from its declared budget is a run whose budget line does not describe it.
+		enforced_timeout = allowance.max_wall_clock_seconds if timeout is None else timeout
 		if name is None:
 			if DEFAULT_RESEARCH_HARNESS not in self._specs:
 				known = ", ".join(sorted(self._specs)) or "none"
@@ -1840,17 +1880,17 @@ class FactoryService:
 				resolved_tools = ",".join([*declared, *missing])
 		adapter = self.adapter(resolved, workspace=workdir, model=model, tools=resolved_tools)
 		session_id = uuid7str()
-		goal_text = research_goal(resolved_query, mode=mode)
+		goal_text = research_goal(resolved_query, mode=mode, allowance=allowance)
 		argv = adapter.build_argv(goal_text, session_id)
 		started = now()
 		exit_code, _stdout, stderr, timed_out, session_path, tokens = await adapter.invoke(
-			argv, timeout=timeout, session_id=session_id
+			argv, timeout=enforced_timeout, session_id=session_id
 		)
 		ended = now()
 
 		if timed_out:
 			outcome = StepOutcome.BUDGET_EXHAUSTED
-			note = f"the research session did not finish within {timeout:.0f}s"
+			note = f"the research session did not finish within {enforced_timeout:.0f}s"
 		elif exit_code != 0:
 			outcome = StepOutcome.FAILED
 			note = f"the research session exited {exit_code}"
@@ -1862,6 +1902,7 @@ class FactoryService:
 		report_chars = 0
 		urls: list[str] = []
 		searches: int | None = None
+		model_calls: int | None = None
 		if report.is_file():
 			report_text = report.read_text(encoding="utf-8", errors="replace")
 			report_chars = len(report_text)
@@ -1885,6 +1926,12 @@ class FactoryService:
 					observed = stats.get("searches")
 					if isinstance(observed, int) and not isinstance(observed, bool):
 						searches = observed
+					# The loop's own turn count is the model-call measurement FR-072 asks
+					# for. Its key is the loop's, not SoFact's, and it is absent in a
+					# truncated meta -- absent means unmeasured, never zero.
+					turns = stats.get("turns")
+					if isinstance(turns, int) and not isinstance(turns, bool):
+						model_calls = turns
 				sources_raw = meta.get("sources")
 				if isinstance(sources_raw, list):
 					for source in cast("list[object]", sources_raw):
@@ -1892,6 +1939,13 @@ class FactoryService:
 							url = cast("dict[str, object]", source).get("url")
 							if isinstance(url, str) and url and url not in urls:
 								urls.append(url)
+		violations = self._research_violations(
+			allowance=allowance,
+			enforced_timeout=enforced_timeout,
+			timed_out=timed_out,
+			sources=len(urls),
+			model_calls=model_calls,
+		)
 		record = ResearchRecord(
 			id=uuid7str(),
 			goal_id=goal.id,
@@ -1900,6 +1954,8 @@ class FactoryService:
 			mode=mode,
 			argv=argv,
 			workspace=str(workdir),
+			budget=resolved_budget,
+			allowance=allowance,
 			started_at=started,
 			ended_at=ended,
 			wall_clock_seconds=max(0.0, (ended - started).total_seconds()),
@@ -1912,10 +1968,49 @@ class FactoryService:
 			report_chars=report_chars,
 			searches_observed=searches,
 			source_urls=tuple(urls),
+			model_calls_observed=model_calls,
+			budget_violations=violations,
 			note=note,
 		)
 		self._commit(LedgerKind.RESEARCH_RUN, {"research": record.model_dump(mode="json")})
 		return record
+
+	@staticmethod
+	def _research_violations(
+		*,
+		allowance: ResearchAllowance,
+		enforced_timeout: float,
+		timed_out: bool,
+		sources: int,
+		model_calls: int | None,
+	) -> tuple[str, ...]:
+		"""Which of FR-072's three caps this run exceeded, if any.
+
+		Split out so the rule is one readable function rather than a fourth branch inside
+		a method that is already long, and so the enforcement asymmetry is visible in one
+		place: wall clock is a *violation of something SoFact did* (it killed the child),
+		while sources and model calls are violations of something SoFact only *observed*.
+		An unobserved count produces no violation in either direction — a run whose meta
+		was never written is unmeasured, and inventing a zero would report it as the
+		cheapest possible run (NFR-024).
+		"""
+		found: list[str] = []
+		if timed_out:
+			found.append(
+				f"wall-clock cap {enforced_timeout:.0f}s exceeded; process killed by SoFact, "
+				"which holds the budget (FR-140, FR-072)"
+			)
+		if sources > allowance.max_sources:
+			found.append(
+				f"source cap {allowance.max_sources} exceeded: {sources} recorded, "
+				"observed after the fact so recorded rather than enforced (FR-072)"
+			)
+		if model_calls is not None and model_calls > allowance.max_model_calls:
+			found.append(
+				f"model-call cap {allowance.max_model_calls} exceeded: {model_calls} observed "
+				"from the loop's own meta (FR-072)"
+			)
+		return tuple(found)
 
 	# ------------------------------------------------------ FR-070: the source ledger
 

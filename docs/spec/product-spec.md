@@ -1876,8 +1876,21 @@ are FR-139 and §20.4. `run` is clause-complete and `verify` is run-scoped, so
   searching (`pi-research` in the built-in table, [S25]). The verb records what the
   workspace holds — report size, the loop's own search count, cited URLs — and never
   rounds a report with no sources into research that happened. `--super` asks for the
-  multi-phase loop; `--timeout` bounds only the outer session, because the extension's
-  own loop ceiling binds first on a local model.
+  multi-phase loop. The run is **bounded by a declared budget** (FR-072, ADR-0036):
+  `--max-sources`, `--max-calls` and `--seconds` set the caps **per intent clause**, and
+  the allowance for the whole run is the product — the clause count coming from the
+  goal's latest draft, with a goal that has no draft yet counted as one clause and the
+  record saying so. The defaults are 5 sources, 5 model calls and 300 s per clause: the
+  first two are the delegated loop's own five-search floor read back as a ceiling, and
+  the wall clock is set above the extension's 240 s/360 s ceilings so that a truncation
+  is attributed to the extension that caused it. Only wall clock is enforced — SoFact
+  holds the timeout and kills the child; the other two are observed from the producer's
+  artefacts afterwards and recorded in `budget_violations` when exceeded, because a cap
+  enforced inside the producer's runtime is the producer grading its own spend (FR-140).
+  An unmeasured turn count yields no violation in either direction and prints as
+  `unmeasured`, not as zero (NFR-024). `--timeout` overrides the scaled wall clock for
+  one run without rewriting the declared budget. An overspend is recorded rather than
+  fatal: the ledger the phase exists to produce is still read.
 - **`SOFACT_HARNESS_SPECS`** — path to a JSON harness table, so FR-161's table can be
   replaced without editing `src/`. Accepts `{"harnesses": {...}}` or a bare
   `{name: {...}}`. Unset means the **built-in** table, which is not the same as an

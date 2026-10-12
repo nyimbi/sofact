@@ -91,6 +91,10 @@ __all__ = [
 	"RepairAttempt",
 	"RepairOutcome",
 	"Requirement",
+	"ResearchAllowance",
+	"ResearchBudget",
+	"ResearchMode",
+	"ResearchRecord",
 	"Source",
 	"SourceLedger",
 	"SourcePosture",
@@ -2033,6 +2037,118 @@ class ResearchMode(StrEnum):
 	SUPER = "super"
 
 
+DEFAULT_RESEARCH_SOURCES_PER_CLAUSE: Final = 5
+"""FR-072's source bound, per intent clause.
+
+Five because the loop SoFact delegates to advertises "must call the search tool at
+least 5 times" ([S25]) — so this is the producer's own floor read back as a ceiling,
+which is the one number here that is not SoFact's invention. A clause that needs more
+than five sources is a clause whose premise is not a single question, and the
+operator's answer to that is to override this, not to widen it silently.
+"""
+
+DEFAULT_RESEARCH_SECONDS_PER_CLAUSE: Final = 300.0
+"""FR-072's time bound, per intent clause, **enforced** by killing the process.
+
+Larger than the extension's own ceiling (240 s deep, 360 s super, [S25]) on purpose:
+this is the outer envelope, and the inner ceiling is what binds first on a local
+model. A bound set below the producer's own would report SoFact's cap as the cause of
+a truncation the extension caused.
+"""
+
+DEFAULT_RESEARCH_CALLS_PER_CLAUSE: Final = 5
+"""FR-072's model-call bound, per intent clause, **observed** from the loop's own meta.
+
+Measured against the meta's ``turns``, which is the loop's own count of model turns
+([S25]). Recorded rather than enforced: a cap the producer's runtime honours is the
+producer grading its own spend (FR-140).
+"""
+
+
+class ResearchBudget(View):
+	"""FR-072's declared bound on one research run, expressed **per intent clause**.
+
+	Three quantities and no others, because the spec names three: sources, time, and
+	model calls. Per clause rather than per run because a goal with more clauses has
+	more to check, and one flat ceiling would bound a one-clause goal and an
+	eight-clause one identically — which is a bound on the *goal*, not on the research.
+
+	The three are not handled alike, and the split is FR-140's. Wall clock is
+	**enforced**: SoFact holds the timeout, so exceeding it kills the process. Sources
+	and model calls can only be **observed** from the artefacts the loop left, so
+	exceeding one is recorded as a violation rather than prevented. A cap enforced
+	inside the producer's own runtime would be the producer grading its own spend, and
+	a budget the producer can raise is not a budget.
+	"""
+
+	max_sources_per_clause: int = DEFAULT_RESEARCH_SOURCES_PER_CLAUSE
+	max_wall_clock_seconds_per_clause: float = DEFAULT_RESEARCH_SECONDS_PER_CLAUSE
+	max_model_calls_per_clause: int = DEFAULT_RESEARCH_CALLS_PER_CLAUSE
+
+	@model_validator(mode="after")
+	def _every_cap_bounds_something(self) -> Self:
+		"""A zero cap is not a tight budget, it is a refusal to research.
+
+		Refused at construction because the alternative is worse than an error: a zero
+		here multiplies to a whole-run allowance of zero, so every run violates its
+		budget and the violation stops meaning anything. An operator who wants no
+		research does not dispatch one.
+		"""
+		for label, value in (
+			("source cap", self.max_sources_per_clause),
+			("model-call cap", self.max_model_calls_per_clause),
+			("wall-clock cap", self.max_wall_clock_seconds_per_clause),
+		):
+			if value <= 0:
+				raise ValueError(
+					f"research {label} must be positive, got {value}: a zero cap is a "
+					"refusal to research wearing a budget's clothes (FR-072)"
+				)
+		return self
+
+	def scaled(self, intent_clauses: int) -> ResearchAllowance:
+		"""The whole-run allowance for a goal of ``intent_clauses`` clauses (FR-072).
+
+		Refuses a count below one rather than defaulting it, so the substitution — *a
+		goal with no draft yet is one subject* — is made by the caller that can see the
+		goal and can say so in the record, not hidden in an arithmetic helper.
+		"""
+		if intent_clauses < 1:
+			raise ValueError(
+				f"cannot scale a per-clause budget by {intent_clauses} clauses: a run with "
+				"no subject has no bound to be given (FR-072)"
+			)
+		return ResearchAllowance(
+			intent_clauses=intent_clauses,
+			max_sources=self.max_sources_per_clause * intent_clauses,
+			max_wall_clock_seconds=self.max_wall_clock_seconds_per_clause * intent_clauses,
+			max_model_calls=self.max_model_calls_per_clause * intent_clauses,
+		)
+
+
+class ResearchAllowance(View):
+	"""One run's totals: the per-clause budget multiplied by the clause count (FR-072).
+
+	A type of its own rather than three more fields on the budget, because the two are
+	different quantities and a reader must not have to infer which one a number is. "5
+	sources per clause" is a declaration; "40 sources for this run" is the figure the
+	run is measured against. One field carrying both would make those the same
+	sentence, and the record would no longer say which the operator declared.
+	"""
+
+	intent_clauses: int
+	"""How many clauses the budget was multiplied by.
+
+	``1`` when the elicitation has not produced a draft: a goal with no clauses yet is
+	one subject, and the alternative — an allowance of zero — would make the first
+	research run on a fresh goal violate its own budget by construction.
+	"""
+
+	max_sources: int
+	max_wall_clock_seconds: float
+	max_model_calls: int
+
+
 class ResearchRecord(View):
 	"""One research dispatch (FR-167) and what it left behind.
 
@@ -2041,6 +2157,11 @@ class ResearchRecord(View):
 	``source_urls`` means *none were recorded*, never *none exist* (NFR-024). A
 	truncated research loop and a completed one look different only in these numbers,
 	which is why they are recorded at all.
+
+	``budget_violations`` follows :class:`DispatchRecord`'s rule rather than inventing a
+	second one: a fact about spend, not a verdict. A run that exceeded a cap is
+	recorded as having exceeded it, and the fact that it produced a usable ledger is
+	not overwritten by that — the two are different statements (FR-138, FR-072).
 	"""
 
 	id: UUID7
@@ -2050,6 +2171,15 @@ class ResearchRecord(View):
 	mode: ResearchMode
 	argv: tuple[str, ...]
 	workspace: str
+	budget: ResearchBudget = ResearchBudget()
+	allowance: ResearchAllowance | None = None
+	"""What this run was measured against (FR-072).
+
+	``None`` only on a record written before budgets existed. Every record this build
+	produces carries one, because the alternative — measuring a run against nothing —
+	is the state FR-072 exists to remove.
+	"""
+
 	started_at: datetime
 	ended_at: datetime | None = None
 	wall_clock_seconds: float | None = None
@@ -2062,7 +2192,21 @@ class ResearchRecord(View):
 	report_chars: int = 0
 	searches_observed: int | None = None
 	source_urls: tuple[str, ...] = ()
+	model_calls_observed: int | None = None
+	"""The loop's own turn count, read from ``research-meta.json`` (FR-072, [S25]).
+
+	``None`` means *not observed*, never *zero* — a truncated loop that wrote no meta
+	is a run whose call count nobody measured, and rounding that to zero would report
+	the cheapest possible run (NFR-024).
+	"""
+
+	budget_violations: tuple[str, ...] = ()
 	note: str | None = None
+
+	@property
+	def is_within_budget(self) -> bool:
+		"""True when no cap was exceeded. A *fact about spend*, not a verdict (FR-072)."""
+		return not self.budget_violations
 
 
 class VerificationStatus(StrEnum):

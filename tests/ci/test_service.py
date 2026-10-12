@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from conftest import GOOD_ANSWERS, answer_everything
+from pydantic import ValidationError
 from synthetic import (
 	base_spec,
 	gated_contract,
@@ -65,6 +66,7 @@ from sofact.views import (
 	PlanStepKind,
 	ProbeOutcome,
 	RepairOutcome,
+	ResearchBudget,
 	ResearchMode,
 	SourcePosture,
 	StepOutcome,
@@ -1711,6 +1713,109 @@ class TestTheResearchRun:
 		state = await registered.state()
 		assert state.research[-1] == record, "the fold replays the run"
 
+	async def test_the_run_is_bounded_by_a_declared_budget(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-072: three caps, scaled by the intent-clause count, on the record.
+
+		The service starts with a bare goal and no draft, so the clause count is one and
+		the allowance is the per-clause budget unmultiplied. That substitution is the
+		part worth asserting: an allowance of *zero* for a goal with no draft would make
+		the first run on a fresh goal violate its own budget by construction.
+		"""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		record = await registered.research()
+
+		assert record.allowance is not None, "every run is measured against something"
+		assert record.allowance.intent_clauses == 1
+		assert record.allowance.max_sources == record.budget.max_sources_per_clause
+		assert record.allowance.max_model_calls == record.budget.max_model_calls_per_clause
+		assert record.allowance.max_wall_clock_seconds == (
+			record.budget.max_wall_clock_seconds_per_clause
+		)
+		assert record.budget_violations == (), "3 turns and 3 sources is inside the default"
+
+	async def test_the_allowance_scales_with_the_clause_count(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A goal with more clauses may do more research, rather than less per clause."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		goal = await registered.current_goal()
+		assert goal is not None
+		await answer_everything(registered, goal.id)
+		await registered.draft(goal.id)
+		stems = len((await registered.latest_draft(goal.id)).stems)  # type: ignore[union-attr]
+
+		record = await registered.research()
+		assert stems > 1, "the fixture's answers produce more than one stem"
+		assert record.allowance is not None
+		assert record.allowance.intent_clauses == stems
+		assert record.allowance.max_sources == record.budget.max_sources_per_clause * stems
+
+	async def test_an_overspent_run_records_the_cap_it_broke(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The loop's own meta says it spent more calls than it was allowed.
+
+		Recorded as a violation and *not* as a failure: the ledger it produced is still
+		readable, and FR-138 keeps "what the process did" apart from "what it produced".
+		A run that overspent and one that did not are the same kind of record.
+		"""
+		registered = await self._service_with_goal(home, tmp_path, "research-greedy")
+		record = await registered.research()
+
+		assert record.model_calls_observed == 9
+		assert record.outcome is StepOutcome.COMPLETED, "an overspend is not a failure"
+		assert record.is_within_budget is False
+		assert any("model-call cap" in v for v in record.budget_violations)
+
+	async def test_an_unmeasured_call_count_produces_no_violation(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A truncated meta carries no turn count, and that is not a spend of zero.
+
+		NFR-024: an absent measurement must not be rounded into the cheapest possible
+		result. The cap is reported as *not checked either way* by the CLI, which needs
+		the record to distinguish ``None`` from ``0`` -- and it does.
+		"""
+		registered = await self._service_with_goal(home, tmp_path, "research-stub")
+		record = await registered.research()
+
+		assert record.model_calls_observed is None, "unmeasured, not zero"
+		assert record.budget_violations == (), (
+			"a count nobody took cannot violate a cap, in either direction"
+		)
+
+	async def test_an_explicit_timeout_overrides_the_scaled_allowance(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The override bounds the run without rewriting the budget that was declared."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		record = await registered.research(timeout=1.5)
+
+		assert record.allowance is not None
+		assert record.allowance.max_wall_clock_seconds == (
+			record.budget.max_wall_clock_seconds_per_clause
+		), "the declared budget is what the record says it is, not what was enforced"
+
+	async def test_a_zero_cap_is_refused_rather_than_read_as_a_tight_budget(
+		self,
+	) -> None:
+		"""A zero here multiplies to a whole-run allowance of zero, so every run would
+		violate its budget and the violation would stop meaning anything."""
+		with pytest.raises(ValidationError, match="must be positive"):
+			ResearchBudget(max_sources_per_clause=0)
+		with pytest.raises(ValidationError, match="must be positive"):
+			ResearchBudget(max_model_calls_per_clause=0)
+		with pytest.raises(ValidationError, match="must be positive"):
+			ResearchBudget(max_wall_clock_seconds_per_clause=0.0)
+
+	async def test_a_budget_cannot_be_scaled_by_no_clauses(self) -> None:
+		"""The substitution for a goal with no draft is the caller's to make and to
+		record, not an arithmetic helper's to hide."""
+		with pytest.raises(ValueError, match="no subject"):
+			ResearchBudget().scaled(0)
+
 	async def test_a_truncated_loop_is_a_fact_not_a_failure_to_report(
 		self, home: Path, tmp_path: Path
 	) -> None:
@@ -1915,13 +2020,19 @@ class TestTheSourceLedger:
 
 	async def test_the_goal_now_asks_for_the_ledger_artefacts(self) -> None:
 		"""The producer is asked for a ledger, so reading one is transcription not inference."""
-		text = research_goal("whether the premise holds", mode=ResearchMode.DEEP)
+		text = research_goal(
+			"whether the premise holds",
+			mode=ResearchMode.DEEP,
+			allowance=ResearchBudget().scaled(1),
+		)
 
 		assert "research-sources/" in text
 		assert "research-claims.json" in text
 		assert "## Concerns / information quality" in text
 		assert "disconfirming" in text, "FR-071's direction has to be asked for"
 		assert "positioning" in text, "FR-074's classification has to be asked for"
+		assert "Budget (FR-072)" in text, "the bound has to be stated to be exceeded"
+		assert "1 intent clause(s)" in text
 
 	async def test_research_without_a_goal_is_refused(self, home: Path, tmp_path: Path) -> None:
 		registered = synthetic_service(home, tmp_path, "research", name="pi-research")

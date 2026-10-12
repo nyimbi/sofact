@@ -47,7 +47,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-069 finding provenance | **Implemented** (2026-10-12, ADR-0035) | `Source` carries `url`, `retrieved`, `verification` (`VerificationStatus`, the `docs/sources/README.md` legend as a type) and `confidence`; `Claim.opinion` labels the uncited assertion, and `SourceLedger.unbacked_decisions` refuses one as grounds for a decision. `ResearchRecord.source_urls` remains the *dispatch* measurement. |
 | FR-070 versioned source ledger, claims separately addressable | **Implemented** (2026-10-12, ADR-0035) | `Source`/`Claim`/`Contradiction`/`SourceLedger` (`views.py`), parsed from the producer's `research-sources/*.md` and `research-claims.json` by `sofact.research`, recorded as `LedgerKind.SOURCE_LEDGER_RECORDED`, printed by `sofact sources`. `SourceLedger.resting_on(id)` derives the set a source's invalidation takes with it; `version` counts the ledgers the project reads under. `test_a_claim_points_at_its_source_and_the_edge_is_navigable` (`test_service.py`). |
 | FR-071 disconfirming count reported | **Implemented** (2026-10-12, ADR-0035) | `Claim.kind` is `supporting`/`disconfirming`/`refuted`; `SourceLedger.disconfirming` counts them and `sofact sources` prints the count. **Deliberately not a gate check** — a check that failed at zero would pay a producer for inventing one, so the count is a measurement (see ADR-0035 decision 6). |
-| FR-072 research bounded by declared budget | **Partly** | `--timeout` and the extension's own loop ceiling bound wall clock; there is no source/model-call budget per clause. |
+| FR-072 research bounded by declared budget | **Implemented** (2026-10-13, ADR-0036) | `ResearchBudget` holds FR-072's three quantities **per intent clause** and `scaled(clauses)` returns the whole-run `ResearchAllowance` the `ResearchRecord` carries; the clause count comes from the latest draft and a goal with no draft counts as one, recorded rather than defaulted silently. Wall clock is **enforced** (SoFact owns the timeout and kills the child); sources and model calls are **observed** from the producer's artefacts and recorded in `budget_violations` when exceeded, because a cap enforced inside the producer's runtime is the producer grading its own spend (FR-140). An unmeasured turn count produces no violation in either direction — `None` is not `0` (NFR-024) — and `sofact research` prints `calls unmeasured`. `--max-sources`/`--max-calls`/`--seconds` set the per-clause caps; `--timeout` overrides the scaled wall clock for one run without rewriting the declared budget. `test_the_allowance_scales_with_the_clause_count`, `test_an_overspent_run_records_the_cap_it_broke` (`test_service.py`). |
 | FR-073 contradiction detection | **Implemented** (2026-10-12, ADR-0035) | `Contradiction` (`views.py`), read from the claims file, with `resolution` left `None` when the operator has not ruled — an unresolved disagreement is a real state, and `sofact sources` prints it as `UNRESOLVED`. Recorded rather than resolved: the spec says the disagreement is where the operator's decision is. |
 | FR-074 evidence vs positioning classification | **Implemented** (2026-10-12, ADR-0035) | `Source.posture` (`SourcePosture`), with the type refusing `positioning` + `content-verified` together; `SourceLedger.unbacked_decisions` and the `positioning-is-not-evidence` check make "prevented from supporting a decision on their own" structural. |
 | FR-075 self-staleness / expiry | **Implemented** (2026-10-12, ADR-0035) | `expires` on both `Source` and `Claim`; `SourceLedger.expired(as_of)` and the `nothing-has-expired` check are as-of a date, so the same ledger can be current and then not. |
@@ -142,16 +142,16 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
-Recounted from the table above on 2026-10-12 after the P2 unit, by reading the verdict
-column rather than by arithmetic on the previous snapshot — the earlier numbers in this
-file (47/21/1/48) did not match the rows they claimed to count.
+Recounted from the table above on 2026-10-13 after the FR-072 unit, by reading the
+verdict column rather than by arithmetic on the previous snapshot — the earlier numbers
+in this file (47/21/1/48, then 59/28/1/31) did not match the rows they claimed to count.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 59 |
-| Partly | 28 |
-| Deferred (ADR-0024) | 1 |
-| Not built | 31 |
+| Implemented | 67 |
+| Partly | 26 |
+| Deferred (ADR-0024) | 0 |
+| Not built | 26 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so

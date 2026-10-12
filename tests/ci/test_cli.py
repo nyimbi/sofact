@@ -950,6 +950,59 @@ class TestTheResearchVerb:
 		assert "no source URLs were recorded" in result.output
 		assert "not research that found nothing" in result.output
 
+	def test_the_run_prints_the_budget_it_was_measured_against(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-072: the operator sees the bound before reading the spend against it.
+
+		The flags are **per intent clause**, and the fixture's interrogation leaves a
+		five-stem draft, so `--max-sources 7` is a whole-run allowance of 35. The line
+		prints the totals *and* the clause count, because a reader who saw "35 sources"
+		alone would take it for the declaration rather than the product.
+		"""
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		result = RUNNER.invoke(
+			app, ["--home", str(home), "research", "--max-sources", "7", "--max-calls", "4"]
+		)
+		assert result.exit_code == 0, result.output
+		assert "35 source(s), 20 call(s)" in result.output, "5 stems x the per-clause caps"
+		assert "5 intent clause(s), FR-072" in result.output
+		assert "calls    3" in result.output
+		assert "over budget" not in result.output, "3 calls is inside 20"
+
+	def test_an_overspent_run_says_which_cap_it_broke(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The loop's meta reports 9 turns; a per-clause cap of 1 over 5 stems allows 5."""
+		self._configure_research(tmp_path, monkeypatch, "research-greedy")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "research", "--max-calls", "1"])
+		assert result.exit_code == 0, result.output
+		assert "over budget: model-call cap 5 exceeded: 9 observed" in result.output
+		assert "calls    9" in result.output
+
+	def test_an_unmeasured_call_count_is_printed_as_unmeasured(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The truncated meta has no turn count, and the verb says so rather than 0."""
+		self._configure_research(tmp_path, monkeypatch, "research-stub")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert result.exit_code == 0, result.output
+		assert "calls    unmeasured" in result.output
+		assert "was not checked either way" in result.output
+
+	def test_a_zero_budget_is_refused_without_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "research", "--max-sources", "0"])
+		assert result.exit_code == 1
+		assert "bad research budget" in result.output
+		assert "Traceback" not in result.output
+
 
 # --------------------------------------------------------------------------- #
 # the source ledger verb (FR-070)
