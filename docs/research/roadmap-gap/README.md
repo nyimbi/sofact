@@ -37,13 +37,13 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-059 harness cannot reach oracle corpus/credentials | **Partly** | Prompt text only (`planner.py:127`). No sandbox, no check. |
 | FR-060 phase state machine, resumable after SIGKILL | **Implemented** (2026-10-12, ADR-0030) | `Phase`/`PHASE_SEQUENCE`/`PhaseAdvance` (`views.py`), `advance_phase`/`approve_gate`/`current_phase`/`open_gate` (`service.py`), `sofact phase` and `sofact gate`; `test_the_phase_survives_a_restart_because_it_is_in_the_log` (`test_phase.py`). A transition is its own ledger row, so a new process reads the phase off disk. |
 | FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
-| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), **P2 now is too** (`SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`), and **P1's ledger now is** (`SOURCE_LEDGER_RECORDED`, FR-070/ADR-0035). What is still missing is the per-clause classification artefact FR-068 asks for. |
+| FR-062 every phase emits a durable artifact | **Implemented** (2026-10-13, ADR-0037) | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), P2 emits `SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`, P1 emits `SOURCE_LEDGER_RECORDED` (FR-070/ADR-0035) **and now `RESEARCH_CLASSIFIED`** (FR-068/ADR-0037), so every phase P0–P3 has an artefact a resume lands on. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
 | FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:231`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
 | FR-066 elicitation proposes no implementation | **Implemented** | `_SHARED_CONSTRAINTS` (`planner.py:110`) + `draft_stems` polarity (`elicitation.py:254`); `test_polarity_follows_the_dimension` (`test_elicitation.py:281`). |
 | FR-067 each clause carries `confidence` and `verification_method` | **Partly** | `Clause` (`views.py:351`) carries **neither**; ambiguity is not quantified per clause. `test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite* rule. |
-| FR-068 clause classified by research into validated/invalidated/… | **Not built** | No classification type. |
+| FR-068 clause classified by research into validated/invalidated/… | **Implemented** (2026-10-13, ADR-0037) | `ClauseClassification`/`ResearchClassification`, `VERDICT_ACTION` as data read by the type, the CLI and `advance_phase`, which refuses to complete P1 over an Invalidated or Deepened clause. The clause list is the draft's and is written into the producer's goal, so "every clause is classified" is not the producer measured against itself. `sofact classify` prints each verdict with its action; `TestTheClauseClassification` (21) and `TestTheClassifyVerb` (8). |
 | FR-069 finding provenance | **Implemented** (2026-10-12, ADR-0035) | `Source` carries `url`, `retrieved`, `verification` (`VerificationStatus`, the `docs/sources/README.md` legend as a type) and `confidence`; `Claim.opinion` labels the uncited assertion, and `SourceLedger.unbacked_decisions` refuses one as grounds for a decision. `ResearchRecord.source_urls` remains the *dispatch* measurement. |
 | FR-070 versioned source ledger, claims separately addressable | **Implemented** (2026-10-12, ADR-0035) | `Source`/`Claim`/`Contradiction`/`SourceLedger` (`views.py`), parsed from the producer's `research-sources/*.md` and `research-claims.json` by `sofact.research`, recorded as `LedgerKind.SOURCE_LEDGER_RECORDED`, printed by `sofact sources`. `SourceLedger.resting_on(id)` derives the set a source's invalidation takes with it; `version` counts the ledgers the project reads under. `test_a_claim_points_at_its_source_and_the_edge_is_navigable` (`test_service.py`). |
 | FR-071 disconfirming count reported | **Implemented** (2026-10-12, ADR-0035) | `Claim.kind` is `supporting`/`disconfirming`/`refuted`; `SourceLedger.disconfirming` counts them and `sofact sources` prints the count. **Deliberately not a gate check** — a check that failed at zero would pay a producer for inventing one, so the count is a measurement (see ADR-0035 decision 6). |
@@ -142,16 +142,17 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the FR-072 unit, by reading the
-verdict column rather than by arithmetic on the previous snapshot — the earlier numbers
-in this file (47/21/1/48, then 59/28/1/31) did not match the rows they claimed to count.
+Recounted from the table above on 2026-10-13 after the FR-068 unit, by reading the
+verdict column with a script rather than by arithmetic on the previous snapshot — the
+earlier numbers in this file (47/21/1/48, then 59/28/1/31, then 67/26/0/26) did not
+match the rows they claimed to count.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 67 |
-| Partly | 26 |
+| Implemented | 69 |
+| Partly | 25 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 26 |
+| Not built | 25 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -208,17 +209,15 @@ only).
    requirement is unbuilt. **Blocker: depends on 1 (traceability chain) and on a
    packaging decision (T2) that no ADR makes.**
 5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
-   2026-10-12 (ADR-0030).** Phases are a state machine in the ledger, a transition is
-   its own row, `sofact phase` exits non-zero while a gate is open, and
-   `test_the_phase_survives_a_restart_because_it_is_in_the_log` proves a second
-   process reads the phase off disk. **What remains of this gap is FR-062's other
-   half**, narrowed twice since: P2 now emits `Specification`/`SpecificationGate`
-   (ADR-0031) and P1 now emits `SourceLedger` (ADR-0035), so a resume lands on a
-   phase whose output is an artefact. What is still missing is FR-068's per-clause
-   classification — a verdict on each intent clause, which the ledger holds claims
-   *about* but does not attribute to clauses. `sofact init` (§23 M1) also remains
-   unbuilt — it is a convenience over the phase machine rather than a prerequisite
-   for it.
+   2026-10-13 (ADR-0030, ADR-0031, ADR-0035, ADR-0037).** Phases are a state machine in
+   the ledger, a transition is its own row, `sofact phase` exits non-zero while a gate
+   is open, and `test_the_phase_survives_a_restart_because_it_is_in_the_log` proves a
+   second process reads the phase off disk. **FR-062's other half is closed too**: P2
+   emits `Specification`/`SpecificationGate` (ADR-0031), P1 emits `SourceLedger`
+   (ADR-0035) **and now the per-clause classification** (FR-068/ADR-0037), so a resume
+   lands on a phase whose output is an artefact in every phase P0–P3. `sofact init`
+   (§23 M1) remains unbuilt — it is a convenience over the phase machine rather than a
+   prerequisite for it.
 
 Honourable mentions, in the same ranking: FR-122/123/124 (no autonomy number is
 ever computed at delivery level, so the spec's most emphatic honesty requirement is

@@ -38,6 +38,7 @@ from sofact.views import (
 	PhaseAdvance,
 	ProjectState,
 	RepairAttempt,
+	ResearchClassification,
 	ResearchRecord,
 	SourceLedger,
 	Specification,
@@ -126,6 +127,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	integrations: list[IntegrationReport] = []
 	research: list[ResearchRecord] = []
 	ledgers: list[SourceLedger] = []
+	classifications: list[ResearchClassification] = []
 	phases: list[PhaseAdvance] = []
 	# Repair attempts are keyed by id with last-write-wins, like a re-answered
 	# elicitation dimension (ADR-0007): an attempt is written when its session ends and
@@ -159,6 +161,13 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# that re-states the ground is a new ledger rather than an edit to the old
 				# one. `ProjectState.ledger` derives the operative one from the last row.
 				ledgers.append(SourceLedger.model_validate(payload["ledger"]))
+			case LedgerKind.RESEARCH_CLASSIFIED:
+				# Appended for the same reason the ledger is: FR-068's classification is
+				# versioned, and a re-classification after a return to P0 is a new record
+				# rather than an edit -- the old one is *why* the pipeline went back.
+				classifications.append(
+					ResearchClassification.model_validate(payload["classification"])
+				)
 			case LedgerKind.REPAIR_ATTEMPTED:
 				settled = RepairAttempt.model_validate(payload["repair"])
 				repairs[settled.id] = settled
@@ -221,6 +230,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		integrations=tuple(integrations),
 		research=tuple(research),
 		ledgers=tuple(ledgers),
+		classifications=tuple(classifications),
 		repairs=tuple(repairs.values()),
 		phases=tuple(phases),
 		cuts=tuple(cuts),

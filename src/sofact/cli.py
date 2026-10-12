@@ -50,8 +50,10 @@ from sofact.views import (
 	ProbeOutcome,
 	RepairOutcome,
 	ResearchBudget,
+	ResearchClassification,
 	ResearchMode,
 	ResearchRecord,
+	ResearchVerdict,
 	SourceLedger,
 	Specification,
 	SpecificationDraft,
@@ -1844,6 +1846,114 @@ async def _sources(svc: FactoryService, from_run: str | None) -> None:
 	failed = [check for check in checks if not check.passed]
 	if failed:
 		raise typer.Exit(code=1)
+
+
+@app.command(name="classify")
+def classify(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	from_run: str | None = typer.Option(
+		None,
+		"--from-run",
+		help="Read the conclusions out of this research run's workspace instead of printing them.",
+	),
+) -> None:
+	"""Print FR-068's verdict on every intent clause, or read one out of a run."""
+	asyncio.run(_classify(_service(_home_of(ctx, home)), from_run))
+
+
+async def _classify(svc: FactoryService, from_run: str | None) -> None:
+	if from_run is not None:
+		runs = [r for r in (await svc.state()).research if r.id == from_run]
+		if not runs:
+			typer.secho(f"no research run {from_run} in this log.", fg="yellow")
+			raise typer.Exit(code=1)
+		try:
+			recorded = await svc.classification_from(runs[0])
+		except (ValueError, OSError) as exc:
+			typer.secho(f"cannot read the classification: {exc}", fg="red")
+			raise typer.Exit(code=1) from exc
+		typer.secho(
+			f"\nrecorded classification v{recorded.version} from run {from_run}",
+			fg="green",
+			bold=True,
+		)
+	classification = await svc.current_classification()
+	if classification is None:
+		typer.secho(
+			"no classification yet: run `sofact research`, then "
+			"`sofact classify --from-run <id>` (FR-068).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+	_print_classification(classification)
+	checks = await svc.classification_gate()
+	for check in checks:
+		mark = typer.style("✓", fg="green") if check.passed else typer.style("✗", fg="red")
+		typer.echo(f"  {mark} {check.name}: {check.detail}")
+	if any(not check.passed for check in checks):
+		raise typer.Exit(code=1)
+
+
+_VERDICT_COLOUR: dict[ResearchVerdict, str] = {
+	ResearchVerdict.VALIDATED: "green",
+	ResearchVerdict.INVALIDATED: "red",
+	ResearchVerdict.UNVERIFIABLE: "yellow",
+	ResearchVerdict.DEEPENED: "magenta",
+}
+"""One colour per verdict, so a reader scanning the output sees the *action* class
+before the word: red is the verdict that stops the pipeline (FR-068)."""
+
+
+def _print_classification(classification: ResearchClassification) -> None:
+	"""FR-068's verdicts, each with its action, its evidence and its rationale.
+
+	The action is printed beside every verdict rather than summarised once at the end,
+	because the spec's table gives each verdict a different one and a summary is exactly
+	where "Invalidated means do not build" gets folded into "some clauses had findings".
+	"""
+	typer.secho(
+		f"\nclassification v{classification.version} for {classification.query!r}",
+		fg="cyan",
+		bold=True,
+	)
+	typer.secho(
+		f"  {len(classification.classifications)} clause(s) classified; "
+		f"{len(classification.invalidated)} invalidated, "
+		f"{len(classification.deepened)} deepened, "
+		f"{len(classification.unverifiable)} unverifiable (FR-068)",
+		fg="bright_black",
+	)
+	for entry in classification.classifications:
+		typer.secho(
+			f"  [{entry.verdict.value}] {entry.statement}",
+			fg=_VERDICT_COLOUR[entry.verdict],
+			bold=True,
+		)
+		typer.echo(f"      action: {entry.action}")
+		typer.secho(f"      why: {entry.rationale}", fg="bright_black")
+		if entry.evidence:
+			typer.secho(f"      evidence: {', '.join(entry.evidence)}", fg="bright_black")
+		if entry.settled_by is not None:
+			typer.secho(f"      settled by: {entry.settled_by}", fg="bright_black")
+	flagged = classification.flagged_assumptions
+	if flagged:
+		typer.secho(
+			"\n  carried into P2 as flagged assumptions (FR-068, FR-079)",
+			fg="yellow",
+			bold=True,
+		)
+		for assumption in flagged:
+			typer.echo(f"    - {assumption.statement}")
+			typer.secho(f"        refuted by {assumption.refuted_by}", fg="bright_black")
+	stopped = classification.returns_to_p0
+	if stopped:
+		typer.secho(
+			f"\n  {len(stopped)} clause(s) return the pipeline to P0: FR-068's action for "
+			"invalidated and deepened is to revise the clauses, not to build on them.",
+			fg="red",
+			bold=True,
+		)
 
 
 def _print_ledger(ledger: SourceLedger) -> None:

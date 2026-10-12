@@ -41,6 +41,7 @@ uv run sofact ledger              # the append-only event log
 uv run sofact verify-ledger       # re-check the hash chain
 uv run sofact rollback --to 12 --reason "the decomposition was wrong"
 uv run sofact sources --from-run <id>   # read a research run into the source ledger
+uv run sofact classify --from-run <id>  # read its verdicts on every intent clause
 ```
 
 State lives in `./.sofact` by default, or `$SOFACT_HOME`. Nothing is written outside
@@ -277,6 +278,21 @@ a producer for inventing a disconfirming claim, and a gate that rewards fabricat
 worse than no gate. `supports:` is likewise not derived by walking the spec — measured,
 5 of the 21 sources it cites appear only in prose outside any requirement, so a citation
 walk would report a complete derivation over an incomplete one.
+
+**And every clause gets a verdict with an action attached** (`sofact classify`, FR-068,
+ADR-0037). `research_goal` writes the draft's clause ids into the producer's goal, so the
+five clauses it was asked about are the five it is measured against — a producer that
+classified one of them fails `every-clause-is-classified` rather than passing by being
+asked about itself. The spec's table gives each verdict a different action, so the action
+is **data**: `VERDICT_ACTION` is read by the type, by the CLI that prints it beside every
+verdict, and by `advance_phase`, which refuses to complete P1 while anything is
+invalidated or deepened, naming the clauses. A verdict that says *do not build* therefore
+cannot be reported as a finding the pipeline walks past. Unverifiable is the one verdict
+whose action is *proceed*, so it becomes a flagged assumption whose `refuted_by` is what
+the producer said would settle it (FR-079) — and an unknown verdict is refused rather
+than defaulted, because defaulting to the one that proceeds is the one default that fails
+open. A verdict citing a source the ledger does not hold fails the check: a conclusion
+resting on a source outside the ledger cannot be invalidated with it.
 
 The probe's remaining rows are **attempted rather than assumed** (FR-165). Five of them
 need more than one child, so each is a *differential*: `sandboxable` hands one child a tool

@@ -1110,6 +1110,158 @@ class TestTheSourcesVerb:
 
 
 # --------------------------------------------------------------------------- #
+# the classification verb (FR-068)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheClassifyVerb:
+	"""``sofact classify`` prints a verdict per clause, each with its action.
+
+	The type, the parser and the checks are measured in ``test_service.py``. What is
+	under test here is that the *action* reaches the reader and that a stop exits
+	non-zero — a verdict printed as a finding rather than a stop is the whole failure
+	FR-068 exists to prevent.
+	"""
+
+	def _configure_research(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		spec = base_spec(tmp_path, mode, name="pi-research")
+		table = tmp_path / "harnesses.json"
+		table.write_text(
+			json.dumps({"harnesses": {spec.name: spec_json(spec)}}),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_HARNESS_SPECS", str(table))
+
+	def _classified(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> str:
+		"""A drafted goal, a research run, its ledger and its classification, by CLI."""
+		self._configure_research(tmp_path, monkeypatch, mode)
+		conversation(home)
+		assert RUNNER.invoke(app, ["--home", str(home), "draft"]).exit_code == 0
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert dispatched.exit_code == 0, dispatched.output
+		run_id = dispatched.output.split("research ")[1].split(" @")[0].strip()
+		assert (
+			RUNNER.invoke(app, ["--home", str(home), "sources", "--from-run", run_id]).exit_code
+			== 1
+		), "the ledger is recorded even though its own check fails"
+		read = RUNNER.invoke(app, ["--home", str(home), "classify", "--from-run", run_id])
+		assert "recorded classification v1" in read.output, read.output
+		return run_id
+
+	def test_without_a_classification_the_verb_says_what_to_run(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 1, result.output
+		assert "no classification yet" in result.output
+		assert "sofact classify --from-run" in result.output
+		assert "Traceback" not in result.output
+
+	def test_every_verdict_prints_with_its_action(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._classified(home, tmp_path, monkeypatch, "research-classification")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 0, result.output
+		assert "5 clause(s) classified" in result.output
+		assert result.output.count("[validated]") == 5
+		assert "action: proceed" in result.output
+		assert "0 invalidated" in result.output
+		assert "every-clause-is-classified" in result.output
+
+	def test_an_invalidated_clause_prints_the_stop_and_exits_non_zero(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-068's action is "do not build", so the verb may not exit 0 over it."""
+		self._classified(home, tmp_path, monkeypatch, "research-classify-invalidated")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 1, result.output
+		assert "[invalidated]" in result.output
+		assert "return to P0" in result.output
+		assert "nothing-is-invalidated" in result.output
+		assert "return the pipeline to P0" in result.output, "the stop is stated, not implied"
+
+	def test_an_unverifiable_clause_prints_the_assumption_it_becomes(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-068's Unverifiable action is a flagged assumption, and FR-079 wants a refuter."""
+		self._classified(home, tmp_path, monkeypatch, "research-classify-unverifiable")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 0, "proceeding as an assumption is not a stop"
+		assert "[unverifiable]" in result.output
+		assert "carried into P2 as flagged assumptions" in result.output
+		assert "Unverified premise (FR-068)" in result.output
+		assert "refuted by" in result.output
+
+	def test_a_verdict_citing_a_source_outside_the_ledger_fails(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._classified(home, tmp_path, monkeypatch, "research-classify-dangling")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 1, result.output
+		assert "classification-cites-the-ledger" in result.output
+
+	def test_a_producer_that_classified_fewer_clauses_than_it_was_asked_fails(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The clause list is SoFact's, so answering a smaller question is a failure."""
+		self._classified(home, tmp_path, monkeypatch, "research-classify-partial")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
+
+		assert result.exit_code == 1, result.output
+		assert "1 clause(s) classified" in result.output
+		assert "every-clause-is-classified" in result.output
+		assert "4 clause(s) unclassified" in result.output, "the missing four are named"
+
+	def test_a_run_that_left_no_classification_is_refused_without_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research-stub")
+		conversation(home)
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "research"])
+		run_id = dispatched.output.split("research ")[1].split(" @")[0].strip()
+
+		result = RUNNER.invoke(app, ["--home", str(home), "classify", "--from-run", run_id])
+
+		assert result.exit_code == 1, result.output
+		assert "left no research-classification.json" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_unknown_run_is_refused(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"classify",
+				"--from-run",
+				"01900000-0000-7000-8000-000000000000",
+			],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "no research run" in result.output
+		assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
 # rollback — the operator's verb over the fold (FR-094, FR-003)
 # --------------------------------------------------------------------------- #
 

@@ -45,7 +45,7 @@ from sofact.harness import (
 	ConfiguredHarnessAdapter,
 )
 from sofact.ledger import LOCK_FILENAME
-from sofact.research import ledger_checks
+from sofact.research import classification_checks, ledger_checks
 from sofact.service import (
 	DEFAULT_HARNESS,
 	FactoryService,
@@ -63,11 +63,14 @@ from sofact.views import (
 	IntegrityOutcome,
 	IntegritySubject,
 	LedgerKind,
+	Phase,
+	PhaseStatus,
 	PlanStepKind,
 	ProbeOutcome,
 	RepairOutcome,
 	ResearchBudget,
 	ResearchMode,
+	ResearchVerdict,
 	SourcePosture,
 	StepOutcome,
 	VerdictOutcome,
@@ -2038,3 +2041,400 @@ class TestTheSourceLedger:
 		registered = synthetic_service(home, tmp_path, "research", name="pi-research")
 		with pytest.raises(KeyError, match="no goal yet"):
 			await registered.research()
+
+
+class TestTheClauseClassification:
+	"""FR-068: a verdict on every intent clause, and the action that verdict carries.
+
+	The requirement's table gives each of the four verdicts a *different* action, so
+	what needs testing is not that a verdict was recorded but that the action is
+	structural: an invalidated clause has to stop the pipeline rather than be reported
+	to a reader who may or may not act on it.
+	"""
+
+	async def _classified(
+		self, home: Path, tmp_path: Path, mode: str
+	) -> tuple[FactoryService, str]:
+		"""A goal with a draft, a research run, a ledger and a classification.
+
+		The draft is created first because FR-068 is a verdict on *intent clauses*, and
+		the clause ids in the goal text come from it — a classification run against a
+		goal with no draft has no clauses to be about.
+		"""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, mode, name="pi-research"),
+			research_tools=("deep_research",),
+		)
+		registered = FactoryService(home=home, llm=None, specs={"pi-research": spec})
+		goal = await registered.start("a platform that builds software from a conversation")
+		await answer_everything(registered, goal.id)
+		await registered.draft(goal.id)
+		await registered.research()
+		await registered.ledger_from((await registered.state()).research[-1])
+		await registered.classification_from((await registered.state()).research[-1])
+		return registered, goal.id
+
+	async def test_every_clause_is_classified_with_its_evidence(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered, _ = await self._classified(home, tmp_path, "research-classification")
+		classification = await registered.current_classification()
+
+		assert classification is not None
+		assert len(classification.classifications) == 5, "one verdict per drafted clause"
+		assert all(c.verdict is ResearchVerdict.VALIDATED for c in classification.classifications)
+		assert all(c.evidence == ("S01",) for c in classification.classifications)
+		assert Counter(kinds(registered))["research.classified"] == 1
+		state = await registered.state()
+		assert state.classification == classification, "the fold replays the classification"
+		assert state.classifications == (classification,)
+
+	async def test_the_verdict_carries_the_action_fr_068_gives_it(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The table's third column is data, so a reader cannot fold two actions into one."""
+		registered, _ = await self._classified(home, tmp_path, "research-classification")
+		classification = await registered.current_classification()
+
+		assert classification is not None
+		validated = classification.classifications[0]
+		assert validated.action == "proceed"
+		assert validated.returns_to_p0 is False
+
+		stopping = await self._classified(home, tmp_path, "research-classify-invalidated")
+		invalidated = await stopping[0].current_classification()
+		assert invalidated is not None
+		assert invalidated.invalidated[0].action.startswith("return to P0")
+		assert invalidated.returns_to_p0 == invalidated.invalidated
+
+	async def test_an_invalidated_clause_stops_the_phase_rather_than_being_reported(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068's action is "do not build", so P1 cannot complete over it.
+
+		This is the whole point of the unit: a classification the pipeline could advance
+		past would be a finding, and the requirement asks for a *stop*.
+		"""
+		registered, _ = await self._classified(home, tmp_path, "research-classify-invalidated")
+		await registered.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE)
+
+		with pytest.raises(ValueError, match="P1 cannot complete"):
+			await registered.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
+
+	async def test_a_deepened_clause_stops_the_phase_too(self, home: Path, tmp_path: Path) -> None:
+		"""The other stopping verdict, for the other reason: the premise was the wrong question."""
+		registered, _ = await self._classified(home, tmp_path, "research-classify-deepened")
+		await registered.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE)
+
+		with pytest.raises(ValueError, match="deepened"):
+			await registered.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
+
+	async def test_an_unverifiable_clause_becomes_a_falsifiable_assumption(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068's Unverifiable action, made real: FR-079 refuses an assumption with no refuter."""
+		registered, _ = await self._classified(home, tmp_path, "research-classify-unverifiable")
+		classification = await registered.current_classification()
+
+		assert classification is not None
+		assert len(classification.unverifiable) == 1
+		flagged = classification.flagged_assumptions
+		assert len(flagged) == 1
+		assert flagged[0].refuted_by == "a benchmark run of our own on the target corpus"
+		assert flagged[0].statement.startswith("Unverified premise (FR-068)")
+		# The phase may proceed: proceeding as a flagged assumption is the action, and a
+		# clause with no evidence is not a clause the evidence contradicts.
+		await registered.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE)
+		await registered.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
+		assert await registered.current_phase() is Phase.SPECIFY
+
+	async def test_a_verdict_citing_a_source_outside_the_ledger_fails_the_check(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068's "with cited evidence" is about *the ledger's* evidence, not any string."""
+		registered, _ = await self._classified(home, tmp_path, "research-classify-dangling")
+		checks = {check.name: check for check in await registered.classification_gate()}
+
+		assert checks["classification-cites-the-ledger"].passed is False
+		assert "S99" in checks["classification-cites-the-ledger"].detail
+		assert checks["every-clause-is-classified"].passed is True
+
+	async def test_a_producer_that_classified_fewer_clauses_than_it_was_asked_fails(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The clause list is SoFact's, so the producer cannot pass by answering itself.
+
+		Measured against the draft rather than against what the producer wrote: a
+		producer that classified one clause of five would otherwise satisfy "every
+		clause it classified is classified".
+		"""
+		registered, _ = await self._classified(home, tmp_path, "research-classify-partial")
+		checks = {check.name: check for check in await registered.classification_gate()}
+
+		assert checks["every-clause-is-classified"].passed is False
+		assert "4 clause(s) unclassified" in checks["every-clause-is-classified"].detail
+
+	async def test_the_goal_names_the_clauses_and_their_ids(self) -> None:
+		"""A goal that said "classify the clauses" would let the producer choose the subject."""
+		text = research_goal(
+			"whether the premise holds",
+			mode=ResearchMode.DEEP,
+			allowance=ResearchBudget().scaled(2),
+			clauses=(("c-1", "the mechanism works"), ("c-2", "it scales")),
+		)
+
+		assert "- c-1: the mechanism works" in text
+		assert "- c-2: it scales" in text
+		assert "research-classification.json" in text
+		assert "settled_by" in text, "FR-068's Unverifiable action needs its refuter named"
+
+	async def test_a_run_that_left_no_classification_is_refused(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""No conclusions and a conclusion about nothing are different findings (NFR-024)."""
+		registered = synthetic_service(home, tmp_path, "research-stub", name="pi-research")
+		goal = await registered.start("a platform that builds software from a conversation")
+		await answer_everything(registered, goal.id)
+		record = await registered.research()
+
+		with pytest.raises(ValueError, match=r"left no research-classification\.json"):
+			await registered.classification_from(record)
+
+	async def test_a_second_classification_is_versioned_rather_than_replacing_the_first(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The record of what was concluded before is *why* the pipeline went back to P0."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		first = await registered.current_classification()
+		assert first is not None
+
+		second = await registered.record_classification(
+			goal_id=goal_id,
+			query="reclassified after the return to P0",
+			payload={
+				"classifications": [
+					{
+						"clause_id": first.classifications[0].clause_id,
+						"statement": "the revised premise",
+						"verdict": "validated",
+						"rationale": "the second run supports the revised wording",
+						"evidence": ["S01"],
+					}
+				]
+			},
+		)
+
+		assert (first.version, second.version) == (1, 2)
+		state = await registered.state()
+		assert state.classifications == (first, second), "the older conclusion stays in the log"
+		assert state.classification == second, "the latest is the one the project reads under"
+		assert await registered.current_classification() == second
+
+	async def test_a_classification_for_another_goal_is_refused(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered, _ = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValueError, match="not the current goal"):
+			await registered.record_classification(
+				goal_id=uuid7str(), query="something else", payload={"classifications": []}
+			)
+
+	async def test_an_unknown_verdict_is_refused_rather_than_defaulted(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The one wrong default is Unverifiable, whose action is *proceed*.
+
+		A typo silently becoming "no evidence either way" would let an unreadable verdict
+		through the phase, which is why the parser refuses rather than defaulting.
+		"""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValueError, match="is not one of"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="a typo",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "valid",
+							"rationale": "misspelled",
+							"evidence": ["S01"],
+						}
+					]
+				},
+			)
+
+	async def test_an_unknown_key_is_refused_rather_than_dropped(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A producer's judgement the reader silently drops is worse than an error it reports."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValueError, match="unknown key"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="an extra key",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "validated",
+							"rationale": "because",
+							"evidence": ["S01"],
+							"confidence": "high",
+						}
+					]
+				},
+			)
+
+	async def test_an_unverifiable_verdict_may_not_cite_evidence(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A verdict holding both is unreadable, so the type refuses to construct it."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValidationError, match="unverifiable and cites"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="contradictory",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "unverifiable",
+							"rationale": "no evidence",
+							"evidence": ["S01"],
+							"settled_by": "a measurement",
+						}
+					]
+				},
+			)
+
+	async def test_an_unverifiable_verdict_must_name_what_would_settle_it(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068's action is to proceed *as a flagged assumption*, and FR-079 needs a refuter."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValidationError, match="names nothing that would settle it"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="unfalsifiable",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "unverifiable",
+							"rationale": "no evidence",
+						}
+					]
+				},
+			)
+
+	async def test_a_validated_verdict_must_cite_something(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068 says "with cited evidence": a verdict with none is an opinion wearing its name."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValidationError, match="no source cited"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="uncited",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "validated",
+							"rationale": "it feels right",
+						}
+					]
+				},
+			)
+
+	async def test_settled_by_on_a_decided_verdict_is_refused(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A judgement the reader ignores is worse than one it reports (FR-068)."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValidationError, match="names what would settle it"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="over-specified",
+				payload={
+					"classifications": [
+						{
+							"clause_id": uuid7str(),
+							"statement": "something",
+							"verdict": "validated",
+							"rationale": "the paper says so",
+							"evidence": ["S01"],
+							"settled_by": "a measurement we have not run",
+						}
+					]
+				},
+			)
+
+	async def test_one_clause_classified_twice_is_refused(self, home: Path, tmp_path: Path) -> None:
+		"""Two verdicts on one premise means the reader picks, and the pick is the research."""
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		same = uuid7str()
+		with pytest.raises(ValidationError, match="classified more than once"):
+			await registered.record_classification(
+				goal_id=goal_id,
+				query="doubled",
+				payload={
+					"classifications": [
+						{
+							"clause_id": same,
+							"statement": "something",
+							"verdict": "validated",
+							"rationale": "one reading",
+							"evidence": ["S01"],
+						},
+						{
+							"clause_id": same,
+							"statement": "something",
+							"verdict": "invalidated",
+							"rationale": "another reading",
+							"evidence": ["S01"],
+						},
+					]
+				},
+			)
+
+	async def test_a_classification_with_no_clauses_is_refused(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		registered, goal_id = await self._classified(home, tmp_path, "research-classification")
+		with pytest.raises(ValidationError, match="classifies nothing"):
+			await registered.record_classification(
+				goal_id=goal_id, query="empty", payload={"classifications": []}
+			)
+
+	async def test_no_classification_yet_is_not_a_failing_check(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A project that has not classified has not failed a classification check."""
+		registered = synthetic_service(home, tmp_path, "research", name="pi-research")
+		assert await registered.current_classification() is None
+		assert await registered.classification_gate() == ()
+
+	async def test_the_checks_name_the_three_ways_a_conclusion_can_be_about_something_else(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The check set is exactly three, and each is a distinct failure (FR-068)."""
+		registered, _ = await self._classified(home, tmp_path, "research-classification")
+		classification = await registered.current_classification()
+		assert classification is not None
+		ledger = await registered.current_ledger()
+
+		names = [
+			c.name for c in classification_checks(classification, ledger, clause_ids=frozenset())
+		]
+		assert names == [
+			"every-clause-is-classified",
+			"classification-cites-the-ledger",
+			"nothing-is-invalidated",
+		]

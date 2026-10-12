@@ -34,8 +34,11 @@ from typing import Any, Final, cast
 from sofact.views import (
 	Claim,
 	ClaimKind,
+	ClauseClassification,
 	Contradiction,
 	GateCheck,
+	ResearchClassification,
+	ResearchVerdict,
 	Source,
 	SourceLedger,
 	SourcePosture,
@@ -45,9 +48,12 @@ from sofact.views import (
 
 __all__ = [
 	"LEDGER_CLAIMS_FILENAME",
+	"LEDGER_CLASSIFICATION_FILENAME",
 	"LEDGER_SOURCES_DIRNAME",
+	"classification_checks",
 	"ledger_checks",
 	"parse_claim_document",
+	"parse_classification",
 	"parse_ledger",
 	"parse_source_document",
 ]
@@ -57,6 +63,15 @@ LEDGER_SOURCES_DIRNAME: Final = "research-sources"
 
 LEDGER_CLAIMS_FILENAME: Final = "research-claims.json"
 """Where it leaves the claims and the contradictions between them."""
+
+LEDGER_CLASSIFICATION_FILENAME: Final = "research-classification.json"
+"""Where it leaves FR-068's verdict on each intent clause.
+
+A separate file from the claims, because the two answer different questions: the claims
+are what the research *found* and the classification is what it *concluded about the
+goal*. Folding them into one file would make "the producer wrote no conclusions" and
+"the producer concluded nothing" the same bytes on disk.
+"""
 
 _FRONT_MATTER: Final = re.compile(r"\A---\r?\n(?P<body>.*?)\r?\n---\r?\n?", re.DOTALL)
 _HEADING: Final = re.compile(r"^##\s+(?P<title>.+?)\s*$", re.MULTILINE)
@@ -69,6 +84,9 @@ _CLAIM_KEYS: Final = frozenset(
 	{"id", "statement", "kind", "opinion", "source_ids", "superseded_by", "expires"}
 )
 _CONTRADICTION_KEYS: Final = frozenset({"id", "statement", "source_ids", "resolution"})
+_CLASSIFICATION_KEYS: Final = frozenset(
+	{"clause_id", "statement", "verdict", "rationale", "evidence", "settled_by"}
+)
 
 
 def _scalar(raw: str) -> str:
@@ -476,6 +494,142 @@ def ledger_checks(ledger: SourceLedger, *, as_of: date | None = None) -> tuple[G
 				else f"{len(stale)} entry(ies) expired before {day.isoformat()}: "
 				+ ", ".join(entry.id for entry in stale)
 				+ " — a stale figure cited as current is the failure FR-075 names"
+			),
+		),
+	)
+
+
+def parse_classification(
+	payload: object,
+	*,
+	goal_id: str,
+	query: str,
+	version: int = 1,
+) -> ResearchClassification:
+	"""FR-068's per-clause verdicts, from ``research-classification.json``.
+
+	Fails closed on every axis the ledger's parser does: an unknown key is refused
+	rather than dropped, a missing statement is refused rather than defaulted, and a
+	verdict that is not one of the four raises rather than becoming Unverifiable — the
+	one *wrong* default, because Unverifiable's action is "proceed" and a typo would
+	therefore let an unreadable verdict through the phase.
+
+	**The evidence is checked against the ledger, not here.** Whether ``evidence`` names
+	sources the ledger actually holds is a question about two artefacts, and this
+	function sees one; :func:`classification_checks` is where they meet.
+	"""
+	document = _object(payload, what="the classification file")
+	_unknown_keys(document, frozenset({"classifications"}), what="the classification file")
+	classifications: list[ClauseClassification] = []
+	for raw in _mapping_list(document.get("classifications"), key="classifications"):
+		_unknown_keys(raw, _CLASSIFICATION_KEYS, what="a classification")
+		clause_id = _optional_string(raw.get("clause_id"), key="classification clause_id")
+		statement = _optional_string(raw.get("statement"), key="classification statement")
+		rationale = _optional_string(raw.get("rationale"), key="classification rationale")
+		if clause_id is None or statement is None or rationale is None:
+			raise ValueError(
+				f"a classification needs a clause_id, a statement and a rationale, got "
+				f"{raw!r}: FR-068 asks for a verdict *with cited evidence*, and a verdict "
+				"with no stated reason is a label (FR-068)"
+			)
+		verdict_text = _optional_string(raw.get("verdict"), key="classification verdict")
+		if verdict_text is None:
+			raise ValueError(
+				f"classification of clause {clause_id} names no verdict: defaulting to "
+				"unverifiable would let a typo proceed as a flagged assumption (FR-068)"
+			)
+		try:
+			verdict = ResearchVerdict(verdict_text)
+		except ValueError as exc:
+			choices = ", ".join(v.value for v in ResearchVerdict)
+			raise ValueError(
+				f"classification of clause {clause_id}: {verdict_text!r} is not one of "
+				f"{choices} (FR-068)"
+			) from exc
+		classifications.append(
+			ClauseClassification(
+				clause_id=clause_id,
+				statement=statement,
+				verdict=verdict,
+				rationale=rationale,
+				evidence=_string_list(raw.get("evidence"), key="classification evidence"),
+				settled_by=_optional_string(raw.get("settled_by"), key="classification settled_by"),
+			)
+		)
+	return ResearchClassification(
+		version=version,
+		goal_id=goal_id,
+		query=query,
+		classifications=tuple(classifications),
+	)
+
+
+def classification_checks(
+	classification: ResearchClassification,
+	ledger: SourceLedger | None,
+	*,
+	clause_ids: frozenset[str],
+) -> tuple[GateCheck, ...]:
+	"""What a machine can check about FR-068's conclusions.
+
+	Three checks, and each one is a way the classification could be *about something
+	else* than the research it claims to rest on:
+
+	* **every intent clause is classified.** FR-068 says "every intent clause"; the
+		direction that makes that true is the draft's clause list minus the classification,
+		and it is the same two-way rule P2's ``uncovered_clauses`` applies one phase later.
+	* **every cited source is in the ledger.** A verdict resting on a source the ledger
+		does not hold is a conclusion resting on nothing, and it cannot be invalidated with
+		that source the way FR-070's edge requires.
+	* **a contradicted clause stops the pipeline.** Not a check on the producer but on
+		the *phase*: FR-068's action for Invalidated is "return to P0, do not build", and a
+		check that merely reported it would let a caller advance P1 and read the ledger as
+		grounds for proceeding. Reported here so ``sofact classify`` exits non-zero and
+		``advance_phase`` can refuse.
+
+	The **Unverifiable and Deepened counts are not checks** (FR-068, FR-071's precedent):
+	they are measurements, printed, and a gate that failed on either would pay a producer
+	for not looking — the exact pressure ADR-0035 decision 6 refuses.
+	"""
+	missing = classification.unclassified(clause_ids)
+	known: set[str] = {s.id for s in ledger.sources} if ledger is not None else set()
+	dangling: list[str] = []
+	for entry in classification.classifications:
+		dangling.extend(f"{entry.clause_id}→{sid}" for sid in entry.evidence if sid not in known)
+	invalidated = classification.invalidated
+	return (
+		GateCheck(
+			name="every-clause-is-classified",
+			passed=not missing,
+			detail=(
+				f"all {len(clause_ids)} intent clause(s) classified"
+				if not missing
+				else f"{len(missing)} clause(s) unclassified ({', '.join(missing)}): FR-068 "
+				"asks for a verdict on every intent clause, and an unclassified clause is "
+				"one the research never reached"
+			),
+		),
+		GateCheck(
+			name="classification-cites-the-ledger",
+			passed=not dangling,
+			detail=(
+				"every cited source is in the ledger"
+				if not dangling
+				else "classification cites source(s) the ledger does not hold "
+				+ ", ".join(dangling)
+				+ ": a conclusion resting on a source outside the ledger cannot be "
+				"invalidated with it (FR-068, FR-070)"
+			),
+		),
+		GateCheck(
+			name="nothing-is-invalidated",
+			passed=not invalidated,
+			detail=(
+				"no clause was invalidated by the evidence"
+				if not invalidated
+				else f"{len(invalidated)} clause(s) invalidated: "
+				+ "; ".join(f"{c.clause_id} — {c.rationale}" for c in invalidated)
+				+ " — FR-068's action is to return to P0 and not build"
 			),
 		),
 	)

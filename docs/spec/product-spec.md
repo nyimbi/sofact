@@ -530,6 +530,34 @@ derivation. The edge FR-070 asks for therefore runs source-to-claim *inside* the
 ledger, where the producer states it, rather than spec-to-source, where it would be
 guessed.
 
+**And the verdict is an artefact as of ADR-0037.** `sofact classify --from-run <id>`
+reads a run's `research-classification.json` and records a `ResearchClassification`:
+one `ClauseClassification` per intent clause, each carrying its verdict, its rationale
+and its evidence. Two things about the table above are load-bearing rather than
+descriptive.
+
+**The Action column is data.** `VERDICT_ACTION` maps each verdict to its action, and
+three readers read it: the type (`ClauseClassification.action`), the CLI (which prints
+the action beside every verdict), and `advance_phase`, which **refuses to complete P1**
+while the current classification returns to P0 — naming each stopping clause and its
+verdict. A verdict that says *do not build* therefore cannot be printed as a finding for
+a reader to act on or not; the pipeline does not advance over it.
+
+**The clause list is the operator's, not the producer's.** `research_goal` writes the
+draft's clause ids and statements into the prompt, and the check measures "every clause
+is classified" against the draft's stems. A producer that classified one of five clauses
+is measured against the five it was given, rather than passing by being asked about
+itself.
+
+**Unverifiable's action is what makes it falsifiable.** The verdict becomes an
+`Assumption` whose `refuted_by` is the classification's `settled_by`, so a producer that
+cannot name what would settle the question has not produced an Unverifiable verdict at
+all — FR-079's rule that "an assumption without a refuting observation is a belief",
+applied to the one verdict whose action is to proceed. An Unverifiable verdict that
+*cites evidence* is refused at construction, because "no evidence either way" is a
+statement about absence. An unknown verdict is refused rather than defaulted, since
+Unverifiable is the one verdict whose action is *proceed* and so the one wrong default.
+
 ### 5.2 Where the research engine must exceed the manual reference
 
 **FR-073** The automated engine must additionally perform **contradiction
@@ -1816,6 +1844,13 @@ v0.1's lane and oracle definition formats are retained. New surface:
   (`--from-run <id>`), or prints the one the log holds. Claims and sources are
   separately addressable, and the command exits non-zero when a provenance, evidence,
   or staleness check fails (FR-069, FR-070, FR-071, FR-073–FR-075; ADR-0035).
+- **`sofact classify`** — reads a research run's `research-classification.json` into a
+  `ResearchClassification` (`--from-run <id>`), or prints the one the log holds. Each
+  verdict is printed with the action FR-068 gives it, its rationale and its evidence;
+  Unverifiable verdicts are printed as the flagged assumptions they become, and the
+  clauses that return the pipeline to P0 are named in a block of their own. The command
+  exits non-zero when a clause is unclassified, when a verdict cites a source the ledger
+  does not hold, or when anything is invalidated (FR-068, FR-079; ADR-0037).
 - **`sofact specify`** / **`sofact decompose`** — produce the gate artifacts.
 - **`sofact contract`** — P4; emits contracts + manufactured oracles.
 - **`sofact build`** — P5–P7; runs the platform build.
@@ -1825,7 +1860,8 @@ v0.1's lane and oracle definition formats are retained. New surface:
 
 **Running in v0.1** — the subset of the above that exists as executable code today:
 `sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
-`sources` (P1's ledger, read from the run's artefacts: FR-068–FR-075, ADR-0035),
+`sources` (P1's ledger, read from the run's artefacts: FR-069–FR-075, ADR-0035),
+`classify` (P1's per-clause verdicts: FR-068, ADR-0037),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
 `dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `run`. The planned
 verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is

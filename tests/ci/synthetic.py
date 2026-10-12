@@ -62,6 +62,7 @@ SCRIPT = '''\
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import time
@@ -364,6 +365,73 @@ if "research-report.md" in goal:
 				}
 			),
 			encoding="utf-8",
+		)
+	if "research-classification.json" in goal and not mode.startswith("research-stub"):
+		# FR-068: one verdict per intent clause. The clause ids come out of the goal
+		# text, which is where SoFact puts them -- a producer that invented its own
+		# subject list would make "every clause is classified" a check of the producer
+		# against itself, so the ids here are read back rather than made up.
+		listed = re.findall(r"^- ([0-9a-f-]{36}): (.*)$", goal, re.MULTILINE)
+		if mode.startswith("research-classify-partial"):
+			# Only the first clause, which is the "producer answered a smaller question
+			# than it was asked" case.
+			listed = listed[:1]
+		entries: list[dict[str, object]] = []
+		for index, (clause_id, statement) in enumerate(listed):
+			# One variant per mode, chosen by position, so a single run exercises the
+			# whole table: the four verdicts and the dangling citation.
+			if mode.startswith("research-classify-invalidated") and index == 0:
+				entries.append(
+					{
+						"clause_id": clause_id,
+						"statement": statement,
+						"verdict": "invalidated",
+						"rationale": "the measured paper contradicts the premise",
+						"evidence": ["S01"],
+					}
+				)
+			elif mode.startswith("research-classify-deepened") and index == 0:
+				entries.append(
+					{
+						"clause_id": clause_id,
+						"statement": statement,
+						"verdict": "deepened",
+						"rationale": "the evidence reframes the problem as a different one",
+						"evidence": ["S01"],
+					}
+				)
+			elif mode.startswith("research-classify-unverifiable") and index == 0:
+				entries.append(
+					{
+						"clause_id": clause_id,
+						"statement": statement,
+						"verdict": "unverifiable",
+						"rationale": "no source addresses this either way",
+						"settled_by": "a benchmark run of our own on the target corpus",
+					}
+				)
+			elif mode.startswith("research-classify-dangling") and index == 0:
+				entries.append(
+					{
+						"clause_id": clause_id,
+						"statement": statement,
+						"verdict": "validated",
+						"rationale": "a source supports it, but not one this ledger holds",
+						"evidence": ["S99"],
+					}
+				)
+			else:
+				entries.append(
+					{
+						"clause_id": clause_id,
+						"statement": statement,
+						"verdict": "validated",
+						"rationale": "the measured paper supports the premise",
+						"evidence": ["S01"],
+					}
+				)
+		pathlib.Path("research-classification.json").write_text(
+			json.dumps({"classifications": entries}), encoding="utf-8"
 		)
 
 records = [{"seq": 1, "type": "session", "data": {}}]

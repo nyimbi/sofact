@@ -62,8 +62,11 @@ from sofact.planner import (
 )
 from sofact.research import (
 	LEDGER_CLAIMS_FILENAME,
+	LEDGER_CLASSIFICATION_FILENAME,
 	LEDGER_SOURCES_DIRNAME,
+	classification_checks,
 	ledger_checks,
+	parse_classification,
 	parse_ledger,
 )
 from sofact.specification import approve as record_specification_approval
@@ -109,6 +112,7 @@ from sofact.views import (
 	RepairOutcome,
 	ResearchAllowance,
 	ResearchBudget,
+	ResearchClassification,
 	ResearchMode,
 	ResearchRecord,
 	SourceLedger,
@@ -162,17 +166,30 @@ def extract_source_urls(text: str) -> tuple[str, ...]:
 	return tuple(seen)
 
 
-def research_goal(query: str, *, mode: ResearchMode, allowance: ResearchAllowance) -> str:
+def research_goal(
+	query: str,
+	*,
+	mode: ResearchMode,
+	allowance: ResearchAllowance,
+	clauses: tuple[tuple[str, str], ...] = (),
+) -> str:
 	"""The research session's goal, authored with zero model involvement (FR-167).
 
 	SoFact writes the prompt; the model performs the research. The goal names the tool,
-	the exact query, and the two files the workspace must end up holding, because the
+	the exact query, and the files the workspace must end up holding, because the
 	artefact protocol — not the producer's honesty — is what makes the run observable.
 
 	The ledger artefacts are named here too (FR-070). Asking for them in the goal is
 	what makes the difference between a report and a ledger the producer's task rather
 	than a transcription SoFact performs on prose afterwards, and transcription from
 	prose is exactly what :mod:`sofact.research` refuses to do.
+
+	FR-068's classification is named for a stronger reason: the requirement is a verdict
+	on *every intent clause*, and the clause ids are SoFact's, not the producer's. A goal
+	that said "classify the clauses" would let the producer choose its own subject list,
+	and the check that every clause was classified would then be measuring the producer
+	against itself. So ``clauses`` — id and statement, in draft order — is written into
+	the prompt, and the ids the producer returns are the ones it was handed.
 
 	The allowance is named as well (FR-072), and this is the one part of the prompt that
 	is a *bound* rather than a request: FR-072 says unbounded research is a way to never
@@ -183,9 +200,15 @@ def research_goal(query: str, *, mode: ResearchMode, allowance: ResearchAllowanc
 	"""
 	assert query.strip(), "a research query must not be empty"
 	tool = "super_deep_research" if mode is ResearchMode.SUPER else "deep_research"
+	clause_block = (
+		""
+		if not clauses
+		else "\n\nThe intent clauses to classify (FR-068), by id:\n"
+		+ "".join(f"- {cid}: {statement}\n" for cid, statement in clauses)
+	)
 	return (
 		f"Research the following subject using the {tool} tool.\n\n"
-		f"Subject: {query}\n\n"
+		f"Subject: {query}{clause_block}\n\n"
 		f"Call the {tool} tool exactly once, with the query: {query}\n\n"
 		f"Budget (FR-072): at most {allowance.max_sources} source(s), "
 		f"{allowance.max_model_calls} model call(s) and "
@@ -219,6 +242,15 @@ def research_goal(query: str, *, mode: ResearchMode, allowance: ResearchAllowanc
 		"disconfirming claims whenever the evidence argues against the premise — a "
 		"ledger that only ever supports it is a rationalisation, and the count of "
 		"disconfirming claims is read from this file.\n\n"
+		f"Then write {LEDGER_CLASSIFICATION_FILENAME} in the working directory: an object "
+		"with 'classifications' (one entry per intent clause, of {clause_id, statement, "
+		"verdict, rationale, evidence, settled_by}). verdict is exactly one of validated "
+		"(the evidence supports the premise), invalidated (the evidence contradicts it), "
+		"unverifiable (no evidence either way) or deepened (the evidence reframes the "
+		"problem). evidence lists the source ids that decided it and is required for "
+		"every verdict except unverifiable, where it must be empty and settled_by must "
+		"name the observation that would settle the clause. Classify every clause: a "
+		"clause left out is one the research never reached.\n\n"
 		"Then reply DONE."
 	)
 
@@ -471,6 +503,23 @@ class FactoryService:
 			)
 		if status is PhaseStatus.AWAITING_GATE and phase not in PHASE_GATE:
 			raise ValueError(f"{phase.value} has no gate to await (FR-061)")
+		if status is PhaseStatus.COMPLETE and phase is Phase.RESEARCH:
+			# FR-068's action column, enforced where it can be: "Invalidated -> return to
+			# P0, do not build". A verdict of that kind is not a finding to be weighed
+			# downstream -- the clause it names is a premise the evidence contradicts, and
+			# building on it is the thing the requirement forbids. Refused here rather
+			# than left to P2's gate because P2 would have to re-read P1's conclusion to
+			# notice, and the phase that reached the conclusion is the one that knows it.
+			classification = (await self.state()).classification
+			if classification is not None:
+				stopped = classification.returns_to_p0
+				if stopped:
+					names = ", ".join(f"{c.clause_id} ({c.verdict.value})" for c in stopped)
+					raise ValueError(
+						f"P1 cannot complete: {len(stopped)} clause(s) return the pipeline "
+						f"to P0 ({names}). FR-068's action for these verdicts is to revise "
+						"the clauses and re-elicit, not to build on them"
+					)
 		if status is PhaseStatus.ACTIVE:
 			blocking = state.open_gate
 			if blocking is not None:
@@ -1880,7 +1929,16 @@ class FactoryService:
 				resolved_tools = ",".join([*declared, *missing])
 		adapter = self.adapter(resolved, workspace=workdir, model=model, tools=resolved_tools)
 		session_id = uuid7str()
-		goal_text = research_goal(resolved_query, mode=mode, allowance=allowance)
+		goal_text = research_goal(
+			resolved_query,
+			mode=mode,
+			allowance=allowance,
+			clauses=(
+				tuple((stem.id, stem.statement) for stem in draft.stems)
+				if draft is not None
+				else ()
+			),
+		)
 		argv = adapter.build_argv(goal_text, session_id)
 		started = now()
 		exit_code, _stdout, stderr, timed_out, session_path, tokens = await adapter.invoke(
@@ -2099,6 +2157,96 @@ class FactoryService:
 		"""
 		ledger = await self.current_ledger()
 		return () if ledger is None else ledger_checks(ledger)
+
+	# ------------------------------------------- FR-068: the per-clause conclusion
+
+	async def classification_from(self, record: ResearchRecord) -> ResearchClassification:
+		"""Read FR-068's per-clause verdicts out of a research run's workspace.
+
+		Same rule as :meth:`ledger_from`: read from the run's own artefacts rather than
+		passed in, so the conclusion is a finding about a dispatch and not something a
+		caller can assert. A run that wrote no classification file is refused rather than
+		recorded as an empty classification, because *no conclusions* and *a conclusion
+		about nothing* are different findings and only the second is a producer that was
+		asked and had nothing to say.
+		"""
+		workdir = Path(record.workspace)
+		path = workdir / LEDGER_CLASSIFICATION_FILENAME
+		if not path.is_file():
+			raise ValueError(
+				f"research run {record.id} left no {LEDGER_CLASSIFICATION_FILENAME} in "
+				f"{workdir}: FR-068 asks for a verdict on every intent clause, and there "
+				"is nothing here to record (FR-068, NFR-024)"
+			)
+		return await self.record_classification(
+			goal_id=record.goal_id,
+			query=record.query,
+			payload=json.loads(path.read_text(encoding="utf-8")),
+		)
+
+	async def record_classification(
+		self,
+		*,
+		goal_id: str,
+		query: str,
+		payload: object,
+	) -> ResearchClassification:
+		"""Parse a classification and append it to the log (FR-068).
+
+		The version is read from the folded state for the reason
+		:meth:`record_ledger`'s is: a caller-supplied number can repeat or go backwards,
+		and FR-068's record is versioned so that "which conclusion is this" has an answer.
+		"""
+		assert query.strip(), "a classification is a conclusion *about* a query"
+		goal = await self.current_goal()
+		if goal is None:
+			raise KeyError("no goal yet; a classification is a verdict about a goal")
+		if goal.id != goal_id:
+			raise ValueError(
+				f"goal {goal_id} is not the current goal ({goal.id}): a classification "
+				"recorded against a goal nobody is working on would sit in the log "
+				"unreadable against the work it was meant to inform"
+			)
+		classification = parse_classification(
+			payload,
+			goal_id=goal_id,
+			query=query.strip(),
+			version=len((await self.state()).classifications) + 1,
+		)
+		self._commit(
+			LedgerKind.RESEARCH_CLASSIFIED,
+			{"classification": classification.model_dump(mode="json")},
+		)
+		return classification
+
+	async def current_classification(self) -> ResearchClassification | None:
+		"""The conclusion the project is currently read under, or ``None`` (FR-068)."""
+		return (await self.state()).classification
+
+	async def classification_gate(self) -> tuple[GateCheck, ...]:
+		"""What a machine can check about the current classification (FR-068).
+
+		Empty with no classification, for the reason :meth:`ledger_gate` is empty with no
+		ledger: a project that has not classified yet has not failed a classification
+		check.
+
+		The clause set comes from the goal's latest draft, so "every intent clause is
+		classified" is measured against the clauses the operator's own elicitation
+		produced rather than against whatever the producer chose to write about — a
+		producer that classified two of five clauses and omitted the rest would otherwise
+		pass by being asked about itself.
+		"""
+		classification = await self.current_classification()
+		if classification is None:
+			return ()
+		goal = await self.current_goal()
+		draft = await self.latest_draft(goal.id) if goal is not None else None
+		clause_ids: frozenset[str] = (
+			frozenset(stem.id for stem in draft.stems) if draft is not None else frozenset()
+		)
+		return classification_checks(
+			classification, await self.current_ledger(), clause_ids=clause_ids
+		)
 
 	# --------------------------------------------------- FR-139: integrity at end
 

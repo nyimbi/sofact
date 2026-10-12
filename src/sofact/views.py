@@ -37,6 +37,7 @@ __all__ = [
 	"Claim",
 	"ClaimKind",
 	"Clause",
+	"ClauseClassification",
 	"ClauseKind",
 	"ClauseStem",
 	"ClauseVerdict",
@@ -93,8 +94,10 @@ __all__ = [
 	"Requirement",
 	"ResearchAllowance",
 	"ResearchBudget",
+	"ResearchClassification",
 	"ResearchMode",
 	"ResearchRecord",
+	"ResearchVerdict",
 	"Source",
 	"SourceLedger",
 	"SourcePosture",
@@ -2499,6 +2502,217 @@ class SourceLedger(View):
 		return tuple(stale)
 
 
+class ResearchVerdict(StrEnum):
+	"""What research concluded about one intent clause (FR-068).
+
+	Four members and no fifth, because the spec's table gives each one a *different
+	action*: a verdict whose action is the same as another's is a distinction that costs
+	a word and buys nothing. The action is not prose here — it is
+	:data:`VERDICT_ACTION`, read by the CLI and by the P1 completion rule, so a clause
+	the evidence contradicts cannot be advanced past by a reader who skipped a paragraph.
+	"""
+
+	VALIDATED = "validated"
+	INVALIDATED = "invalidated"
+	UNVERIFIABLE = "unverifiable"
+	DEEPENED = "deepened"
+
+
+VERDICT_ACTION: dict[ResearchVerdict, str] = {
+	ResearchVerdict.VALIDATED: "proceed",
+	ResearchVerdict.INVALIDATED: "return to P0: the premise is contradicted and must not be built",
+	ResearchVerdict.UNVERIFIABLE: "proceed as an explicitly flagged assumption",
+	ResearchVerdict.DEEPENED: "return to P0: revise the clauses the evidence reframed",
+}
+"""FR-068's action column, as data.
+
+A dict rather than a method so the P1 completion rule, the gate and the CLI all read
+the *same* table: three call sites each spelling out "invalidated means stop" is how one
+of them comes to disagree with the spec.
+"""
+
+
+class ClauseClassification(View):
+	"""One intent clause, classified by the research phase with its evidence (FR-068).
+
+	``evidence`` is where FR-068's "with cited evidence" is enforced, and it is enforced
+	*in both directions*: a verdict of Validated, Invalidated or Deepened with no source
+	cited is a judgement the ledger cannot check, and a verdict of Unverifiable that
+	cites a source contradicts itself — "no evidence either way" is a statement about the
+	absence of evidence, and a record holding both is unreadable.
+
+	``settled_by`` is what makes Unverifiable's action ("proceed as an explicitly flagged
+	assumption") more than a shrug. FR-079 requires every assumption to name the
+	observation that would show it false, so an unverifiable clause has to say what would
+	settle it; without that field the flagged assumption would be unfalsifiable and P2
+	would refuse it. The field is refused on the other three verdicts rather than ignored
+	— a producer's judgement that the reader silently drops is worse than a producer's
+	error the reader reports, which is the same rule the ledger's parser applies to an
+	unknown key.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	"""The clause in its own words, as it read when it was classified. Carried rather
+	than looked up, because P2 may revise the clause and the classification is evidence
+	about the clause that *was* researched (FR-068's Deepened action)."""
+
+	verdict: ResearchVerdict
+	rationale: NonEmptyStr
+	"""Why this verdict, in the researcher's words. Required: a verdict with no stated
+	reason is a label, and FR-068 asks for a classification, not a tag."""
+
+	evidence: tuple[NonEmptyStr, ...] = ()
+	"""Source ids from the ledger that decided this. Empty only for Unverifiable."""
+
+	settled_by: NonEmptyStr | None = None
+	"""What observation would settle an Unverifiable clause. Required there, refused
+	elsewhere."""
+
+	@model_validator(mode="after")
+	def _the_evidence_matches_the_verdict(self) -> Self:
+		if self.verdict is ResearchVerdict.UNVERIFIABLE:
+			if self.evidence:
+				raise ValueError(
+					f"clause {self.clause_id} is unverifiable and cites "
+					f"{len(self.evidence)} source(s) {list(self.evidence)}: *no evidence "
+					"either way* is a statement about the absence of evidence, and a "
+					"classification holding both is unreadable (FR-068)"
+				)
+			if self.settled_by is None:
+				raise ValueError(
+					f"clause {self.clause_id} is unverifiable and names nothing that would "
+					"settle it: FR-068's action is to proceed *as an explicitly flagged "
+					"assumption*, and FR-079 refuses an assumption with no refuting "
+					"observation (FR-068, FR-079)"
+				)
+			return self
+		if not self.evidence:
+			raise ValueError(
+				f"clause {self.clause_id} is {self.verdict.value} with no source cited: "
+				"FR-068 requires cited evidence, and a verdict the ledger cannot check is "
+				"an opinion wearing a verdict's name (FR-068, FR-069)"
+			)
+		if self.settled_by is not None:
+			raise ValueError(
+				f"clause {self.clause_id} is {self.verdict.value} and names what would "
+				f"settle it ({self.settled_by!r}): that field is how an *unverifiable* "
+				"clause becomes a falsifiable assumption, and a reader that ignored it "
+				"here would drop a judgement the producer made (FR-068)"
+			)
+		return self
+
+	@property
+	def action(self) -> str:
+		"""What FR-068's table says to do about this verdict."""
+		return VERDICT_ACTION[self.verdict]
+
+	@property
+	def returns_to_p0(self) -> bool:
+		"""Whether this verdict sends the pipeline back (FR-068).
+
+		Invalidated and Deepened both do, for different reasons — one says the premise is
+		false, the other says the premise was the wrong question — and both mean the
+		clauses must be revised before anything is built on them.
+		"""
+		return self.verdict in (ResearchVerdict.INVALIDATED, ResearchVerdict.DEEPENED)
+
+	@property
+	def flagged_assumption(self) -> Assumption | None:
+		"""This clause as the assumption FR-068's Unverifiable action carries into P2.
+
+		``None`` for the other three verdicts. The assumption's ``refuted_by`` is
+		``settled_by``, which the validator above guarantees is present — so an
+		unverifiable clause cannot reach P2 as an unfalsifiable belief.
+		"""
+		if self.verdict is not ResearchVerdict.UNVERIFIABLE or self.settled_by is None:
+			return None
+		return Assumption(
+			id=uuid7str(),
+			statement=f"Unverified premise (FR-068): {self.statement}",
+			refuted_by=self.settled_by,
+		)
+
+
+class ResearchClassification(View):
+	"""P1's second artefact: a verdict on every intent clause (FR-068).
+
+	The ledger (FR-070) is what the research *found*; this is what it *concluded about
+	the goal*. They are separate types because they fail separately — a ledger can be
+	complete and the conclusion wrong, and a classification citing a source the ledger
+	does not hold is a conclusion resting on nothing. FR-062's "every phase emits a
+	durable artifact" is satisfied by the pair, and FR-068 is the half that had no type
+	until now.
+	"""
+
+	version: int = 1
+	"""FR-070's versioning rule, applied to the conclusions. A re-classification after a
+	return to P0 is a new record rather than an edit to the old one, because the old one
+	is *why* the pipeline went back."""
+
+	goal_id: UUID7
+	query: NonEmptyStr
+	classifications: tuple[ClauseClassification, ...]
+
+	@model_validator(mode="after")
+	def _every_clause_is_classified_once(self) -> Self:
+		if not self.classifications:
+			raise ValueError(
+				"a classification with no clauses classifies nothing: FR-068 asks for a "
+				"verdict on every intent clause (FR-068)"
+			)
+		ids = [c.clause_id for c in self.classifications]
+		duplicates = sorted({i for i in ids if ids.count(i) > 1})
+		if duplicates:
+			raise ValueError(
+				f"clause(s) {duplicates} classified more than once: two verdicts on one "
+				"premise means the reader picks, and the pick is the research (FR-068)"
+			)
+		return self
+
+	@property
+	def invalidated(self) -> tuple[ClauseClassification, ...]:
+		"""Clauses the evidence contradicts. FR-068: do not build."""
+		return tuple(c for c in self.classifications if c.verdict is ResearchVerdict.INVALIDATED)
+
+	@property
+	def deepened(self) -> tuple[ClauseClassification, ...]:
+		"""Clauses the evidence reframed. FR-068: revise the clauses."""
+		return tuple(c for c in self.classifications if c.verdict is ResearchVerdict.DEEPENED)
+
+	@property
+	def unverifiable(self) -> tuple[ClauseClassification, ...]:
+		"""Clauses with no evidence either way — the flagged assumptions."""
+		return tuple(c for c in self.classifications if c.verdict is ResearchVerdict.UNVERIFIABLE)
+
+	@property
+	def returns_to_p0(self) -> tuple[ClauseClassification, ...]:
+		"""Clauses that send the pipeline back to P0 (FR-068).
+
+		Read through :attr:`ClauseClassification.returns_to_p0` rather than by comparing
+		verdicts here, so "which verdicts stop the pipeline" is written down once.
+		"""
+		return tuple(c for c in self.classifications if c.returns_to_p0)
+
+	@property
+	def flagged_assumptions(self) -> tuple[Assumption, ...]:
+		"""Every Unverifiable clause as a falsifiable assumption for P2 (FR-068, FR-079)."""
+		return tuple(a for c in self.classifications if (a := c.flagged_assumption) is not None)
+
+	def unclassified(self, clause_ids: frozenset[str]) -> tuple[str, ...]:
+		"""Clauses the draft holds that this classification does not name (FR-068).
+
+		The direction FR-068's "every intent clause" needs, and the same two-way rule
+		:meth:`Specification.uncovered_clauses` applies one phase later. A method rather
+		than a validator because the type cannot see the draft it was written against.
+		"""
+		return tuple(sorted(clause_ids - {c.clause_id for c in self.classifications}))
+
+	def classification(self, clause_id: str) -> ClauseClassification | None:
+		"""One clause's verdict, or ``None``. The addressable read FR-068 implies."""
+		return next((c for c in self.classifications if c.clause_id == clause_id), None)
+
+
 class ModuleCheckout(View):
 	"""The branch a plan step's work sits on (FR-100).
 
@@ -2826,6 +3040,7 @@ class LedgerKind(StrEnum):
 	INTEGRATION_CHECKED = "integration.checked"
 	VERDICT_REUSED = "verdict.reused"
 	RESEARCH_RUN = "research.run"
+	RESEARCH_CLASSIFIED = "research.classified"
 	SOURCE_LEDGER_RECORDED = "source_ledger.recorded"
 	REPAIR_ATTEMPTED = "repair.attempted"
 	DECOMPOSITION_PROPOSED = "decomposition.proposed"
@@ -3002,6 +3217,26 @@ class ProjectState(View):
 	one, exactly as the log itself does. The operative ledger is :attr:`ledger`, derived
 	from this rather than stored beside it.
 	"""
+
+	classifications: tuple[ResearchClassification, ...] = ()
+	"""Every per-clause classification the log records, oldest first (FR-068).
+
+	Versioned for the same reason the ledger is, and for one more: a classification
+	whose Invalidated verdict sent the pipeline back to P0 is the *reason* it went back,
+	so superseding it must not erase it. The operative one is
+	:attr:`classification`.
+	"""
+
+	@property
+	def classification(self) -> ResearchClassification | None:
+		"""The current per-clause classification, or ``None`` (FR-068).
+
+		The **latest**, by log order, for the reason :attr:`ledger` is: a re-classification
+		after a return to P0 supersedes the one that caused the return, and the older one
+		stays in ``classifications`` because the record of what was concluded before is
+		how the current conclusion is read.
+		"""
+		return self.classifications[-1] if self.classifications else None
 
 	@property
 	def ledger(self) -> SourceLedger | None:
