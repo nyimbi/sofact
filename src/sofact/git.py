@@ -306,6 +306,7 @@ async def seal_branch(
 		update={
 			"sealed_commit": sealed,
 			"sealed_paths": len(owned),
+			"sealed_files": owned,
 			"head_commit": sealed,
 		},
 	)

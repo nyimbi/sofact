@@ -1425,6 +1425,18 @@ class ModuleCheckout(View):
 	told apart by ``head_commit``.
 	"""
 	sealed_paths: int = 0
+	sealed_files: tuple[str, ...] = ()
+	"""The paths the seal committed, relative to the workspace root.
+
+	The *names*, not only the count, because FR-113's "no module reaches another module's
+	internals" is checked by import analysis over the files a module actually produced, and
+	a count cannot be analysed. This is the only place that attribution exists: the
+	producer reports nothing about what it wrote, and the seal is where the factory sees it.
+
+	Paths, not commits, because the branches are cumulative — a later module's branch
+	contains every earlier module's files — so a module's own files are the ones *its* step
+	sealed, which only this field records.
+	"""
 	head_commit: str | None = None
 	"""The branch tip after the session, whoever created it.
 
@@ -1441,6 +1453,11 @@ class ModuleCheckout(View):
 			raise ValueError("a branch cannot be created on top of itself")
 		if self.sealed_paths < 0:
 			raise ValueError(f"sealed_paths must be non-negative, got {self.sealed_paths}")
+		if self.sealed_paths != len(self.sealed_files):
+			raise ValueError(
+				f"sealed_paths is the count of sealed_files, got {self.sealed_paths} "
+				f"for {len(self.sealed_files)} path(s)"
+			)
 		if (self.sealed_commit is None) != (self.sealed_paths == 0):
 			raise ValueError(
 				"a seal names a commit exactly when it names paths: "

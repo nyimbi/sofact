@@ -258,9 +258,30 @@ async def test_sealing_creates_the_ref_and_names_the_commit(tmp_path: Path) -> N
 
 	assert sealed.sealed_commit is not None, "nothing was committed"
 	assert sealed.sealed_paths == 1
+	assert sealed.sealed_files == ("module.py",), "the seal must name what it committed (FR-113)"
 	assert sealed.head_commit == sealed.sealed_commit
 	refs = await refs_of(workspace)
 	assert f"refs/heads/{checkout.branch}" in refs, "the branch is still not a ref"
+
+
+async def test_the_seal_records_every_path_the_producer_wrote(tmp_path: Path) -> None:
+	"""FR-113's input: which files a module produced, which only the seal can say.
+
+	The producer reports nothing about what it wrote, so this is the sole place the
+	attribution exists. A count cannot be analysed for imports, and the branches are
+	cumulative, so a module's own files are the ones *its* step sealed.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "operation", module="ledger-core")
+	(workspace / "src").mkdir()
+	(workspace / "src" / "core.py").write_text("x = 1\n", encoding="utf-8")
+	(workspace / "src" / "helpers.py").write_text("y = 2\n", encoding="utf-8")
+
+	sealed = await seal_branch(checkout, workspace, note="ledger-core work")
+
+	assert set(sealed.sealed_files) == {"src/core.py", "src/helpers.py"}
+	assert sealed.sealed_paths == len(sealed.sealed_files)
 
 
 async def test_a_later_step_branches_from_the_sealed_one(tmp_path: Path) -> None:
@@ -371,6 +392,10 @@ async def test_excluded_paths_are_not_committed(tmp_path: Path) -> None:
 	sealed = await seal_branch(checkout, workspace, note="bootstrap", exclude=("sessions",))
 
 	assert sealed.sealed_paths == 1, "the session directory was swept into the commit"
+	assert sealed.sealed_files == ("module.py",), (
+		"the recorded paths must exclude the factory's own bookkeeping, or P7's import "
+		"analysis would read SoFact's ledger as part of the module it is analysing"
+	)
 	tracked = await run_git(workspace, "ls-files")
 	assert "module.py" in tracked
 	assert "sessions/transcript.json" not in tracked, "the factory committed its own bookkeeping"
