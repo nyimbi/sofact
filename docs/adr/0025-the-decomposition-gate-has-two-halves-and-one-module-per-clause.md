@@ -67,18 +67,27 @@ it turns *off*.
 
 ## Consequences
 
-- **A module identity now exists, and it is not yet what names the branch.** This is the
-  honest boundary of this decision. `compile_plan` still compiles steps from the
-  contract's clause *kinds* (`step_kind_for`), and `ensure_module_branch` still names a
-  branch from a step's ordinal and kind — so the build remains branch-per-**step**, and
-  FR-100's "per module" is a type that exists rather than a wiring that is done. What
-  changed is that the gap is now a connection to make rather than a concept to invent:
-  the approved `Decomposition` is in the log, its modules carry interfaces and
-  dependencies, and a step can name the module it implements. Until that wiring lands,
-  a plan whose steps span several modules is still a plan whose branches do not.
+- **The branch is now named for the module, and steps share it.** FR-100 asks for a
+  branch per *module*; FR-136 forbids one goal session per module, because a module does
+  not fit in one session's context. The two are reconciled by having a module's work span
+  several steps, all on that module's branch. `Decomposition.module_for_clauses` resolves
+  a step's clauses to their single owner, and `dispatch_step` passes that name to
+  `ensure_module_branch`, which names the branch `sofact/<module>`. Two steps of one
+  module therefore land on one branch, and the separation FR-100 wants is between
+  modules rather than between steps.
+- **`None` is a real answer from that lookup, and the branch falls back to the step.**
+  A bootstrap step covers no clause; a step whose clauses span two modules belongs to
+  neither; a clause owned by two modules is ambiguous. In each case naming a module would
+  be a guess, so `ModuleCheckout.module` records `None` and the branch keeps the step's
+  ordinal and kind. The record says which happened rather than leaving a reader to infer
+  it from the branch name.
+- `compile_plan` still compiles steps from clause *kinds* (`step_kind_for`), and that is
+  deliberate: the plan's tiers are the spec's canonical session shape (§8.4), and the
+  module is a property a step *carries* rather than the thing that partitions it. A
+  module spanning several tiers is the normal case, not a defect.
 - ADR-0024's deferral of FR-141 was blocked on module identity; it is not any more. It
-  remains blocked on the wiring above, and on the measurement it always named — a wave
-  running concurrently, or a plan spanning more than one module.
+  remains blocked on the measurement it always named — a wave running concurrently, or a
+  plan spanning more than one module.
 - The proposal can be wrong. It is a proposal, and the operator's half of the gate is
   where that is caught. This is the design, not a defect: §7.1 says no machine can make
   that call.
@@ -118,3 +127,16 @@ Both halves were canaried, each from a file backup rather than `git checkout`:
 `test_the_gate_never_claims_to_judge_the_architecture` asserts the check set *exactly*,
 so adding a machine check that names the operator's judgement fails a test rather than
 passing review.
+
+The module-to-branch wiring was canaried the same way, with the `module=` argument
+deleted from the `ensure_module_branch` call in `dispatch_step`:
+
+- `test_a_step_whose_clauses_belong_to_one_module_lands_on_that_branch` failed, and
+- `test_two_steps_of_one_module_share_one_branch` failed,
+- while `test_a_bootstrap_step_belongs_to_no_module_and_says_so` correctly still passed,
+  because a step with no module is supposed to fall back.
+
+That third row is the point of the canary: it shows the two failures were the wiring
+being absent rather than the suite being broadly red. `test_two_steps_of_one_module_share_one_branch`
+dispatches both steps for real and compares the recorded branches, and it is asserted
+to have run rather than skipped — a skip would have made it a gate nobody watched.

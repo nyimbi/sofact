@@ -97,16 +97,61 @@ async def test_the_branch_is_not_in_place(tmp_path: Path) -> None:
 	assert await branch_of(workspace) != "main"
 
 
-async def test_the_ordinal_and_kind_distinguish_two_steps(tmp_path: Path) -> None:
-	"""Two steps of one plan must not share a branch, or FR-100 is decorative."""
+async def test_two_steps_of_different_modules_do_not_share_a_branch(tmp_path: Path) -> None:
+	"""FR-100: the separation is between modules, and this is the case that shows it."""
 	workspace = tmp_path / "workspace"
 	workspace.mkdir()
-	first = await ensure_module_branch(workspace, 0, "bootstrap")
-	second = await ensure_module_branch(workspace, 1, "interfaces")
+	first = await ensure_module_branch(workspace, 0, "interfaces", module="ledger-model")
+	second = await ensure_module_branch(workspace, 1, "operation", module="reporting-api")
 
+	assert first.branch == f"{BRANCH_PREFIX}ledger-model"
+	assert second.branch == f"{BRANCH_PREFIX}reporting-api"
 	assert first.branch != second.branch
 	assert await branch_of(workspace) == second.branch, "the switch did not take effect"
 	assert second.created_branch is True
+
+
+async def test_two_steps_of_one_module_share_its_branch(tmp_path: Path) -> None:
+	"""The reconciliation of FR-100 with FR-136, which is the whole reason for ``module``.
+
+	FR-136 forbids one goal session per module -- a module does not fit in one session's
+	context -- so a module's work spans several steps. Those steps must land on the
+	module's branch, or "per module" would be per step wearing a module's name.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	first = await ensure_module_branch(workspace, 2, "operation", module="ledger-model")
+	second = await ensure_module_branch(workspace, 5, "invariant", module="ledger-model")
+
+	assert first.branch == second.branch == f"{BRANCH_PREFIX}ledger-model"
+	assert first.created_branch is True
+	assert second.created_branch is False, "the second step recreated the module's branch"
+
+
+async def test_a_step_with_no_module_falls_back_to_its_own_ordinal(tmp_path: Path) -> None:
+	"""A branch named from a guess is worse than one named from the step.
+
+	A bootstrap step covers no clause, so no module owns it; the record must say which
+	happened rather than leave a reader to infer it from the branch name.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+
+	assert checkout.branch == f"{BRANCH_PREFIX}000-bootstrap"
+	assert checkout.module is None
+
+
+async def test_a_module_named_step_records_the_module(tmp_path: Path) -> None:
+	"""The dispatch record carries *which* module, so the branch is checkable after the fact."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+
+	checkout = await ensure_module_branch(workspace, 0, "interfaces", module="ledger-model")
+
+	assert checkout.module == "ledger-model"
+	assert checkout.branch == f"{BRANCH_PREFIX}ledger-model"
 
 
 async def test_re_running_the_same_step_is_idempotent(tmp_path: Path) -> None:

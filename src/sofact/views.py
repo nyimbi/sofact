@@ -570,6 +570,24 @@ class Decomposition(View):
 		"""Look up a module by name. Names are unique, so this is a real lookup."""
 		return next((m for m in self.modules if m.name == name), None)
 
+	def module_for_clauses(self, clause_ids: tuple[str, ...]) -> Module | None:
+		"""The module that owns ``clause_ids``, or ``None`` when no single one does.
+
+		This is what lets a *step* name the module it builds (FR-100). FR-136 forbids one
+		goal session per module -- a module does not fit in one session's context -- so a
+		module's work spans several steps, and each of those steps is on the module's
+		branch because of this lookup.
+
+		``None`` is a real answer, not an error: a bootstrap step covers no clause, and a
+		step whose clauses span two modules is a step that belongs to neither. Both are
+		cases where naming a module would be a guess, and a branch named from a guess is
+		worse than a branch named from the step.
+		"""
+		owners = {m.id for m in self.modules if set(clause_ids) & set(m.clause_ids)}
+		if len(owners) != 1:
+			return None
+		return self.module(next(iter(owners)))
+
 	@property
 	def interface_count(self) -> int:
 		"""How many module surfaces must integrate (FR-091).
@@ -1388,6 +1406,14 @@ class ModuleCheckout(View):
 
 	branch: NonEmptyStr
 	step_ordinal: int
+	module: str | None = None
+	"""The module this step's work belongs to, when one owns it (FR-100).
+
+	``None`` for a step no single module owns — a bootstrap step covers no clause, and a
+	step spanning two modules belongs to neither. ``branch`` falls back to the step's
+	ordinal and kind in that case, so the record says which happened rather than leaving
+	a reader to infer it from the branch name.
+	"""
 	created_repository: bool = False
 	created_branch: bool = False
 	base_branch: str | None = None

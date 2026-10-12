@@ -37,7 +37,7 @@ than argued. Numbering is sequential and never reused.
 | [0022](0022-a-refutation-is-a-work-order.md) | A refutation is a work order: the verifier's diagnosis becomes another session's goal, the loop is bounded per clause, and running out is a row rather than a silence | Accepted |
 | [0023](0023-a-record-is-addressed-by-a-path.md) | A session record is addressed by a filesystem path: `claude` joins the producer set as a measured row, and `opencode` is dropped because its record is a database row and no glob names it | Accepted |
 | [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Branch-per-step (FR-100) is built, sealed and recorded on the dispatch; worktree isolation (FR-141) is deferred until a wave runs concurrently or a plan spans more than one module, and worktrees are containment rather than confinement | Accepted |
-| [0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) | The decomposition gate has two halves and a module is one clause: the proposal is a function of the contract and calls no model, the machine half is facts and cannot be waived by approval, and module identity is now a type rather than a word, though the branch is still named from the step until the plan compiles from modules | Accepted |
+| [0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) | The decomposition gate has two halves and a module is one clause: the proposal is a function of the contract and calls no model, the machine half is facts and cannot be waived by approval, and a step names the module it implements so the branch is per module with several steps sharing it, reconciling FR-100 with FR-136 | Accepted |
 
 ## Mapping to the specification's open decisions
 

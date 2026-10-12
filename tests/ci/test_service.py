@@ -558,6 +558,81 @@ class TestDispatchStep:
 		)
 		assert record.checkout.sealed_paths >= 1, "the producer wrote a file and nothing sealed it"
 
+	async def test_a_step_whose_clauses_belong_to_one_module_lands_on_that_branch(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-100's "per module" reaching the branch, which is the point of P3's identity.
+
+		FR-136 forbids a session per module, so a module's work spans several steps and
+		those steps must share its branch. The name is resolved from the approved
+		decomposition rather than from the step, so this is the test that fails if the
+		wiring is removed and the branch goes back to naming only the step.
+		"""
+		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")
+		plan = await service.plan_by_id(plan_id)
+		step = plan.step_by_id(step_id)
+		assert step is not None and step.clause_ids, "this test needs a clause-bearing step"
+		approved = await service.latest_decomposition(plan.contract_id)
+		assert approved is not None
+		module = approved.module_for_clauses(step.clause_ids)
+		assert module is not None, "one clause in one module: exactly one owner"
+
+		record = await service.dispatch_step(plan_id, step_id)
+
+		assert record.checkout is not None
+		assert record.checkout.module == module.name
+		assert record.checkout.branch == f"sofact/{module.name}"
+
+	async def test_a_bootstrap_step_belongs_to_no_module_and_says_so(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The fallback, asserted so the branch name is never read as a module name.
+
+		A bootstrap step covers no clause, so no module owns it. Falling back to the step's
+		own ordinal is honest; inventing a module for it would put a name in the log that
+		the decomposition does not contain.
+		"""
+		service, plan_id, _ = await dispatched_service(home, tmp_path, "complete")
+		plan = await service.plan_by_id(plan_id)
+		bootstrap = next(s for s in plan.steps if s.kind is PlanStepKind.BOOTSTRAP)
+		assert not bootstrap.clause_ids
+
+		record = await service.dispatch_step(plan_id, bootstrap.id)
+
+		assert record.checkout is not None
+		assert record.checkout.module is None
+		assert record.checkout.branch == f"sofact/{bootstrap.ordinal:03d}-bootstrap"
+
+	async def test_two_steps_of_one_module_share_one_branch(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-136 reconciled with FR-100, end to end through the service.
+
+		Both steps are dispatched for real and their recorded branches compared, so this
+		is the fact in the log rather than the intent in the code.
+		"""
+		service, plan_id, _ = await dispatched_service(home, tmp_path, "complete")
+		plan = await service.plan_by_id(plan_id)
+		approved = await service.latest_decomposition(plan.contract_id)
+		assert approved is not None
+		# Any two steps sharing a module, which is every module with more than one clause.
+		grouped: dict[str, list[str]] = {}
+		for step in plan.steps:
+			module = approved.module_for_clauses(step.clause_ids) if step.clause_ids else None
+			if module is not None:
+				grouped.setdefault(module.name, []).append(step.id)
+		sharing = next((ids for ids in grouped.values() if len(ids) > 1), None)
+		if sharing is None:
+			pytest.skip("this contract's modules each own one clause, so no two steps share one")
+
+		branches: list[str] = []
+		for step_id in sharing:
+			record = await service.dispatch_step(plan_id, step_id)
+			assert record.checkout is not None
+			branches.append(record.checkout.branch)
+
+		assert len(set(branches)) == 1, f"one module, {len(set(branches))} branches: {branches}"
+
 	async def test_without_a_probe_nothing_is_dispatched(self, home: Path, tmp_path: Path) -> None:
 		"""FR-148: no capability may be assumed because it was declared."""
 		service = synthetic_service(home, tmp_path, "complete")

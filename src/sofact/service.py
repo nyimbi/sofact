@@ -899,6 +899,26 @@ class FactoryService:
 		unowned = (LEDGER_FILENAME, "sessions")
 		return tuple(name for name in unowned if (resolved / name).exists())
 
+	async def _module_for(self, plan: GoalPlan, clause_ids: tuple[str, ...]) -> str | None:
+		"""The name of the module a step's clauses belong to, when exactly one owns them.
+
+		FR-100 wants the branch per module and FR-136 forbids a session per module, so the
+		branch is resolved here: every step whose clauses belong to one module lands on
+		that module's branch, and several steps therefore share it.
+
+		Read from the *approved* decomposition, because that is the architecture the
+		operator agreed to build. A step that names no clause (bootstrap) or whose clauses
+		span two modules belongs to neither, and gets a branch named from the step instead.
+		"""
+		if not clause_ids:
+			return None
+		state = await self.state()
+		approved = state.latest_decomposition(plan.contract_id)
+		if approved is None:
+			return None
+		found = approved.module_for_clauses(clause_ids)
+		return found.name if found is not None else None
+
 	async def dispatch_step(
 		self,
 		plan_id: str,
@@ -930,7 +950,17 @@ class FactoryService:
 		# builds on it rather than in place. Refusing here rather than dispatching
 		# unbranched is the point -- a session that ran in place has already done the
 		# thing the requirement forbids by the time anyone could notice.
-		checkout = await ensure_module_branch(adapter.workspace, step.ordinal, step.kind.value)
+		#
+		# The module is resolved from the approved decomposition rather than from the
+		# step, because FR-136 forbids one session per module: a module's work spans
+		# several steps, and those steps share its branch. A step no single module owns
+		# (bootstrap; a step spanning two) falls back to its own ordinal and kind.
+		checkout = await ensure_module_branch(
+			adapter.workspace,
+			step.ordinal,
+			step.kind.value,
+			module=await self._module_for(plan, step.clause_ids),
+		)
 		record = await adapter.dispatch(
 			step,
 			plan,

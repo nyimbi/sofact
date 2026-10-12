@@ -137,9 +137,18 @@ async def _has_commits(workspace: Path) -> bool:
 
 
 async def ensure_module_branch(
-	workspace: Path, step_ordinal: int, step_kind: str
+	workspace: Path, step_ordinal: int, step_kind: str, *, module: str | None = None
 ) -> ModuleCheckout:
-	"""Bring ``workspace`` to a repository on this step's branch, and report what happened.
+	"""Bring ``workspace`` to a repository on the branch this step's work belongs on.
+
+	FR-100 asks for a branch per **module**, and FR-136 forbids one goal session per
+	module — a module does not fit in one session's context — so a module's work spans
+	several steps and those steps share one branch. ``module`` is what makes that true:
+	when the caller can name the module a step belongs to, the branch is named for the
+	module and every step on that module lands on it. When it cannot (a bootstrap step
+	covers no clause; a step whose clauses span two modules), the branch falls back to
+	the step's ordinal and kind, because a branch named from a guess is worse than one
+	named from the step.
 
 	Idempotent by construction: an existing repository keeps its history, an existing
 	branch is checked out rather than recreated, and a workspace that is already on the
@@ -148,7 +157,11 @@ async def ensure_module_branch(
 	makes FR-100 checkable after the fact rather than only at the moment of dispatch.
 	"""
 	assert workspace.is_dir(), f"workspace does not exist: {workspace}"
-	branch = f"{BRANCH_PREFIX}{step_ordinal:03d}-{step_kind}"
+	branch = (
+		f"{BRANCH_PREFIX}{module}"
+		if module is not None
+		else f"{BRANCH_PREFIX}{step_ordinal:03d}-{step_kind}"
+	)
 	created_repository = False
 	created_branch = False
 
@@ -172,6 +185,7 @@ async def ensure_module_branch(
 		return ModuleCheckout(
 			branch=branch,
 			step_ordinal=step_ordinal,
+			module=module,
 			created_repository=created_repository,
 			created_branch=False,
 			base_branch=base_branch,
@@ -203,6 +217,7 @@ async def ensure_module_branch(
 	return ModuleCheckout(
 		branch=branch,
 		step_ordinal=step_ordinal,
+		module=module,
 		created_repository=created_repository,
 		created_branch=created_branch,
 		base_branch=base_branch,

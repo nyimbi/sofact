@@ -141,6 +141,65 @@ class TestTheProposal:
 		assert proposal.build_order()[0] is foundation, "a dependency is built first (FR-092)"
 
 
+class TestTheModuleLookup:
+	"""``module_for_clauses`` is what lets a step name the module it builds (FR-100)."""
+
+	def test_one_clause_resolves_to_its_owning_module(self, make_contract: MakeContract) -> None:
+		contract = make_contract(
+			("the api returns 200", oracle()),
+			("the total is summed", oracle()),
+		)
+		proposal = propose(contract)
+
+		for clause in contract.clauses:
+			found = proposal.module_for_clauses((clause.id,))
+
+			assert found is not None
+			assert clause.id in found.clause_ids
+
+	def test_no_clause_resolves_to_nothing(self, make_contract: MakeContract) -> None:
+		"""A bootstrap step covers no clause, so no module owns it.
+
+		Returning a module here would put a name in the log that the decomposition does
+		not support, which is why ``None`` is the answer rather than a fallback.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+
+		assert propose(contract).module_for_clauses(()) is None
+
+	def test_clauses_spanning_two_modules_resolve_to_neither(
+		self, make_contract: MakeContract
+	) -> None:
+		"""A step covering two modules belongs to neither, and must not pick one.
+
+		This is the case that keeps the lookup from silently answering with the first
+		match: a branch named for one of two modules would record work that also belongs
+		to the other.
+		"""
+		contract = make_contract(
+			("the api returns 200", oracle()),
+			("the total is summed", oracle()),
+		)
+		proposal = propose(contract)
+		both = tuple(c.id for c in contract.clauses)
+
+		assert proposal.module_for_clauses(both) is None
+
+	def test_a_clause_owned_by_two_modules_resolves_to_neither(
+		self, make_contract: MakeContract
+	) -> None:
+		"""Ambiguity is refused in the other direction too, not just by clause count."""
+		contract = make_contract(("the api returns 200", oracle()))
+		shared = contract.clauses[0].id
+		proposal = decomposition_of(
+			module_of("left", (shared,)),
+			module_of("right", (shared,)),
+			contract=contract,
+		)
+
+		assert proposal.module_for_clauses((shared,)) is None
+
+
 class TestTheClassifier:
 	def test_every_g7_marker_classifies_as_g7(self) -> None:
 		"""FR-126: G7 is L1 and human-authored, so a miss here raises the ceiling.
