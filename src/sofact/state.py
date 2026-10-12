@@ -34,6 +34,7 @@ from sofact.views import (
 	IntegrityCheck,
 	LedgerEntry,
 	LedgerKind,
+	PhaseAdvance,
 	ProjectState,
 	RepairAttempt,
 	ResearchRecord,
@@ -62,6 +63,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	integrity: list[IntegrityCheck] = []
 	integrations: list[IntegrationReport] = []
 	research: list[ResearchRecord] = []
+	phases: list[PhaseAdvance] = []
 	# Repair attempts are keyed by id with last-write-wins, like a re-answered
 	# elicitation dimension (ADR-0007): an attempt is written when its session ends and
 	# *settled* later against the verdict that session's check rendered, so the same
@@ -107,6 +109,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				integrity.append(IntegrityCheck.model_validate(payload["check"]))
 			case LedgerKind.INTEGRATION_CHECKED:
 				integrations.append(IntegrationReport.model_validate(payload["integration"]))
+			case LedgerKind.PHASE_ADVANCED:
+				phases.append(PhaseAdvance.model_validate(payload["advance"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -126,6 +130,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		integrations=tuple(integrations),
 		research=tuple(research),
 		repairs=tuple(repairs.values()),
+		phases=tuple(phases),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

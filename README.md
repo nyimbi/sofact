@@ -36,6 +36,7 @@ deterministic questionnaire without it.
 ```sh
 uv run sofact                     # start (or resume) a conversation
 uv run sofact status              # where am I
+uv run sofact phase               # which pipeline phase, and is a gate open
 uv run sofact ledger              # the append-only event log
 uv run sofact verify-ledger       # re-check the hash chain
 ```
@@ -52,6 +53,16 @@ deterministic floors rather than model judgement
 ([ADR-0007](docs/adr/0007-the-elicitation-gate-is-deterministic.md)), and the model is an
 *advisor* whose opinions are recorded but never authoritative
 ([ADR-0008](docs/adr/0008-the-model-is-advisory-only.md)).
+
+The pipeline is a phase machine with four human gates
+([ADR-0030](docs/adr/0030-phases-are-a-state-machine-and-a-gate-is-a-type-boundary.md)).
+`sofact phase` exits non-zero while a gate is open, and the gate cannot be passed by
+anything but an operator naming themselves:
+
+```sh
+uv run sofact gate --present P2            # the phase's machine checks are ready
+uv run sofact gate --approve P2 --by you   # the human half, recorded with who and when
+```
 
 A clause without an oracle cannot exist, which is the type-level enforcement of the
 spec's first rule: **no oracle, no autonomy** (FR-001).

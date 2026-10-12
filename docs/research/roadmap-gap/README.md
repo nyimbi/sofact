@@ -35,9 +35,9 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-057 envelope refusal | **Not built** | No envelope type; `ENVELOPE` appears nowhere in `src/`. |
 | FR-058 single adapter interface | **Implemented** | `ConfiguredHarnessAdapter` (`harness.py:819`), three specs; `test_every_shipped_harness_has_a_spec` (`test_harness.py:102`). |
 | FR-059 harness cannot reach oracle corpus/credentials | **Partly** | Prompt text only (`planner.py:127`). No sandbox, no check. |
-| FR-060 phase state machine, resumable after SIGKILL | **Not built** | Phases are not a state machine; no `init`/resume verb. |
-| FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py:719`); `test_planning_without_a_decomposition_is_refused` (`test_decomposition.py:411`). |
-| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows (`LedgerKind`, `views.py:1848`). There is **no P2 specification artifact** (FR-076) and no findings artifact beyond a research report path. |
+| FR-060 phase state machine, resumable after SIGKILL | **Implemented** (2026-10-12, ADR-0030) | `Phase`/`PHASE_SEQUENCE`/`PhaseAdvance` (`views.py`), `advance_phase`/`approve_gate`/`current_phase`/`open_gate` (`service.py`), `sofact phase` and `sofact gate`; `test_the_phase_survives_a_restart_because_it_is_in_the_log` (`test_phase.py`). A transition is its own ledger row, so a new process reads the phase off disk. |
+| FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
+| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, and a phase transition now is too (`LedgerKind.PHASE_ADVANCED`). There is still **no P2 specification artifact** (FR-076) and no findings artifact beyond a research report path, so P1 and P2 have no artefact of their own. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
 | FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:231`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
@@ -144,10 +144,10 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 46 |
+| Implemented | 47 |
 | Partly | 21 |
 | Deferred (ADR-0024) | 1 |
-| Not built | 49 |
+| Not built | 48 |
 | **Total FR numbers in the spec** | **144** (some are stated only as retained ranges, counted once) |
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
@@ -188,12 +188,14 @@ only).
    "verified requirements, not value" statement to be made. Every delivery-facing
    requirement is unbuilt. **Blocker: depends on 1 (traceability chain) and on a
    packaging decision (T2) that no ADR makes.**
-5. **No phase state machine and no resume (FR-060, FR-062, NFR-028).** The pipeline
-   is a sequence of CLI invocations over one log; the log survives, but "resume at
-   any phase boundary with no gate re-passed silently" is not a property anything
-   checks, and `sofact init` (the spec's planned verb, §23 M1) does not exist.
-   **Blocker: gates are enforced by refusal inside commands, not by a state
-   machine, so there is no phase state to resume *to*.**
+5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
+   2026-10-12 (ADR-0030).** Phases are a state machine in the ledger, a transition is
+   its own row, `sofact phase` exits non-zero while a gate is open, and
+   `test_the_phase_survives_a_restart_because_it_is_in_the_log` proves a second
+   process reads the phase off disk. **What remains of this gap is FR-062's other
+   half**: P1 and P2 still emit no artefact of their own, so a resume lands at a
+   phase whose output is nothing. `sofact init` (§23 M1) also remains unbuilt — it is
+   a convenience over the phase machine rather than a prerequisite for it.
 
 Honourable mentions, in the same ranking: FR-122/123/124 (no autonomy number is
 ever computed at delivery level, so the spec's most emphatic honesty requirement is

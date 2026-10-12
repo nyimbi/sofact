@@ -15,6 +15,7 @@ unreachable — which is what it was before this suite existed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -27,6 +28,8 @@ from typer.testing import CliRunner, Result
 from sofact.cli import app
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import SPECS, HarnessSpec, load_specs
+from sofact.service import FactoryService
+from sofact.views import GateCheck, Phase, PhaseStatus
 
 RUNNER = CliRunner()
 
@@ -122,6 +125,118 @@ class TestOneStateDirectory:
 		result = RUNNER.invoke(app, ["--version"])
 		assert result.exit_code == 0
 		assert result.output.startswith("sofact ")
+
+
+# --------------------------------------------------------------------------- #
+# the phase machine — FR-060 and FR-061 at the operator's surface
+# --------------------------------------------------------------------------- #
+
+
+class TestThePhaseVerb:
+	"""The phase must be readable, and an open gate must be a stop, not a label."""
+
+	def test_a_fresh_home_is_in_p0(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "phase"])
+		assert result.exit_code == 0, result.output
+		assert "phase P0" in result.output
+		assert "P0 elicit" in result.output
+
+	def test_status_shows_the_phase_alongside_the_goal(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "status"])
+		assert result.exit_code == 0, result.output
+		assert "phase P0" in result.output
+
+	def test_presenting_a_gate_stops_the_verb_with_a_nonzero_exit(self, home: Path) -> None:
+		"""FR-061 as an exit code: a script driving the pipeline can check this.
+
+		The gate is presented through the service because the phase's own command is
+		where machine checks are computed; this test is about the *reporting*, so it
+		only needs a gate to exist.
+		"""
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+		asyncio.run(
+			service.advance_phase(
+				Phase.SPECIFY,
+				PhaseStatus.AWAITING_GATE,
+				checks=(
+					GateCheck(
+						name="internal_consistency",
+						passed=True,
+						detail="no clause contradicts another",
+					),
+				),
+			)
+		)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "phase"])
+		assert result.exit_code == 1, result.output
+		assert "stopped at the specification gate" in result.output
+		assert "internal_consistency" in result.output
+		assert "sofact gate --approve P2" in result.output
+
+	def test_a_gate_with_no_checks_says_so_rather_than_offering_approval(self, home: Path) -> None:
+		"""An approval button over nothing presented is the theatre FR-080 warns about."""
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE))
+		result = RUNNER.invoke(app, ["--home", str(home), "phase"])
+		assert result.exit_code == 1
+		assert "nothing has been presented to approve yet" in result.output
+
+	def test_gate_requires_exactly_one_of_present_or_approve(self, home: Path) -> None:
+		both = RUNNER.invoke(
+			app, ["--home", str(home), "gate", "--present", "P2", "--approve", "P2"]
+		)
+		assert both.exit_code == 1
+		assert "exactly one of" in both.output
+
+		neither = RUNNER.invoke(app, ["--home", str(home), "gate"])
+		assert neither.exit_code == 1
+		assert "exactly one of" in neither.output
+
+	def test_an_unknown_phase_names_the_ones_that_exist(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--present", "P42"])
+		assert result.exit_code == 1
+		assert "not a phase" in result.output
+		assert "P0" in result.output
+
+	def test_approving_a_gate_nobody_presented_is_refused(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--approve", "P2"])
+		assert result.exit_code == 1
+		assert "cannot approve" in result.output
+
+	def test_an_ungated_phase_cannot_be_presented(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--present", "P5"])
+		assert result.exit_code == 1
+		assert "cannot present" in result.output
+
+	def test_present_then_approve_moves_the_pipeline_and_names_who(self, home: Path) -> None:
+		"""The whole operator path, end to end, through the CLI only."""
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+
+		presented = RUNNER.invoke(
+			app, ["--home", str(home), "gate", "--present", "P2", "--by", "operator"]
+		)
+		assert presented.exit_code == 0, presented.output
+		assert "P2 presented" in presented.output
+		assert "specification gate" in presented.output
+
+		approved = RUNNER.invoke(
+			app, ["--home", str(home), "gate", "--approve", "P2", "--by", "nyimbi"]
+		)
+		assert approved.exit_code == 0, approved.output
+		assert "P2 approved by nyimbi" in approved.output
+		assert "P3" in approved.output
+
+		after = RUNNER.invoke(app, ["--home", str(home), "phase"])
+		assert after.exit_code == 0, after.output
+		assert "phase P3" in after.output
 
 
 # --------------------------------------------------------------------------- #

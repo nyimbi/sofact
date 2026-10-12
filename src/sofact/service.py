@@ -57,6 +57,8 @@ from sofact.planner import (
 from sofact.state import fold
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
+	PHASE_GATE,
+	PHASE_SEQUENCE,
 	Advice,
 	ChainStatus,
 	Clause,
@@ -70,6 +72,7 @@ from sofact.views import (
 	ElicitationAnswer,
 	ElicitationDimension,
 	Evidence,
+	GateCheck,
 	Goal,
 	GoalPlan,
 	GoalStep,
@@ -79,6 +82,9 @@ from sofact.views import (
 	IntegrityCheck,
 	LedgerKind,
 	OracleDeclaration,
+	Phase,
+	PhaseAdvance,
+	PhaseStatus,
 	ProjectState,
 	Readiness,
 	RepairAttempt,
@@ -280,6 +286,135 @@ class FactoryService:
 		entry = self.ledger.append(kind, payload)
 		self._state = None
 		return entry
+
+	# ------------------------------------------------------- the phase machine
+
+	async def current_phase(self) -> Phase:
+		"""The phase the pipeline is in (FR-060)."""
+		return (await self.state()).current_phase
+
+	async def phase_status(self, phase: Phase) -> PhaseStatus:
+		"""Where ``phase`` stands, ``PENDING`` if no transition has named it."""
+		return (await self.state()).phase_status(phase)
+
+	async def open_gate(self) -> PhaseAdvance | None:
+		"""The gate the pipeline is stopped at, or ``None`` (FR-061).
+
+		The one question a scheduler must ask before doing machine work. It is a method
+		rather than a field so that no caller can hold a stale answer across an append.
+		"""
+		return (await self.state()).open_gate
+
+	async def advance_phase(
+		self,
+		phase: Phase,
+		status: PhaseStatus,
+		*,
+		by: str = "factory",
+		checks: tuple[GateCheck, ...] = (),
+		note: str | None = None,
+	) -> PhaseAdvance:
+		"""Record a phase transition (FR-060).
+
+		Deliberately *not* the way a gate is passed. This is the machine half: it can
+		move an ungated phase, and it can move a gated phase to
+		:attr:`~sofact.views.PhaseStatus.AWAITING_GATE`, but
+		:class:`~sofact.views.PhaseAdvance` refuses to construct a completed gate phase
+		with no approver — so there is no call to this method, with any arguments, that
+		could pass a gate. The human half is :meth:`approve_gate`, and FR-061's hard stop
+		is the type boundary between them rather than a check either one performs.
+		"""
+		state = await self.state()
+		previous = state.phase_status(phase)
+		if previous is PhaseStatus.COMPLETE:
+			raise ValueError(
+				f"{phase.value} is already complete; a phase is not re-entered by "
+				"advancing it again (FR-060)"
+			)
+		if status is PhaseStatus.COMPLETE and phase in PHASE_GATE:
+			raise ValueError(
+				f"{phase.value} is a gate phase: use approve_gate, which names the human "
+				f"who passed {PHASE_GATE[phase].value} (FR-061)"
+			)
+		order = PHASE_SEQUENCE.index(phase)
+		# Every earlier phase must be complete. This single check is what makes FR-061
+		# structural: the only route to P5 runs through P2 and P3, so there is no
+		# configuration in which the factory reaches machine work past an unapproved
+		# gate. It also subsumes ordering — a later phase cannot have been worked while
+		# an earlier one is incomplete, because reaching the later one required the
+		# earlier one to complete first. An explicit "is a later phase already done"
+		# guard was written here first and then removed as unreachable: a guard that
+		# cannot fire is a claim about behaviour that nothing tests.
+		behind = [
+			p.value
+			for p in PHASE_SEQUENCE[:order]
+			if state.phase_status(p) is not PhaseStatus.COMPLETE
+		]
+		if behind:
+			raise ValueError(
+				f"{phase.value} cannot start while {behind[0]} is not complete: every "
+				"earlier phase must finish, so no phase can be reached without passing "
+				"the gates before it (FR-061, NFR-028)"
+			)
+		if status is PhaseStatus.AWAITING_GATE and phase not in PHASE_GATE:
+			raise ValueError(f"{phase.value} has no gate to await (FR-061)")
+		if status is PhaseStatus.ACTIVE:
+			blocking = state.open_gate
+			if blocking is not None:
+				raise ValueError(
+					f"{blocking.phase.value} is awaiting {PHASE_GATE[blocking.phase].value}: "
+					"no machine work downstream of an unapproved gate (FR-061)"
+				)
+		advance = PhaseAdvance(
+			phase=phase,
+			status=status,
+			at=now(),
+			by=by,
+			checks=checks,
+			note=note,
+		)
+		self._commit(LedgerKind.PHASE_ADVANCED, {"advance": advance.model_dump(mode="json")})
+		return advance
+
+	async def approve_gate(self, phase: Phase, *, by: str) -> PhaseAdvance:
+		"""Pass ``phase``'s gate, naming who did (FR-061, FR-087).
+
+		The only path to a completed gate phase. It refuses when the machine half has
+		not been presented — a gate nobody has been shown is not a gate that was passed
+		— and it refuses a failed check for the same reason
+		:class:`~sofact.views.DecompositionGate` does: approval cannot make an unsound
+		artefact sound.
+		"""
+		assert by.strip(), "a gate approval names who approved it"
+		state = await self.state()
+		gate = PHASE_GATE.get(phase)
+		if gate is None:
+			raise ValueError(f"{phase.value} has no gate to approve (FR-061)")
+		if state.phase_status(phase) is PhaseStatus.COMPLETE:
+			raise ValueError(f"{phase.value} is already complete")
+		pending = state.phase_advance(phase)
+		if pending is None or pending.status is not PhaseStatus.AWAITING_GATE:
+			raise ValueError(
+				f"{phase.value} is not awaiting {gate.value}; there is nothing to approve "
+				"until the phase has presented its machine checks (FR-080)"
+			)
+		failed = tuple(c for c in pending.checks if not c.passed)
+		if failed:
+			names = ", ".join(c.name for c in failed)
+			raise ValueError(
+				f"{gate.value} has failed machine checks ({names}); approval cannot make "
+				"an unsound artefact sound (FR-061)"
+			)
+		approved = pending.model_copy(
+			update={
+				"status": PhaseStatus.COMPLETE,
+				"approved_by": by,
+				"approved_at": now(),
+				"by": by,
+			}
+		)
+		self._commit(LedgerKind.PHASE_ADVANCED, {"advance": approved.model_dump(mode="json")})
+		return approved
 
 	# --------------------------------------------------------------- P0: goals
 

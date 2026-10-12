@@ -31,6 +31,8 @@ from sofact.service import (
 	resolve_tools,
 )
 from sofact.views import (
+	PHASE_GATE,
+	PHASE_SEQUENCE,
 	ClauseKind,
 	Decomposition,
 	DecompositionGate,
@@ -39,6 +41,8 @@ from sofact.views import (
 	GoalStyle,
 	HarnessProfile,
 	IntegrityOutcome,
+	Phase,
+	PhaseStatus,
 	ProbeOutcome,
 	RepairOutcome,
 	ResearchMode,
@@ -385,6 +389,14 @@ async def _status(svc: FactoryService) -> None:
 	typer.secho(f"goal {goal.id}", fg="cyan", bold=True)
 	typer.echo(f"  {goal.statement}")
 
+	state = await svc.state()
+	current = state.current_phase
+	stopped = state.open_gate
+	line = f"\nphase {current.value}"
+	if stopped is not None:
+		line += f" — stopped at the {PHASE_GATE[stopped.phase].value} gate"
+	typer.secho(line, fg="yellow" if stopped is not None else "white", bold=True)
+
 	readiness = await svc.readiness(goal.id)
 	done, total = readiness.progress
 	typer.secho(f"\nreadiness {done}/{total}", fg="white", bold=True)
@@ -424,6 +436,119 @@ def verify_ledger(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
 		return
 	typer.secho(f"BROKEN at entry {chain.broken_at}: {chain.reason}", fg="red")
 	raise typer.Exit(code=1)
+
+
+@app.command()
+def phase(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Show where the pipeline is, and stop if a gate is open (FR-060)."""
+	asyncio.run(_phase(_service(_home_of(ctx, home))))
+
+
+async def _phase(svc: FactoryService) -> None:
+	"""Print the phase machine's current position.
+
+	The exit code answers one question: is machine work permitted right now? An open
+	gate is a stop, because FR-061 makes it one — a script that drives the pipeline can
+	check this verb rather than re-deriving the gate table from the phase.
+	"""
+	state = await svc.state()
+	current = state.current_phase
+	typer.secho(f"phase {current.value}", fg="cyan", bold=True)
+
+	for entry in PHASE_SEQUENCE:
+		status = state.phase_status(entry)
+		mark = {
+			PhaseStatus.COMPLETE: typer.style("✓", fg="green"),
+			PhaseStatus.ACTIVE: typer.style("▶", fg="cyan"),
+			PhaseStatus.AWAITING_GATE: typer.style("‖", fg="yellow"),
+			PhaseStatus.PENDING: typer.style("·", fg="bright_black"),
+		}[status]
+		gate = PHASE_GATE.get(entry)
+		label = f"{entry.value} {entry.name.lower()}"
+		if gate is not None:
+			label += f"  [{gate.value}]"
+		typer.echo(f"  {mark} {label:<28} {status.value}")
+
+	open_gate = state.open_gate
+	if open_gate is not None:
+		gate = PHASE_GATE[open_gate.phase]
+		typer.secho(
+			f"\n  stopped at the {gate.value} gate. No machine work downstream of an "
+			f"unapproved gate (FR-061).",
+			fg="yellow",
+		)
+		for check in open_gate.checks:
+			mark = typer.style("✓", fg="green") if check.passed else typer.style("✗", fg="red")
+			typer.echo(f"    {mark} {check.name}: {check.detail}")
+		if not open_gate.checks:
+			typer.secho(
+				"    nothing has been presented to approve yet: run the phase that "
+				"produces the artefact first (FR-080).",
+				fg="bright_black",
+			)
+		else:
+			typer.secho(
+				f"    approve with: sofact gate --approve {open_gate.phase.value}",
+				fg="bright_black",
+			)
+		raise typer.Exit(code=1)
+
+
+@app.command()
+def gate(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	approve: str | None = typer.Option(
+		None, "--approve", help="The phase whose gate to pass, e.g. P2."
+	),
+	present: str | None = typer.Option(
+		None, "--present", help="Record that a phase's machine checks are ready, e.g. P2."
+	),
+	by: str = typer.Option("operator", help="Who is deciding. Recorded, not verified."),
+) -> None:
+	"""Present or approve a gate (FR-061). Approval is the human half and names who."""
+	asyncio.run(_gate(_service(_home_of(ctx, home)), approve, present, by))
+
+
+async def _gate(svc: FactoryService, approve: str | None, present: str | None, by: str) -> None:
+	if (approve is None) == (present is None):
+		typer.secho("name exactly one of --present or --approve.", fg="yellow")
+		raise typer.Exit(code=1)
+	try:
+		named = Phase(approve if approve is not None else present)
+	except ValueError as exc:
+		choices = ", ".join(p.value for p in PHASE_SEQUENCE)
+		typer.secho(f"not a phase: {approve or present!r}. One of: {choices}", fg="yellow")
+		raise typer.Exit(code=1) from exc
+
+	if present is not None:
+		# The machine half. Checks are empty here because this verb records that the
+		# phase's artefact is ready to be looked at; the phase's own command is where
+		# machine checks are computed, and it calls the service directly.
+		try:
+			advance = await svc.advance_phase(named, PhaseStatus.AWAITING_GATE, checks=(), by=by)
+		except ValueError as exc:
+			typer.secho(f"cannot present: {exc}", fg="yellow")
+			raise typer.Exit(code=1) from exc
+		gate_name = PHASE_GATE.get(named)
+		typer.secho(
+			f"\n{named.value} presented"
+			+ (f" at the {gate_name.value} gate" if gate_name is not None else "")
+			+ f" ({len(advance.checks)} machine check(s)).",
+			fg="cyan",
+		)
+		return
+
+	try:
+		approved = await svc.approve_gate(named, by=by)
+	except ValueError as exc:
+		typer.secho(f"cannot approve: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(
+		f"\n{named.value} approved by {approved.approved_by} at {approved.approved_at}. "
+		f"Pipeline is now in {await svc.current_phase()}.",
+		fg="green",
+	)
 
 
 @app.command()

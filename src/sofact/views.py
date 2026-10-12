@@ -74,6 +74,10 @@ __all__ = [
 	"ModuleClass",
 	"OracleClass",
 	"OracleDeclaration",
+	"Phase",
+	"PhaseAdvance",
+	"PhaseGate",
+	"PhaseStatus",
 	"PlanStepKind",
 	"ProbeOutcome",
 	"ProjectState",
@@ -771,6 +775,151 @@ class DecompositionGate(View):
 		approve a *sound* decomposition, but approval cannot make an unsound one sound.
 		"""
 		return not self.failed and self.is_approved
+
+
+# --------------------------------------------------------------------------- #
+# the phase machine — FR-060, FR-061, NFR-028
+# --------------------------------------------------------------------------- #
+
+
+class Phase(StrEnum):
+	"""The production pipeline's phases (spec §3.1), in order.
+
+	Named as a closed enum because FR-060 asks for *explicit* transitions: a phase
+	the code cannot spell is a phase no transition can name, and "which phase are we
+	in" would go back to being inferred from whichever ledger rows happen to exist.
+
+	P7 is a member even though §3.2's summary table omits it. The diagram places
+	``P7 Integrate`` between P6 and the deploy gate, and FR-111 to FR-116 give it
+	requirements and two checks, so the table is the thing that is wrong. A phase
+	machine built from the table would have nowhere to record an integration pass,
+	which is the artefact FR-114's minimum violating set is read from.
+	"""
+
+	ELICIT = "P0"
+	RESEARCH = "P1"
+	SPECIFY = "P2"
+	DECOMPOSE = "P3"
+	CONTRACT = "P4"
+	BUILD = "P5"
+	VERIFY = "P6"
+	INTEGRATE = "P7"
+	DELIVER = "P8"
+	EVOLVE = "P9"
+
+
+PHASE_SEQUENCE: tuple[Phase, ...] = tuple(Phase)
+"""Pipeline order. ``tuple(Phase)`` because a StrEnum's member order is its definition
+order, so the sequence cannot drift from the enum by being written out twice."""
+
+
+class PhaseGate(StrEnum):
+	"""The four human gates (spec §3.3). Deliberately four, not ten.
+
+	§3.3 places a gate only where a machine cannot decide because there is no ground
+	truth to check against. Adding one at P5/P6 would restore the per-diff review
+	bottleneck the product exists to remove, which is why this enum is short and why
+	the phase machine must not grow a fifth without that argument being made.
+	"""
+
+	SPECIFICATION = "specification"
+	DECOMPOSITION = "decomposition"
+	CONTRACT_SAMPLE = "contract_sample"
+	DEPLOY = "deploy"
+
+
+PHASE_GATE: dict[Phase, PhaseGate] = {
+	Phase.SPECIFY: PhaseGate.SPECIFICATION,
+	Phase.DECOMPOSE: PhaseGate.DECOMPOSITION,
+	Phase.CONTRACT: PhaseGate.CONTRACT_SAMPLE,
+	Phase.DELIVER: PhaseGate.DEPLOY,
+}
+"""Which phases are gated. Read from §3.3's list, not from the diagram's boxes — the
+diagram draws P2 and P3 as gates and P4's is sampled rather than blocking, so a
+reader of the picture alone would place three."""
+
+
+class PhaseStatus(StrEnum):
+	"""Where a phase is. ``AWAITING_GATE`` is the one that carries FR-061.
+
+	A gated phase whose machine work is done is *not* complete and *not* merely active:
+	it is waiting for a human, and FR-061 says nothing downstream may proceed while it
+	waits. Collapsing that into ``ACTIVE`` would make a phase that cannot advance look
+	identical to one that is working, which is the state an operator most needs to see.
+	"""
+
+	PENDING = "pending"
+	ACTIVE = "active"
+	AWAITING_GATE = "awaiting_gate"
+	COMPLETE = "complete"
+
+
+class PhaseAdvance(View):
+	"""One transition of the phase machine: where it went, and who moved it (FR-060).
+
+	Recorded as its own ledger row rather than derived, because FR-060 asks for
+	transitions that are "explicit ... persisted durably, auditable" and a value
+	recomputed from other rows is none of those — it is a guess that happens to agree
+	with the log today.
+
+	The two validators below are the structural half of FR-061. A gate phase cannot be
+	marked complete without naming who approved it, and a phase that has no gate cannot
+	carry an approval at all. Both are refusals to *construct* a record that would
+	claim something the pipeline never did, which is stronger than checking for it
+	later: there is no code path that can write the lie in the first place.
+	"""
+
+	phase: Phase
+	status: PhaseStatus
+	at: datetime
+	by: NonEmptyStr
+	"""Who moved it: ``operator`` for a gate, ``factory`` for machine work."""
+
+	checks: tuple[GateCheck, ...] = ()
+	"""What the machine could check before the gate, where there is one.
+
+	Empty for an ungated phase. ``GateCheck`` is reused rather than re-invented because
+	its property — a check carries the reason it failed, not only a boolean — is exactly
+	what FR-080 needs when it asks the P2 gate to present the specification in the
+	operator's language.
+	"""
+
+	approved_by: NonEmptyStr | None = None
+	approved_at: datetime | None = None
+	note: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _approval_is_whole(self) -> Self:
+		if (self.approved_by is None) != (self.approved_at is None):
+			raise ValueError("an approval names both who approved it and when")
+		return self
+
+	@model_validator(mode="after")
+	def _a_gate_is_never_passed_by_a_machine(self) -> Self:
+		gated = self.phase in PHASE_GATE
+		if self.approved_by is not None and not gated:
+			raise ValueError(
+				f"{self.phase.value} has no gate, so an approval on it would name a "
+				"decision the pipeline never asks for (FR-061)"
+			)
+		if self.status is PhaseStatus.COMPLETE and gated and self.approved_by is None:
+			raise ValueError(
+				f"{self.phase.value} is a gate phase and cannot be complete without an "
+				f"approval; FR-061 makes {PHASE_GATE[self.phase].value} a hard stop"
+			)
+		if self.status is PhaseStatus.AWAITING_GATE and not gated:
+			raise ValueError(f"{self.phase.value} has no gate to await (FR-061)")
+		return self
+
+	@property
+	def gate(self) -> PhaseGate | None:
+		"""The gate this phase must pass, or ``None`` for an ungated phase."""
+		return PHASE_GATE.get(self.phase)
+
+	@property
+	def is_blocking(self) -> bool:
+		"""Whether this transition leaves the pipeline stopped at a gate (FR-061)."""
+		return self.status is PhaseStatus.AWAITING_GATE
 
 
 # --------------------------------------------------------------------------- #
@@ -1866,6 +2015,7 @@ class LedgerKind(StrEnum):
 	REPAIR_ATTEMPTED = "repair.attempted"
 	DECOMPOSITION_PROPOSED = "decomposition.proposed"
 	DECOMPOSITION_GATED = "decomposition.gated"
+	PHASE_ADVANCED = "phase.advanced"
 
 
 class LedgerEntry(View):
@@ -1975,6 +2125,51 @@ class ProjectState(View):
 	research: tuple[ResearchRecord, ...] = ()
 	repairs: tuple[RepairAttempt, ...] = ()
 	notes: tuple[str, ...] = ()
+	phases: tuple[PhaseAdvance, ...] = ()
+
+	@property
+	def current_phase(self) -> Phase:
+		"""The phase the pipeline is in, derived from the transitions (FR-060).
+
+		The last transition *that completed* names the phase whose work is next, so a
+		completed P1 means the pipeline is in P2. With no transitions at all it is P0,
+		which is the honest answer for a goal nobody has started on: a fresh log has
+		done none of the pipeline, and ``Phase.ELICIT`` is where the first work goes.
+
+		A phase left ``AWAITING_GATE`` is *not* skipped past. It reports itself as the
+		current phase, because FR-061 makes the gate a hard stop and a machine that
+		reported the next phase as current while a gate was open would be describing
+		work it is forbidden to do.
+		"""
+		if not self.phases:
+			return Phase.ELICIT
+		latest = self.phases[-1]
+		if latest.status is PhaseStatus.COMPLETE:
+			index = PHASE_SEQUENCE.index(latest.phase)
+			return PHASE_SEQUENCE[index + 1] if index + 1 < len(PHASE_SEQUENCE) else latest.phase
+		return latest.phase
+
+	def phase_status(self, phase: Phase) -> PhaseStatus:
+		"""Where ``phase`` stands. ``PENDING`` for a phase no transition has named."""
+		matching = [p for p in self.phases if p.phase is phase]
+		return matching[-1].status if matching else PhaseStatus.PENDING
+
+	def phase_advance(self, phase: Phase) -> PhaseAdvance | None:
+		"""The most recent transition recorded for ``phase``, if any."""
+		matching = [p for p in self.phases if p.phase is phase]
+		return matching[-1] if matching else None
+
+	@property
+	def open_gate(self) -> PhaseAdvance | None:
+		"""The gate the pipeline is stopped at, or ``None`` if it is not stopped.
+
+		This is FR-061 as a query: a caller that wants to know whether machine work may
+		proceed asks this, rather than comparing phases and re-deriving the gate table.
+		"""
+		if not self.phases:
+			return None
+		latest = self.phases[-1]
+		return latest if latest.is_blocking else None
 
 	def goal(self, goal_id: str) -> Goal | None:
 		"""Look up a goal by id."""

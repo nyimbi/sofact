@@ -161,13 +161,13 @@ independent evidence about which of SoFact's unbuilt requirements are load-beari
 
 Dependency-ordered, largest lever first:
 
-1. **FR-060 phase state machine + resume** (§3.2) — the largest of the three and the
-   only one that unblocks something outside this note. A P2 gate (FR-080) needs phases
-   to gate, and FR-062's "every phase emits a durable artifact" needs phases to be
-   emitted per phase. The roadmap audit's **Gap #1** — the P2 specification and system
-   model, which blocks four requirements and both remaining P7 checks — sits behind it.
-   The ledger is already the durable, auditable store FR-060 asks for, which is why
-   this is a build item and not a redesign.
+1. ~~**FR-060 phase state machine + resume** (§3.2)~~ — **done 2026-10-12**, ADR-0030.
+   Phases are a state machine in the ledger, `sofact phase` reports position and exits
+   non-zero while a gate is open, and a restart reads the phase off disk. FR-061 is now
+   structural: a completed gate phase cannot be constructed without an approver, and P5
+   is unreachable without P2 and P3. **This unblocks the P2 gate**, which is the
+   roadmap audit's Gap #1 — the specification and system model, four requirements and
+   both remaining P7 checks.
 2. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem, and the
    cheapest way to make an existing claim measured rather than asserted, which is what
    FR-148 requires. Pairs with §3.1: an isolation boundary nothing has observed is the
