@@ -14,9 +14,18 @@ capability is refused here only if an FR or ADR refuses it.
 
 **Outcome.** Twelve capabilities are already covered, several by a mechanism with a
 property the vendor's lacks. Five are real gaps against SoFact's own requirements, and
-three of the five have a *deferral whose stated condition has since fired*. Four are
-refused with a spec reason, and four are not applicable because the vendor's scope is
-broader than SoFact's and the extra scope is a company simulator's, not a factory's.
+three of the five are **deferrals whose own stated condition has been met** — the tree
+is wrong about itself, which is the failure mode this ledger has been bitten by before.
+Four are refused with a spec reason, and four are not applicable because the vendor's
+scope is broader than SoFact's and the extra scope is a company simulator's, not a
+factory's.
+
+**The useful reading.** The neighbours are not a feature list to copy. Every gap this
+note finds is a requirement **SoFact already wrote for itself** — which makes OpenRig
+and Paperclip independent evidence about which unbuilt requirements are load-bearing,
+rather than a source of new ones. The one capability they have that SoFact genuinely
+lacked was atomic checkout, and that was found and fixed in
+[neighbouring-orchestrators](../neighbouring-orchestrators/README.md) before this note.
 
 ## 1. Method, and what a row is allowed to claim
 
@@ -90,31 +99,36 @@ fails to tell you.
 ADR-0024 defers worktrees, and the spec's own table states the condition: FR-141 is
 deferred "until a wave runs concurrently or a plan spans more than one module"
 (`product-spec.md:1240`). ADR-0024 §3 states it again as "whichever comes first".
-**The multi-module half has fired, and the concurrent half has fired at the API but not
-at the surface.** Measured:
+Measured:
 
-- `dispatch_plan(concurrent=True)` exists and `asyncio.gather`s a wave
+- **The multi-module half has fired.** A plan spanning more than one module is not
+  merely possible, it is the case `_module_for` was written for: it resolves a step's
+  branch from its clauses, and its own docstring names "a step whose clauses span two
+  modules" as a real input (`service.py:904`). Any decomposition with two modules
+  produces one. `grep -rn worktree src/` returns four hits and every one is a comment
+  saying it is deferred, including `harness.py:732` and `harness.py:1685`, where the
+  *probe* tells the operator that real confinement is elsewhere.
+- **The concurrent half has fired at the API and not at the surface.**
+  `dispatch_plan(concurrent=True)` exists and `asyncio.gather`s a wave
   (`service.py:1038`), but **the CLI has no flag for it** — `grep -n concurrent
   src/sofact/cli.py` returns one hit and it is a print of the word "concurrent" for a
-  wave heading. So the operator cannot turn concurrency on; only a test can, and one
-  does (`test_service.py:802`). ADR-0024's "the operator owns" is currently the
-  operator being unable to choose.
-- A plan spanning more than one module is not merely possible, it is the case
-  `_module_for` was written for: it resolves a step's branch from its clauses, and its
-  own docstring names "a step whose clauses span two modules" as a real input
-  (`service.py:904`). Any decomposition with two modules produces one.
+  wave heading. Only a test can turn it on, and one does (`test_service.py:802`).
+  ADR-0024's "the operator owns" is currently the operator being unable to choose.
 
-ADR-0024 §5 is the reason this matters at zero parallelism, and it is the strongest
-argument in that record: *"An oracle runs against a workspace. Two sessions sharing one
-means clause A's verdict is polluted by session B's edits, and the factory loses the
-ability to say whose work a green light describes — which is FR-138 and FR-006. That
-argument holds with zero parallelism."* The ledger lock (ADR-0029) protects the **log**;
-nothing protects the **checkout**. Fixing the log and leaving the tree unguarded fixes
-the cheaper half of the same race.
+**The live risk is therefore low, and this row is not the emergency the framing
+suggests.** ADR-0024 §5's strongest argument — *"an oracle runs against a workspace, so
+two sessions sharing one means clause A's verdict is polluted by session B's edits"* —
+is about two sessions running **at once**, and the operator cannot currently cause that.
+Sequential multi-module steps sharing a tree is by design: the branches are cumulative,
+and `sealed_files` exists so a module's own files stay attributable.
 
-`grep -rn worktree src/` returns four hits and every one is a comment saying it is
-deferred — including `harness.py:732` and `harness.py:1685`, where the *probe* tells the
-operator that real confinement is elsewhere.
+What is actually wrong is narrower and worth stating precisely: **a requirement is
+deferred on a condition its own author wrote, and that condition is now met.** The
+honest resolutions are to build it or to restate the condition as "when concurrency is
+reachable from the operator's surface" — and the second is a decision that belongs in
+ADR-0024, not a silence. Either way the tree should stop claiming a trigger that has
+fired. This is a lower-priority item than §4 implies, and it is listed first in §5 only
+because it is cheap to *decide*.
 
 ### 3.2 FR-060 resumable phase machine
 
@@ -145,26 +159,33 @@ independent evidence about which of SoFact's unbuilt requirements are load-beari
 
 ## 5. Build order
 
-Dependency-ordered, cheapest first where the order allows:
+Dependency-ordered, largest lever first:
 
-1. **FR-141 worktree per module** (§3.1) — the condition has fired, the race is live at
-   zero parallelism (ADR-0024 §5), and `git worktree add` is already the tool. It
-   unblocks honest concurrency, and it is also what lets `concurrent` become an operator
-   flag rather than a test-only parameter.
-2. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem; makes
-   the isolation claim measured rather than asserted, which is what FR-148 requires.
-3. **FR-060 phase state machine + resume** (§3.2) — the largest of the three; it is
-   also the prerequisite for a P2 gate (FR-080) and for FR-062's "every phase emits a
-   durable artifact".
+1. **FR-060 phase state machine + resume** (§3.2) — the largest of the three and the
+   only one that unblocks something outside this note. A P2 gate (FR-080) needs phases
+   to gate, and FR-062's "every phase emits a durable artifact" needs phases to be
+   emitted per phase. The roadmap audit's **Gap #1** — the P2 specification and system
+   model, which blocks four requirements and both remaining P7 checks — sits behind it.
+   The ledger is already the durable, auditable store FR-060 asks for, which is why
+   this is a build item and not a redesign.
+2. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem, and the
+   cheapest way to make an existing claim measured rather than asserted, which is what
+   FR-148 requires. Pairs with §3.1: an isolation boundary nothing has observed is the
+   hazard S26 names outright.
+3. **FR-141 worktree per module** (§3.1) — cheap to *decide* (the deferral's condition
+   has fired and the tree should stop claiming otherwise) and moderate to build. It is
+   not urgent while `concurrent` is unreachable from the CLI, and building it is also
+   what would let `concurrent` become an operator flag.
 4. **Ledger rollback to a chosen entry** (§2.1) — an operator verb over the fold;
    pairs with FR-094 and is what Paperclip's "rollback" is. Small, and only safe once
-   the tree is isolated (item 1).
+   the tree is isolated (item 3).
 5. **FR-070 addressable source ledger** (§2.4) — the stronger version of the durable
    activity log both vendors ship; already recorded as unbuilt in the roadmap audit.
 
-Items 1–3 are the answer to the operator's request. Items 4–5 are the two rows where
-the vendor's version is *weaker* than an FR SoFact already has, and they are listed so
-the gap is recorded rather than rediscovered.
+Items 1–3 are the answer to the operator's request, in the order that serves the rest
+of the roadmap rather than the order the request was phrased in. Items 4–5 are the two
+rows where the vendor's version is *weaker* than an FR SoFact already has, and they are
+listed so the gap is recorded rather than rediscovered.
 
 ## 6. What this note does not settle
 
