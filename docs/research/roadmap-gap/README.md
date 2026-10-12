@@ -32,7 +32,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-038 verifier/executor import direction | **Implemented** | `test_verifier_cannot_reach_the_executor` (`test_verification.py:72`) scans this file's imports. |
 | FR-049 model-agnostic | **Implemented** | `SOFACT_MODEL` / `--model` resolved by the harness registry; `test_the_probe_reports_the_model_it_measured` (`test_cli.py:406`). |
 | FR-052–056 fine-tuning, monetization | **Not built** | Prose only (§18.3, §18.5). |
-| FR-057 envelope refusal | **Not built** | No envelope type; `ENVELOPE` appears nowhere in `src/`. |
+| FR-057 envelope refusal | **Implemented** (2026-10-13, ADR-0039) | `DeliveryEnvelope`/`DimensionBound` (`views.py`), `load_envelope`/`measure` (`envelope.py`), the `within_delivery_envelope` check in P3's gate (`decomposition.py`), `SOFACT_ENVELOPE` and `sofact envelope` (`cli.py`). Refuses the **ceiling** and names the dimension; a dimension below its floor is reported and passes, because §1.3's numbers are targets and §1.4 wants small deliveries buildable. Four of eight dimensions are measured at P3; the rest are named as unmeasured with what would have to exist. `TestTheGateRefusesAnOverScopedProposal` (`test_envelope.py`), `TestTheEnvelopeVerb` (`test_cli.py`). |
 | FR-058 single adapter interface | **Implemented** | `ConfiguredHarnessAdapter` (`harness.py:819`), three specs; `test_every_shipped_harness_has_a_spec` (`test_harness.py:102`). |
 | FR-059 harness cannot reach oracle corpus/credentials | **Partly** | Prompt text only (`planner.py:127`). No sandbox, no check. |
 | FR-060 phase state machine, resumable after SIGKILL | **Implemented** (2026-10-12, ADR-0030) | `Phase`/`PHASE_SEQUENCE`/`PhaseAdvance` (`views.py`), `advance_phase`/`approve_gate`/`current_phase`/`open_gate` (`service.py`), `sofact phase` and `sofact gate`; `test_the_phase_survives_a_restart_because_it_is_in_the_log` (`test_phase.py`). A transition is its own ledger row, so a new process reads the phase off disk. |
@@ -142,30 +142,32 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the FR-115/FR-116 unit, by reading
+Recounted from the table above on 2026-10-13 after the §1.3 envelope unit, by reading
 the verdict cell of every row with a script rather than by arithmetic on the previous
 snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
-67/26/0/26, then 69/25/0/25) did not match the rows they claimed to count. The script
-now reads the cell rather than grepping the line, because a row whose *evidence* names
-another verdict would otherwise be counted twice.
+67/26/0/26, then 69/25/0/25, then 71/25/0/23) did not match the rows they claimed to
+count. The script now reads the cell rather than grepping the line, because a row whose
+*evidence* names another verdict would otherwise be counted twice.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 71 |
+| Implemented | 72 |
 | Partly | 25 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 23 |
+| Not built | 22 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
 this counts the classification units rather than the FR identifiers inside them.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
-restated, so there is nothing to check them against. Of the new ones, NFR-025
-(envelope) and NFR-030 (per-module attribution) are **not built**; NFR-027
-(version-controlled artifacts) is **partly** (ledger + reports); NFR-028 (resume)
-is **not built**; NFR-029 (per-phase wall-clock bound) is **partly** (per-step
-only).
+restated, so there is nothing to check them against. Of the new ones, **NFR-025
+(envelope) is now implemented** (2026-10-13, ADR-0039): §1.3's eight dimensions are a
+type, the envelope is loaded from JSON with *unset* as a distinct state, and
+`measure` returns the actuals the delivery report must carry. NFR-030 (per-module
+attribution) is **not built**; NFR-027 (version-controlled artifacts) is **partly**
+(ledger + reports); NFR-028 (resume) is **not built**; NFR-029 (per-phase wall-clock
+bound) is **partly** (per-step only).
 
 ---
 
@@ -210,8 +212,14 @@ only).
 4. **No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).** There is no
    delivery artifact, no report, no handover, and nowhere for FR-086's
    "verified requirements, not value" statement to be made. Every delivery-facing
-   requirement is unbuilt. **Blocker: depends on 1 (traceability chain) and on a
-   packaging decision (T2) that no ADR makes.**
+   requirement is unbuilt. **Narrowed 2026-10-13 (ADR-0039):** FR-118's fifth required
+   statement — "the actuals against the §1.3 envelope" — now has an artefact to report
+   from, because FR-057 and NFR-025 are implemented and `measure` derives the actuals
+   from the log. That removes one of the two dependencies the gap was blocked on and
+   leaves the packaging decision (T2), which no ADR makes: FR-117 asks for a
+   *deployable* artifact, and what "deployable" means depends on the runtime
+   ADR-0005 refuses to assume. The report, the deploy gate, the handover and
+   FR-120's machine-usable surface are unblocked and unbuilt.
 5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
    2026-10-13 (ADR-0030, ADR-0031, ADR-0035, ADR-0037).** Phases are a state machine in
    the ledger, a transition is its own row, `sofact phase` exits non-zero while a gate

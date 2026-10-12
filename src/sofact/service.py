@@ -88,6 +88,7 @@ from sofact.views import (
 	DeclarationPrecision,
 	Decomposition,
 	DecompositionGate,
+	DeliveryEnvelope,
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
@@ -345,6 +346,7 @@ class FactoryService:
 		llm: LlmClient | None = None,
 		*,
 		specs: Mapping[str, HarnessSpec] | None = None,
+		envelope: DeliveryEnvelope | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -352,12 +354,23 @@ class FactoryService:
 		passes one here rather than patching module state (FR-156); an operator who can
 		name a harness without editing code is also an operator who can be told which
 		harnesses exist, which is what :meth:`harness_table` reports.
+
+		``envelope`` is §1.3's, and ``None`` means *no envelope is configured* rather
+		than "the default one". The distinction is NFR-025's: the envelope is
+		configuration, and a factory that silently applied a default would report
+		actuals against numbers nobody chose. ``None`` leaves P3's FR-057 check asserting
+		nothing and the delivery report saying so.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
 		self.llm = llm
 		self._specs: Mapping[str, HarnessSpec] = SPECS if specs is None else dict(specs)
+		self._envelope = envelope
 		self._state: ProjectState | None = None
+
+	def envelope(self) -> DeliveryEnvelope | None:
+		"""The configured §1.3 envelope, or ``None`` when this deployment set none."""
+		return self._envelope
 
 	def __repr__(self) -> str:
 		return f"FactoryService(home={self.home}, entries={len(self.ledger)})"
@@ -1078,19 +1091,41 @@ class FactoryService:
 		unapproved specification is machine work downstream of an open gate, and a gate
 		enforced only by the caller's discipline is a gate with an undocumented bypass.
 		"""
-		await self.require_approved_specification(contract_id)
+		specification = await self.require_approved_specification(contract_id)
 		contract = await self.contract_by_id(contract_id)
 		proposal = propose(contract)
 		self._commit(
 			LedgerKind.DECOMPOSITION_PROPOSED,
 			{"decomposition": proposal.model_dump(mode="json")},
 		)
-		result = gate(proposal, contract)
+		result = self._gate_decomposition(proposal, contract, specification)
 		self._commit(
 			LedgerKind.DECOMPOSITION_GATED,
 			{"gate": result.model_dump(mode="json")},
 		)
 		return proposal
+
+	def _gate_decomposition(
+		self,
+		decomposition: Decomposition,
+		contract: Contract,
+		specification: Specification,
+	) -> DecompositionGate:
+		"""Gate a decomposition with this deployment's envelope (FR-057, NFR-025).
+
+		One function rather than two call sites, because there are two — ``decompose``
+		and ``approve_decomposition`` — and the second recomputes what the first
+		computed. A recomputation that passed different arguments would make FR-057 a
+		gate with a bypass: the refusal printed by ``decompose`` and then overridden by
+		the approval it exists to stop. Same reasoning as the recomputation itself, one
+		level up.
+		"""
+		return gate(
+			decomposition,
+			contract,
+			envelope=self._envelope,
+			value_hypothesis_declared=specification.value_hypothesis is not None,
+		)
 
 	async def latest_decomposition(self, contract_id: str) -> Decomposition | None:
 		"""Most recent proposal for a contract, if any (FR-094: revisions are normal)."""
@@ -1134,7 +1169,13 @@ class FactoryService:
 		# rendered, and approving must be decided against the decomposition as it *is*.
 		# A stale gate row would otherwise let a revision be approved on an earlier
 		# revision's passing checks.
-		approved = approve(gate(found, contract), by=by)
+		#
+		# Recomputed with the *same* arguments ``decompose`` used, envelope included. A
+		# recomputation that dropped the envelope would make FR-057 a gate with a bypass:
+		# the refusal would be printed by ``decompose`` and then overridden by the one
+		# action it exists to stop, which is the failure a gate may not have.
+		specification = await self.require_approved_specification(found.contract_id)
+		approved = approve(self._gate_decomposition(found, contract, specification), by=by)
 		self._commit(
 			LedgerKind.DECOMPOSITION_GATED,
 			{"gate": approved.model_dump(mode="json")},

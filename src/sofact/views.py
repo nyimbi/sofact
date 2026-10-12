@@ -48,11 +48,16 @@ __all__ = [
 	"DeclarationPrecision",
 	"Decomposition",
 	"DecompositionGate",
+	"DeliveryEnvelope",
+	"DimensionBound",
 	"DimensionStatus",
 	"DispatchMode",
 	"DispatchRecord",
 	"ElicitationAnswer",
 	"ElicitationDimension",
+	"EnvelopeActuals",
+	"EnvelopeDimension",
+	"EnvelopeMeasurement",
 	"Evidence",
 	"EvidenceKind",
 	"GateCheck",
@@ -252,6 +257,215 @@ def ceiling_for_rank(rank: int) -> AutonomyLevel:
 	if rank <= 4:
 		return AutonomyLevel.L3
 	return AutonomyLevel.L2
+
+
+# --------------------------------------------------------------------------- #
+# §1.3 — the delivery envelope (FR-057, NFR-025)
+# --------------------------------------------------------------------------- #
+
+
+class EnvelopeDimension(StrEnum):
+	"""The eight dimensions §1.3 bounds, named so a measurement can name one back.
+
+	An enum rather than a string key because FR-057 requires the refusal to say *which*
+	dimension was exceeded, and a dimension named by a free string is one a report can
+	misspell while still reading as complete. §1.3's table has eight rows and this enum
+	has eight members; a dimension added to one and not the other is a delivery that
+	stops reporting something the spec bounds.
+	"""
+
+	SYSTEMS = "systems"
+	MODULES = "modules"
+	DELIVERED_LOC = "delivered_loc"
+	EXTERNAL_INTEGRATIONS = "external_integrations"
+	HUMAN_GATES = "human_gates"
+	HUMAN_MINUTES = "human_minutes"
+	WALL_CLOCK_DAYS = "wall_clock_days"
+	VALUE_HYPOTHESIS = "value_hypothesis"
+
+
+class DimensionBound(View):
+	"""One dimension's permitted range, and the unit it is stated in (§1.3).
+
+	``minimum`` and ``maximum`` are separate fields rather than one range object because
+	they are not the same kind of claim. §1.3 says its numbers are "**targets, not
+	measurements**", and the two ends then behave differently: a delivery *above* a
+	ceiling is the over-scoped goal FR-057 refuses, while a delivery *below* a floor is a
+	small project, which is a legitimate thing to build and not a defect. Keeping them
+	apart is what lets the gate refuse one and merely report the other.
+	"""
+
+	unit: NonEmptyStr
+	minimum: float | None = None
+	maximum: float | None = None
+
+	@model_validator(mode="after")
+	def _a_bound_bounds_something(self) -> Self:
+		if self.minimum is None and self.maximum is None:
+			raise ValueError(
+				f"the {self.unit} bound has neither a floor nor a ceiling, so it admits "
+				"every value and bounds nothing — an unbounded dimension belongs out of "
+				"the envelope, not in it with two empty fields (NFR-025)"
+			)
+		if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+			raise ValueError(
+				f"the {self.unit} bound has a floor of {self.minimum:g} above its ceiling "
+				f"of {self.maximum:g}, so no delivery could ever be inside it"
+			)
+		return self
+
+	def admits(self, value: float) -> bool:
+		"""Whether ``value`` is inside the bound. Floors and ceilings both apply."""
+		if self.minimum is not None and value < self.minimum:
+			return False
+		return not (self.maximum is not None and value > self.maximum)
+
+	def exceeded_by(self, value: float) -> bool:
+		"""Whether ``value`` is over the ceiling — FR-057's refusal, and only that end."""
+		return self.maximum is not None and value > self.maximum
+
+	def below(self, value: float) -> bool:
+		"""Whether ``value`` is under the floor. A measurement, never a refusal."""
+		return self.minimum is not None and value < self.minimum
+
+	def stated(self) -> str:
+		"""The bound as an operator reads it, in the dimension's own unit."""
+		if self.minimum is not None and self.maximum is not None:
+			if self.minimum == self.maximum:
+				return f"{_number(self.minimum)} {self.unit}"
+			return f"{_number(self.minimum)}-{_number(self.maximum)} {self.unit}"
+		if self.maximum is not None:
+			return f"at most {_number(self.maximum)} {self.unit}"
+		assert self.minimum is not None, "a bound with neither end was refused by the type"
+		return f"at least {_number(self.minimum)} {self.unit}"
+
+
+def _number(value: float) -> str:
+	"""A count as an operator reads it: ``5``, not ``5.0``."""
+	return f"{value:g}"
+
+
+class DeliveryEnvelope(View):
+	"""§1.3's eight dimensions as configuration (NFR-025, FR-057).
+
+	The defaults are §1.3's table verbatim, and that is the point of writing them out
+	rather than deriving them: NFR-025 makes the envelope configuration *and* calls it
+	"a hypothesis under test", so a deployment may widen or narrow it — but the
+	factory's own default may not quietly differ from the spec's stated target, or an
+	operator comparing a delivery against §1.3 would be comparing it against numbers the
+	factory never used.
+
+	Fixed fields rather than a mapping, so ``extra="forbid"`` makes a config file that
+	names a dimension this build does not know a refusal rather than a setting that is
+	silently ignored — the failure mode of a config seam is a typo that changes nothing
+	and reports success.
+	"""
+
+	systems: DimensionBound = DimensionBound(unit="systems", minimum=1, maximum=3)
+	modules: DimensionBound = DimensionBound(unit="modules", minimum=8, maximum=25)
+	delivered_loc: DimensionBound = DimensionBound(unit="LOC", minimum=3000, maximum=15000)
+	external_integrations: DimensionBound = DimensionBound(
+		unit="integrations", minimum=0, maximum=3
+	)
+	human_gates: DimensionBound = DimensionBound(unit="gates", minimum=4, maximum=4)
+	human_minutes: DimensionBound = DimensionBound(unit="minutes", minimum=180, maximum=600)
+	wall_clock_days: DimensionBound = DimensionBound(unit="days", minimum=2, maximum=10)
+	value_hypothesis: DimensionBound = DimensionBound(unit="declared", minimum=1, maximum=1)
+
+	def bound(self, dimension: EnvelopeDimension) -> DimensionBound:
+		"""The bound on one dimension. Total over the enum, so no dimension is unreachable."""
+		return getattr(self, dimension.value)
+
+
+class EnvelopeMeasurement(View):
+	"""One dimension's actual, and whether anything in the log measures it at all.
+
+	``actual`` and ``within`` are both optional and they move together: ``actual is
+	None`` means nothing SoFact holds measures this dimension, and ``within`` is then
+	``None`` rather than ``True``. A missing measurement reported as inside the envelope
+	is the one wrong default available here, because it makes an unmeasured dimension
+	indistinguishable from a satisfied one — the same rule ADR-0038 applies to an absent
+	verdict, applied to delivery.
+	"""
+
+	dimension: EnvelopeDimension
+	bound: DimensionBound
+	actual: float | None = None
+	within: bool | None = None
+	detail: NonEmptyStr
+	"""What was measured, or what would have to exist before anything could be."""
+
+	@model_validator(mode="after")
+	def _an_unmeasured_dimension_is_never_within(self) -> Self:
+		if (self.actual is None) != (self.within is None):
+			raise ValueError(
+				f"the {self.dimension.value} measurement carries actual={self.actual!r} "
+				f"with within={self.within!r}; a dimension is either measured and judged, "
+				"or unmeasured and unjudged, and a half-measurement would let a missing "
+				"reading be reported as a satisfied one (NFR-025)"
+			)
+		if self.actual is not None and self.within is not self.bound.admits(self.actual):
+			raise ValueError(
+				f"the {self.dimension.value} measurement claims within={self.within} for "
+				f"{_number(self.actual)}, which is {'inside' if self.bound.admits(self.actual) else 'outside'} "
+				f"its bound of {self.bound.stated()}"
+			)
+		return self
+
+	@property
+	def statement(self) -> str:
+		"""The measurement as one line an operator reads in a report."""
+		if self.actual is None:
+			return f"{self.dimension.value}: unmeasured — {self.detail}"
+		verdict = "within" if self.within else "OUTSIDE"
+		return (
+			f"{self.dimension.value}: {_number(self.actual)} {self.bound.unit} "
+			f"({verdict} {self.bound.stated()}) — {self.detail}"
+		)
+
+
+class EnvelopeActuals(View):
+	"""A project's measured dimensions against the envelope (NFR-025, FR-118).
+
+	Derived rather than recorded, like everything else that is a fact about the log: a
+	stored actuals row would be a reading that could disagree with the log it claims to
+	have read.
+	"""
+
+	envelope: DeliveryEnvelope
+	measurements: tuple[EnvelopeMeasurement, ...]
+
+	@property
+	def exceeded(self) -> tuple[EnvelopeMeasurement, ...]:
+		"""Measured dimensions over their ceiling — what FR-057 refuses a goal for."""
+		return tuple(m for m in self.measurements if m.within is False and self._over(m))
+
+	@property
+	def below(self) -> tuple[EnvelopeMeasurement, ...]:
+		"""Measured dimensions under their floor. A measurement, not a defect (§1.3)."""
+		return tuple(
+			m for m in self.measurements if m.actual is not None and m.bound.below(m.actual)
+		)
+
+	@property
+	def unmeasured(self) -> tuple[EnvelopeMeasurement, ...]:
+		"""Dimensions nothing SoFact holds measures, each naming what would be needed."""
+		return tuple(m for m in self.measurements if m.actual is None)
+
+	@property
+	def is_within(self) -> bool:
+		"""True when no *measured* dimension is over its ceiling.
+
+		Not a claim about the unmeasured ones — :attr:`unmeasured` names those, and a
+		report that printed this boolean alone would read as "the delivery is inside the
+		envelope" while three of the eight dimensions were never looked at.
+		"""
+		return not self.exceeded
+
+	@staticmethod
+	def _over(measurement: EnvelopeMeasurement) -> bool:
+		assert measurement.actual is not None, "an exceeded dimension has been measured"
+		return measurement.bound.exceeded_by(measurement.actual)
 
 
 # --------------------------------------------------------------------------- #

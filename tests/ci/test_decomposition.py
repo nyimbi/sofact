@@ -325,6 +325,7 @@ class TestTheGateRefuses:
 			"every_requirement_traces_to_a_module",
 			"every_module_cites_a_real_clause",
 			"interface_count_reported",
+			"within_delivery_envelope",
 		}
 
 

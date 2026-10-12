@@ -28,6 +28,7 @@ from sofact.service import FactoryService
 from sofact.views import (
 	Assumption,
 	Contract,
+	DeliveryEnvelope,
 	GoalEntry,
 	GoalPlan,
 	SystemEntity,
@@ -608,10 +609,17 @@ def synthetic_service(
 	mode: str,
 	*,
 	name: str = "synthetic",
+	envelope: DeliveryEnvelope | None = None,
 ) -> FactoryService:
-	"""A service whose only configured harness is the shared real script."""
+	"""A service whose only configured harness is the shared real script.
+
+	``envelope`` defaults to ``None``, which is the unconfigured state rather than
+	§1.3's numbers: NFR-025 makes the envelope configuration, and a fixture that
+	silently adopted the defaults would make every test in the suite a test of a
+	configured envelope while claiming to test the unconfigured path.
+	"""
 	spec = base_spec(tmp_path, mode, name=name)
-	return FactoryService(home=home, llm=None, specs={name: spec})
+	return FactoryService(home=home, llm=None, specs={name: spec}, envelope=envelope)
 
 
 async def elicitation_to_contract(

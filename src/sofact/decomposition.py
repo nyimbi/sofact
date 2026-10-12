@@ -31,11 +31,13 @@ import re
 from typing import Final
 
 from sofact._uuid7 import uuid7str
+from sofact.envelope import measure
 from sofact.views import (
 	Clause,
 	Contract,
 	Decomposition,
 	DecompositionGate,
+	DeliveryEnvelope,
 	GateCheck,
 	Module,
 	ModuleClass,
@@ -378,13 +380,24 @@ def decomposition_hash(decomposition: Decomposition) -> str:
 	)
 
 
-def gate(decomposition: Decomposition, contract: Contract) -> DecompositionGate:
+def gate(
+	decomposition: Decomposition,
+	contract: Contract,
+	*,
+	envelope: DeliveryEnvelope | None = None,
+	value_hypothesis_declared: bool | None = None,
+) -> DecompositionGate:
 	"""Every P3 precondition a machine can check, as named results (FR-088/089/091/092).
 
 	The checks are *facts about the proposal*, not an opinion of it. ``architecture_is_right``
 	is deliberately not among them: §7.1 says there is no oracle for it, so a check named
 	that would be a machine claiming the operator's half of the gate. That half stays in
 	``DecompositionGate.approved_by``, unset until a human sets it.
+
+	``envelope`` adds FR-057: a proposal over a §1.3 ceiling is refused, and the check
+	names the dimension. ``None`` means the caller measured nothing and the check reports
+	that rather than passing — the same distinction :func:`sofact.envelope.measure` draws,
+	for the same reason.
 	"""
 	assert decomposition.modules, "cannot gate a decomposition with no modules"
 	checks: list[GateCheck] = []
@@ -487,7 +500,73 @@ def gate(decomposition: Decomposition, contract: Contract) -> DecompositionGate:
 		)
 	)
 
+	# FR-057: a decomposition that exceeds the §1.3 envelope is refused, naming the
+	# dimension. The decomposition is where the refusal belongs, because it is the first
+	# artefact that says how big the platform will be — a refusal at P8 would be a
+	# refusal after the build, and §1.3's own words are "must be split by the operator,
+	# not silently attempted".
+	#
+	# Note the asymmetry, which is §1.3's: a proposal *over* a ceiling fails the gate,
+	# and one *under* a floor is reported and passes. §1.3's numbers are "targets, not
+	# measurements", and a factory that refused to build anything smaller than a platform
+	# would refuse the small projects that earn it the trust to attempt large ones.
+	checks.append(_envelope_check(decomposition, envelope, value_hypothesis_declared))
+
 	return DecompositionGate(decomposition_id=decomposition.id, checks=tuple(checks))
+
+
+def _envelope_check(
+	decomposition: Decomposition,
+	envelope: DeliveryEnvelope | None,
+	value_hypothesis_declared: bool | None,
+) -> GateCheck:
+	"""FR-057's check: measured dimensions against §1.3, refused on the ceilings."""
+	if envelope is None:
+		return GateCheck(
+			name="within_delivery_envelope",
+			passed=True,
+			detail=(
+				"no envelope was supplied, so nothing was measured against §1.3 and this "
+				"check asserts nothing (NFR-025). A project run without one is not "
+				"thereby over-scoped; it is unmeasured, and the delivery report will say "
+				"the same thing"
+			),
+		)
+	actuals = measure(envelope, decomposition, value_hypothesis_declared=value_hypothesis_declared)
+	exceeded = actuals.exceeded
+	if exceeded:
+		named = "; ".join(
+			f"{m.dimension.value} {m.actual:g} > {m.bound.stated()}" for m in exceeded
+		)
+		return GateCheck(
+			name="within_delivery_envelope",
+			passed=False,
+			detail=(
+				f"over the §1.3 envelope on {len(exceeded)} dimension(s): {named}. "
+				"An over-scoped goal must be split by the operator, not silently "
+				"attempted (FR-057)"
+			),
+		)
+	under = actuals.below
+	unmeasured = actuals.unmeasured
+	reported = ", ".join(
+		f"{m.dimension.value}={m.actual:g}" for m in actuals.measurements if m.actual is not None
+	)
+	notes: list[str] = []
+	if under:
+		notes.append("below the floor on " + ", ".join(m.dimension.value for m in under))
+	if unmeasured:
+		notes.append("unmeasured: " + ", ".join(m.dimension.value for m in unmeasured))
+	return GateCheck(
+		name="within_delivery_envelope",
+		passed=True,
+		detail=(
+			f"within the §1.3 ceilings: {reported}"
+			+ (". " + "; ".join(notes) if notes else "")
+			+ ". A dimension below its floor is a small delivery and not a defect, and an "
+			"unmeasured one is named rather than counted as satisfied (NFR-025)"
+		),
+	)
 
 
 def approve(gate_result: DecompositionGate, *, by: str) -> DecompositionGate:

@@ -1901,7 +1901,8 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `classify` (P1's per-clause verdicts: FR-068, ADR-0037),
 `specify`, `decompose`, `integrate` (P2, P3 and P7: ADR-0031, ADR-0038),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
-`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `repair`, `run`. The planned
+`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `repair`, `run`,
+`envelope` (§1.3: FR-057, NFR-025 — ADR-0039). The planned
 verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
 FR-142's wave scheduler (and FR-163's trigger: **a completed session** is checked against the
 contract,

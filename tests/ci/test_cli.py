@@ -301,6 +301,22 @@ one place because every CLI test that wants a plan now runs through this gate.
 """
 
 
+def _proposed(home: Path) -> Result:
+	"""Run P4, P2 and P3's proposal, stopping short of the approval.
+
+	Needed by the tests whose subject *is* the refusal: ``_contract`` approves, and a
+	decomposition the envelope refuses cannot be approved — so a helper that insisted on
+	one would make the refusal unreachable from the tests written to observe it.
+	"""
+	result = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
+	if result.exit_code != 0:
+		return result
+	specified = RUNNER.invoke(app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS])
+	if specified.exit_code != 0:
+		return specified
+	return RUNNER.invoke(app, ["--home", str(home), "decompose"])
+
+
 def _contract(home: Path) -> Result:
 	"""Run P4, then P2, then P3, then approve — the gates FR-061 says nothing may pass.
 
@@ -1625,3 +1641,110 @@ class TestTheIntegrateVerb:
 		assert result.exit_code == 0, result.output
 		assert "system-level criteria (FR-116)" in result.output
 		assert "over 2 clause(s)" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# §1.3's envelope, through the configuration seam (FR-057, NFR-025)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheEnvelopeVerb:
+	def _configure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object) -> None:
+		path = tmp_path / "envelope.json"
+		path.write_text(json.dumps(payload), encoding="utf-8")
+		monkeypatch.setenv("SOFACT_ENVELOPE", str(path))
+
+	def test_an_unconfigured_envelope_is_not_the_default_one(self, home: Path) -> None:
+		"""NFR-025 makes the envelope configuration and calls it a hypothesis under
+		test. Applying §1.3's numbers without anyone adopting them would report actuals
+		against a hypothesis nobody chose."""
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 1, result.output
+		assert "no envelope configured" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_defaults_are_printable_on_request(self, home: Path) -> None:
+		"""The operator has to be able to see §1.3's own numbers to decide whether to
+		adopt them, and asking for them is not the same as having them applied."""
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope", "--defaults"])
+
+		assert result.exit_code == 0, result.output
+		assert "8-25 modules" in result.output
+		assert "3000-15000 LOC" in result.output
+
+	def test_a_configured_envelope_is_printed_with_its_actuals(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure(tmp_path, monkeypatch, {"modules": {"minimum": 1, "maximum": 25}})
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 0, result.output
+		assert "1-25 modules" in result.output
+		assert "actuals (NFR-025)" in result.output
+		assert "modules: 5 modules (within 1-25 modules)" in result.output
+
+	def test_an_unmeasured_dimension_is_named_rather_than_counted_as_satisfied(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure(tmp_path, monkeypatch, {"modules": {"minimum": 1, "maximum": 25}})
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert "unmeasured" in result.output
+		assert "delivered_loc: unmeasured" in result.output
+
+	def test_an_over_scoped_project_exits_non_zero_and_says_which_dimension(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-057: the refusal names the dimension, and the command is not a report that
+		succeeds while the project is out of bounds.
+
+		The decomposition is proposed *without* approval, because with a ceiling of two
+		modules the approval is refused — which is the next test's subject.
+		"""
+		self._configure(tmp_path, monkeypatch, {"modules": {"minimum": 1, "maximum": 2}})
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _proposed(home).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 1, result.output
+		assert "over the envelope" in result.output
+		assert "modules: 5 modules (OUTSIDE 1-2 modules)" in result.output
+
+	def test_a_bad_dimension_name_is_refused_by_the_reader(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A typo that changes nothing and reports success is the failure mode a config
+		seam has, so the name is checked rather than ignored."""
+		self._configure(tmp_path, monkeypatch, {"moduels": {"maximum": 5}})
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot read SOFACT_ENVELOPE" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_p3_gate_refuses_an_over_scoped_decomposition(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The refusal reaches the gate an operator runs, not only the report verb."""
+		self._configure(tmp_path, monkeypatch, {"modules": {"minimum": 1, "maximum": 2}})
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _proposed(home).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"])
+
+		assert result.exit_code == 1, result.output
+		assert "within_delivery_envelope" in result.output
+		assert "FR-057" in result.output

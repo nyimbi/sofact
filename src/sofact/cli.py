@@ -24,6 +24,7 @@ from sofact import __version__
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
+from sofact.envelope import load_envelope, measure
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.service import (
@@ -40,7 +41,9 @@ from sofact.views import (
 	Contract,
 	Decomposition,
 	DecompositionGate,
+	DeliveryEnvelope,
 	DispatchRecord,
+	EnvelopeDimension,
 	GoalPlan,
 	GoalStyle,
 	HarnessProfile,
@@ -177,7 +180,31 @@ _REASON_OPTION = typer.Option(
 
 
 def _service(home: Path | None) -> FactoryService:
-	return FactoryService(home=home, llm=LlmClient(), specs=_configured_specs())
+	return FactoryService(
+		home=home,
+		llm=LlmClient(),
+		specs=_configured_specs(),
+		envelope=_configured_envelope(),
+	)
+
+
+def _configured_envelope() -> DeliveryEnvelope | None:
+	"""The §1.3 envelope this deployment configured, if it configured one (NFR-025).
+
+	``None`` means "no envelope", which is not the same as "the defaults": NFR-025 makes
+	the envelope configuration and calls it "a hypothesis under test", so a factory that
+	applied §1.3's numbers without anyone choosing them would report actuals against a
+	hypothesis its operator never adopted — and P3's FR-057 check would refuse
+	over-scoped goals against numbers nobody set.
+	"""
+	configured = os.environ.get("SOFACT_ENVELOPE")
+	if not configured:
+		return None
+	try:
+		return load_envelope(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_ENVELOPE: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
 
 
 def _configured_specs() -> Mapping[str, HarnessSpec] | None:
@@ -2155,6 +2182,71 @@ def dimensions() -> None:
 		typer.secho(spec.dimension.value, fg="cyan", bold=True)
 		typer.echo(f"  {spec.question}")
 		typer.secho(f"  ↳ {spec.rationale}", fg="bright_black")
+
+
+@app.command(name="envelope")
+def show_envelope(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	show_defaults: bool = typer.Option(
+		False,
+		"--defaults",
+		help="Print §1.3's own numbers, whether or not this deployment configured any.",
+	),
+) -> None:
+	"""Show the §1.3 envelope, and the actuals this project measures against it (NFR-025)."""
+	asyncio.run(_envelope(_service(_home_of(ctx, home)), defaults=show_defaults))
+
+
+async def _envelope(svc: FactoryService, *, defaults: bool) -> None:
+	configured = svc.envelope()
+	if configured is None:
+		typer.secho(
+			"no envelope configured. §1.3's numbers are a hypothesis under test "
+			"(NFR-025), so they are not applied until someone adopts them: point "
+			"SOFACT_ENVELOPE at a JSON file of dimensions.",
+			fg="yellow",
+		)
+		if not defaults:
+			raise typer.Exit(code=1)
+		configured = DeliveryEnvelope()
+		typer.secho("\n§1.3's defaults, for reference:", fg="bright_black")
+	for dimension in EnvelopeDimension:
+		bound = configured.bound(dimension)
+		typer.secho(f"  {dimension.value:<22} {bound.stated()}", fg="cyan")
+
+	goal = await svc.current_goal()
+	built = None if goal is None else await svc.latest_contract(goal.id)
+	decomposition = None if built is None else await svc.latest_decomposition(built.id)
+	specification = None if built is None else await svc.latest_specification(built.id)
+	actuals = measure(
+		configured,
+		decomposition,
+		value_hypothesis_declared=(
+			None if specification is None else specification.value_hypothesis is not None
+		),
+	)
+	typer.secho("\n  actuals (NFR-025)", fg="cyan", bold=True)
+	for measurement in actuals.measurements:
+		if measurement.actual is None:
+			colour = "bright_black"
+		else:
+			colour = "green" if measurement.within else "red"
+		typer.secho(f"    {measurement.statement}", fg=colour)
+	if actuals.unmeasured:
+		typer.secho(
+			f"\n  {len(actuals.unmeasured)} of {len(actuals.measurements)} dimension(s) are "
+			"unmeasured. Each names what would have to exist before anything could be "
+			"counted; none of them is counted as satisfied.",
+			fg="yellow",
+		)
+	if actuals.exceeded:
+		typer.secho(
+			"\n  over the envelope. FR-057 makes an over-scoped goal the operator's to "
+			"split, not the factory's to attempt.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
 
 
 def main() -> None:
