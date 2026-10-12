@@ -63,6 +63,7 @@ from sofact.views import (
 )
 
 __all__ = [
+	"CLAUDE_SPEC",
 	"DEFAULT_TOOLS",
 	"DSH_SPEC",
 	"PI_RESEARCH_SPEC",
@@ -89,6 +90,17 @@ DEFAULT_DISPATCH_TIMEOUT_SECONDS: Final = 3600.0
 DEFAULT_STDERR_TAIL_BYTES: Final = 2_048
 _USAGE_REDUCERS: Final = frozenset({"sum", "max"})
 
+_SESSION_ID_STYLES: Final = frozenset({"token", "uuid"})
+"""How a harness wants its session identifier shaped.
+
+``token`` is any non-empty string, which is what ``pi`` and ``dsh`` accept. ``uuid``
+means the harness validates it: measured on Claude Code 2.1.296, ``--session-id
+probe-xyz`` exits 1 with "Invalid session ID. Must be a valid UUID." -- *before* any
+model call, so a probe would report a harness failure that is really an identifier
+mismatch. The probe's own ids are ``probe-<8 hex>``, which is exactly the shape that
+fails, so this is data the spec must carry rather than a detail the caller can know.
+"""
+
 # Which spec fields are JSON arrays of strings, which are plain strings, which are
 # booleans, and which need bespoke handling. Kept as data so ``from_mapping`` has one
 # loop per shape instead of a field-by-field transcription that would drift from the
@@ -108,6 +120,7 @@ _STRING_FIELDS: Final = (
 	"model_error_pattern",
 	"notes",
 	"session_glob",
+	"session_id_style",
 	"usage_reduce",
 )
 _BOOL_FIELDS: Final = ("session_is_zstd", "supports_context_file_flag")
@@ -184,6 +197,7 @@ class HarnessSpec:
 	env: tuple[tuple[str, str], ...] = ()
 	session_glob: str = "**/*{session_id}*.jsonl"
 	session_is_zstd: bool = False
+	session_id_style: str = "token"
 	version_argv: tuple[str, ...] = ()
 	completion_event: str | None = None
 	completion_reason_path: tuple[str, ...] = ()
@@ -195,6 +209,7 @@ class HarnessSpec:
 	supports_context_file_flag: bool = False
 	model_error_pattern: str = ""
 	confinement_tools: str = ""
+	tool_names: tuple[tuple[str, str], ...] = ()
 	budget_argv: tuple[str, ...] = ()
 	compaction_event: str = ""
 	research_tools: tuple[str, ...] = ()
@@ -211,6 +226,10 @@ class HarnessSpec:
 			assert self.completion_reason_path, (
 				f"{self.name!r} declares a completion event but no path to read from it"
 			)
+		assert self.session_id_style in _SESSION_ID_STYLES, (
+			f"bad session_id_style {self.session_id_style!r}; "
+			f"expected one of {sorted(_SESSION_ID_STYLES)}"
+		)
 
 	@classmethod
 	def from_mapping(cls, name: str, payload: Mapping[str, object]) -> HarnessSpec:
@@ -246,6 +265,8 @@ class HarnessSpec:
 				changes[field] = _boolean(payload[field], field, name)
 		if "env" in payload:
 			changes["env"] = _env(payload["env"], name)
+		if "tool_names" in payload:
+			changes["tool_names"] = _pairs(payload["tool_names"], name, "tool_names")
 		if "completion_event" in payload:
 			raw_event = payload["completion_event"]
 			changes["completion_event"] = (
@@ -357,23 +378,28 @@ def _goal_entry(value: object, name: str) -> GoalEntry:
 		raise ValueError(f"harness {name!r}: goal_entry must be one of {known}") from exc
 
 
-def _env(value: object, name: str) -> tuple[tuple[str, str], ...]:
+def _pairs(value: object, name: str, what: str) -> tuple[tuple[str, str], ...]:
+	"""Parse a JSON array of two-string arrays, for ``env`` and ``tool_names``."""
 	if isinstance(value, str) or not isinstance(value, Sequence):
-		raise ValueError(f"harness {name!r}: env must be an array of [key, value] pairs")
+		raise ValueError(f"harness {name!r}: {what} must be an array of [key, value] pairs")
 	pairs = cast("Sequence[object]", value)
 	out: list[tuple[str, str]] = []
 	for pair in pairs:
 		if isinstance(pair, str) or not isinstance(pair, Sequence):
-			raise ValueError(f"harness {name!r}: each env entry must be a [key, value] pair")
+			raise ValueError(f"harness {name!r}: each {what} entry must be a [key, value] pair")
 		inner = cast("Sequence[object]", pair)
 		items = tuple(inner)
 		if len(items) != 2:
-			raise ValueError(f"harness {name!r}: each env entry must have exactly two elements")
+			raise ValueError(f"harness {name!r}: each {what} entry must have exactly two elements")
 		key, val = items[0], items[1]
 		if not isinstance(key, str) or not isinstance(val, str):
-			raise ValueError(f"harness {name!r}: env keys and values must be strings")
+			raise ValueError(f"harness {name!r}: {what} keys and values must be strings")
 		out.append((key, val))
 	return tuple(out)
+
+
+def _env(value: object, name: str) -> tuple[tuple[str, str], ...]:
+	return _pairs(value, name, "env")
 
 
 def load_specs(path: Path) -> dict[str, HarnessSpec]:
@@ -573,9 +599,112 @@ whose dispatch argv has never been witnessed.
 """
 
 
+CLAUDE_SPEC: Final = HarnessSpec(
+	name="claude",
+	argv=(
+		"claude",
+		"--print",
+		"--model",
+		"{model}",
+		"--output-format",
+		"json",
+		"--session-id",
+		"{session_id}",
+		"--tools",
+		"{tools}",
+		# The `--` is load-bearing, not tidiness: `--tools` is variadic, so without a
+		# terminator it swallows the goal text as another tool name. Measured -- the
+		# child then exits 1 with "Input must be provided either through stdin or as a
+		# prompt argument", which reads as a SoFact bug rather than a spec one.
+		"--",
+	),
+	env=(("CLAUDE_CONFIG_DIR", "{session_dir}"),),
+	# Measured: <CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session-id>.jsonl, where the
+	# slug is the absolute workspace path with separators replaced by '-'. The glob is
+	# anchored on the session id, which is the file's own name.
+	session_glob="**/projects/*/{session_id}.jsonl",
+	session_is_zstd=False,
+	session_id_style="uuid",
+	version_argv=("claude", "--version"),
+	completion_event="assistant",
+	completion_reason_path=("message", "stop_reason"),
+	completion_reason_value="end_turn",
+	usage_path=("message", "usage", "output_tokens"),
+	usage_reduce="sum",
+	goal_event_types=(),
+	goal_entry=GoalEntry.PROMPT,
+	supports_context_file_flag=False,
+	model_error_pattern="Invalid model name passed in model=",
+	confinement_tools="read,write,edit",
+	tool_names=(
+		("read", "Read"),
+		("write", "Write"),
+		("edit", "Edit"),
+		("bash", "Bash"),
+		("glob", "Glob"),
+		("grep", "Grep"),
+		("webfetch", "WebFetch"),
+		("websearch", "WebSearch"),
+		("task", "Task"),
+		("notebookedit", "NotebookEdit"),
+		("todoread", "TodoRead"),
+		("todowrite", "TodoWrite"),
+	),
+	notes=(
+		"Measured 2026-10-12 against Claude Code 2.1.296, non-interactive, through an "
+		"OpenAI-compatible gateway (ANTHROPIC_BASE_URL). The session record is plain "
+		"JSONL at <CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session-id>.jsonl with "
+		"top-level keys including {type, sessionId, cwd, message}; observed types were "
+		"queue-operation, user, attachment, atis-latch, assistant, last-prompt, "
+		"cost-state. An assistant row carries message.{role, content, model, "
+		"stop_reason, usage}, and usage holds output_tokens -- the underscore spelling, "
+		"so this is not the dsh path and not the pi path. Completion is "
+		"message.stop_reason == 'end_turn' on the assistant row, witnessed on a real "
+		"tool-using session: a two-turn run records tool_use, tool_use, then end_turn. "
+		"A FAILED session records stop_reason 'stop_sequence' with isApiErrorMessage, "
+		"so it cannot be mistaken for a completion. "
+		"CLAUDE_CONFIG_DIR must be explicit: without it the child writes into the "
+		"operator's own ~/.claude, and a dispatch would append its session to the "
+		"producer's real history -- measured, the store moved wholesale when the "
+		"variable was set. "
+		"THE TOOL NAMES ARE CAPITALISED AND THE MISMATCH IS SILENT: --tools "
+		"read,write is accepted, exits 0, reports terminal_reason 'completed', and "
+		"leaves the producer with NO TOOLS -- it answered 'I'll create that file' and "
+		"wrote nothing, while --tools Read,Write wrote the file. That is why this spec "
+		"carries tool_names and the adapter translates; an unknown name is passed "
+		"through rather than dropped. "
+		"THE TOOL ALLOWLIST DOES NOT CONTAIN THE CHILD, measured 2026-10-12: a probe "
+		"child run with --tools Read,Write,Edit and told to write one directory above "
+		"its workspace wrote escape-marker.txt there, so `sandboxable` reads absent. "
+		"Same result as pi, same cause: an allowlist filters which tools exist, not "
+		"where they reach. A claude step that wandered would write into the checkout, "
+		"the operator's home, or a sibling module's worktree; real confinement is a "
+		"filesystem boundary (FR-019, FR-141), not this flag. "
+		"Concurrency IS measured: two simultaneous sessions wrote distinct records "
+		"under projects/, so a wave does not clobber its own evidence. "
+		"NOT MEASURED, and not measurable from the record: goal mode (it has none -- "
+		"this is FR-144's reduced mode like pi, and its declaration is never "
+		"corroborated by a goal event), compaction (no compaction event type is "
+		"declared, so one could not be recognised even if it happened), budget control "
+		"(no budget flag is declared), and context-file suppression (no switch in the "
+		"argv, so FR-150 cannot be satisfied here and R27 stays open). Telemetry egress "
+		"is NOT mitigated: a claude dispatch reaches its configured model endpoint, and "
+		"--print is not an egress boundary (FR-152)."
+	),
+)
+"""``claude`` as measured: JSONL session record, usage in ``message``, a real completion signal.
+
+The third adapter, and the second that can corroborate a completion declaration --
+``message.stop_reason == 'end_turn'`` is a structured statement about the turn, not a
+guess from an exit code. Its argv was witnessed end to end: a two-turn run that wrote a
+file, and a refusal that named the model.
+"""
+
+
 SPECS: Final[dict[str, HarnessSpec]] = {
 	PI_SPEC.name: PI_SPEC,
 	DSH_SPEC.name: DSH_SPEC,
+	CLAUDE_SPEC.name: CLAUDE_SPEC,
 	"pi-research": PI_RESEARCH_SPEC,
 }
 
@@ -749,9 +878,50 @@ class ConfiguredHarnessAdapter:
 			"session_dir": str(self.session_dir),
 			"session_id": session_id,
 			"model": self.model,
-			"tools": self.tools,
+			"tools": self.render_tools(),
 			"workspace": str(self.workspace),
 		}
+
+	def session_id(self, label: str) -> str:
+		"""A session identifier this harness will accept, carrying ``label`` where it can.
+
+		The label is provenance -- ``probe``, ``probe-sandbox``, ``probe-a`` -- so a
+		session directory listing says which probe wrote which record. A harness that
+		validates the id as a UUID cannot carry it, and for those the label is dropped
+		rather than smuggled into a UUID's bits: an id that *looks* like a UUID but
+		encodes a label would be a lie about a value whose only job is to be opaque.
+		The probe's own bookkeeping keeps the label separately, in the scratch path it
+		chose, which is where it is actually read back from.
+		"""
+		if self.spec.session_id_style == "uuid":
+			return uuid7str()
+		return f"{label}-{uuid7str()[:8]}"
+
+	def render_tools(self, tools: str | None = None) -> str:
+		"""The operator's allowlist in the harness's own spelling.
+
+		``--tools`` is one vocabulary across every harness -- the operator writes
+		``read,write,edit,bash`` and does not learn a second dialect per producer -- but
+		the names are not portable, and the failure is silent in the worst direction.
+		Measured on Claude Code 2.1.296: ``--tools read,write`` is *accepted*, exits 0,
+		reports ``terminal_reason: completed``, and leaves the producer with no tools at
+		all -- it answers "I'll create that file" and writes nothing. ``--tools
+		Read,Write`` writes the file. A wrong name is therefore not an error a caller
+		can see; it is a producer that cannot work, which is indistinguishable from one
+		that failed.
+
+		So the translation lives here, in data (``tool_names``), rather than in each
+		harness's argv. A tool the spec does not name is passed through unchanged rather
+		than dropped: dropping it would turn a spelling SoFact does not know into a
+		capability silently removed, and passing it through at least fails the way the
+		harness fails. ``confinement_tools`` is translated too, because the sandbox
+		probe's whole instrument is the allowlist it hands the child.
+		"""
+		chosen = self.tools if tools is None else tools
+		table = dict(self.spec.tool_names)
+		if not table:
+			return chosen
+		return ",".join(table.get(part.strip(), part.strip()) for part in chosen.split(","))
 
 	def build_argv(self, goal_text: str, session_id: str) -> tuple[str, ...]:
 		"""The exact argv for one dispatch, with the goal appended raw.
@@ -927,7 +1097,7 @@ class ConfiguredHarnessAdapter:
 			)
 
 		budget = timeout if timeout is not None else self.probe_timeout
-		session_id = f"probe-{uuid7str()[:8]}"
+		session_id = self.session_id("probe")
 		argv = self.build_argv(goal_text, session_id)
 		assert argv[-1] == goal_text, "probe must dispatch a real goal"
 		entries_before = self._workspace_entries()
@@ -1288,8 +1458,13 @@ class ConfiguredHarnessAdapter:
 		This is a claim about a *tool set*: confinement here is SoFact's, not the harness's,
 		so the finding names the set it used and the operator can narrow it and probe again.
 		"""
-		tools = self.spec.confinement_tools or self.tools
-		session_id = f"probe-sandbox-{uuid7str()[:8]}"
+		# Translated, not raw: the row is a claim about the set the *child* was handed, and
+		# a set the harness does not recognise is the no-tools case wearing the operator's
+		# spelling. Measuring the untranslated string would report confinement for a child
+		# that had no tools to escape with, which is the one answer this row must not give
+		# by accident.
+		tools = self.render_tools(self.spec.confinement_tools or self.tools)
+		session_id = self.session_id("probe-sandbox")
 		work = self._scratch(session_id)
 		confined = self.variant(workspace=work, tools=tools)
 		argv = confined.build_argv(PROBE_SANDBOX_GOAL, session_id)
@@ -1339,7 +1514,7 @@ class ConfiguredHarnessAdapter:
 		are a positive observation of the failure, which is what makes the row decidable
 		without waiting for a real wave to corrupt a real build.
 		"""
-		first, second = f"probe-a-{uuid7str()[:8]}", f"probe-b-{uuid7str()[:8]}"
+		first, second = self.session_id("probe-a"), self.session_id("probe-b")
 		goal = DEFAULT_PROBE_GOAL
 		results = await asyncio.gather(
 			self._invoke(self.build_argv(goal, first), timeout=budget, session_id=first),
@@ -1421,19 +1596,19 @@ class ConfiguredHarnessAdapter:
 					"(FR-140), so nothing about dispatch depends on the harness having one"
 				),
 			)
-		work_a = self._scratch(f"probe-budget-a-{uuid7str()[:8]}")
-		work_b = self._scratch(f"probe-budget-b-{uuid7str()[:8]}")
+		work_a = self._scratch(self.session_id("probe-budget-a"))
+		work_b = self._scratch(self.session_id("probe-budget-b"))
 		capped = self.variant(workspace=work_a)
 		uncapped = self.variant(workspace=work_b)
 		flag = tuple(part.format(budget=PROBE_BUDGET_SLOT) for part in self.spec.budget_argv)
-		base = capped.build_argv(PROBE_BUDGET_GOAL, f"probe-cap-a-{uuid7str()[:8]}")
+		base = capped.build_argv(PROBE_BUDGET_GOAL, self.session_id("probe-cap-a"))
 		# The goal must stay the final argument (FR-139), so a flag fragment is inserted
 		# before it rather than appended. One insert, and the same assertion guards both.
 		argv_a = (*base[:-1], *flag, base[-1])
 		assert argv_a[-1] == PROBE_BUDGET_GOAL, "the budget flag must not displace the goal"
 		rendered = " ".join(flag)
-		cap_id = f"probe-cap-a-{uuid7str()[:8]}"
-		plain_id = f"probe-cap-b-{uuid7str()[:8]}"
+		cap_id = self.session_id("probe-cap-a")
+		plain_id = self.session_id("probe-cap-b")
 		exit_a, _, stderr_a, timed_out_a = await capped._invoke(
 			argv_a, timeout=budget, session_id=cap_id
 		)

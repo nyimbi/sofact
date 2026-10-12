@@ -103,8 +103,8 @@ nothing could check is not a verified one). A run you capped with `--max-steps` 
 rather than failure and exits `0` unless a step it ran was refuted. `verify` remains the
 command that renders a verdict on demand (P6).
 
-`pi` and `dsh` ship as specs. To point SoFact at another harness without editing
-`src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
+`pi`, `dsh` and `claude` ship as specs. To point SoFact at another harness without
+editing `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
 
 ```json
 {
@@ -198,6 +198,28 @@ reads `absent` for `pi`'s default confinement. An allowlist filters which tools 
 where they reach; real confinement for `pi` needs a filesystem boundary (FR-019), not a
 flag. This is what the matrix is for: the row is a measurement, and a harness whose help
 text suggests otherwise is exactly the case FR-148 exists to catch.
+
+`claude` (Claude Code) was measured the same way on 2026-10-12 and answered the same:
+run with `--tools Read,Write,Edit` and told to escape, the child wrote one directory above
+its workspace, so its `sandboxable` reads `absent` too. Its row also carries a second
+measurement worth more than the flag it describes — `--tools read,write` is *accepted*,
+exits 0, reports `terminal_reason: completed`, and leaves the producer with **no tools at
+all**, because the names are capitalised. A producer that silently loses every tool still
+reports success, which is why the spec carries a `tool_names` table and the adapter
+translates rather than passing names through.
+
+`opencode` is **not** a target, and the reason is worth recording so nobody re-opens it
+blind. Its session history is a SQLite database (`~/.local/share/opencode/opencode.db`),
+not a file. Everything else about it fits: `opencode run --session <id>` accepts an id the
+adapter mints ("to continue, or to create if it does not exist"), `--format json` exists,
+and the `session` table carries `id` as its primary key beside `tokens_input` and
+`tokens_output`. What fails is only the addressing — `session_glob` is a filesystem glob,
+and a row in a database is not a path, so no glob names the record. Reading it would need a
+record *source* seam, the same shape as the zstd case that already shells out to decompress
+rather than pretending the file was plain JSONL. That seam is not worth building for a
+fourth producer when three are wired, so opencode is dropped as a target rather than left
+half-claimed. This is the honest version of a capability gap: not "unmeasured", but
+"measured, and the cost of the seam exceeded the value of the producer".
 
 ## Develop
 

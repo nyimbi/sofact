@@ -535,7 +535,7 @@ class TestMisconfiguration:
 		result = RUNNER.invoke(app, ["--home", str(home), "probe", "--harness", "nosuch"])
 		assert result.exit_code == 1
 		assert "unknown harness 'nosuch'" in result.output
-		assert "configured harnesses: dsh, pi" in result.output
+		assert "configured harnesses: claude, dsh, pi" in result.output
 
 	def test_a_malformed_config_file_is_reported(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -585,7 +585,7 @@ class TestMisconfiguration:
 
 class TestLoadSpecs:
 	def test_the_built_in_table_is_untouched(self) -> None:
-		assert set(SPECS) == {"dsh", "pi", "pi-research"}
+		assert set(SPECS) == {"dsh", "pi", "claude", "pi-research"}
 
 	def test_a_round_trip_preserves_every_field(self, tmp_path: Path) -> None:
 		"""Derived from the real spec, so this cannot drift from the dataclass."""

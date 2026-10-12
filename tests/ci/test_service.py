@@ -31,7 +31,14 @@ from synthetic import (
 )
 
 from sofact.contract import executable_clauses
-from sofact.harness import DEFAULT_TOOLS, DSH_SPEC, PI_SPEC, SPECS, ConfiguredHarnessAdapter
+from sofact.harness import (
+	CLAUDE_SPEC,
+	DEFAULT_TOOLS,
+	DSH_SPEC,
+	PI_SPEC,
+	SPECS,
+	ConfiguredHarnessAdapter,
+)
 from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home, resolve_tools
 from sofact.views import (
 	ElicitationDimension,
@@ -196,7 +203,12 @@ class TestConfiguration:
 		self, service: FactoryService
 	) -> None:
 		assert service.harness_table() == SPECS
-		assert set(service.harness_table()) == {PI_SPEC.name, DSH_SPEC.name, "pi-research"}
+		assert set(service.harness_table()) == {
+			PI_SPEC.name,
+			DSH_SPEC.name,
+			CLAUDE_SPEC.name,
+			"pi-research",
+		}
 
 	async def test_a_deployment_can_register_a_harness_without_patching_code(
 		self, home: Path, tmp_path: Path

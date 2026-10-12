@@ -22,6 +22,7 @@ import pytest
 from synthetic import base_spec
 
 from sofact.harness import (
+	CLAUDE_SPEC,
 	DSH_SPEC,
 	PI_RESEARCH_SPEC,
 	PI_SPEC,
@@ -98,14 +99,15 @@ def _records(*rows: dict[str, object]) -> tuple[dict[str, object], ...]:
 
 
 class TestMeasuredSpecs:
-	def test_both_harnesses_have_a_spec(self) -> None:
-		assert set(SPECS) == {"pi", "dsh", "pi-research"}
+	def test_every_shipped_harness_has_a_spec(self) -> None:
+		assert set(SPECS) == {"pi", "dsh", "claude", "pi-research"}
 		assert spec_for("pi") is PI_SPEC
 		assert spec_for("dsh") is DSH_SPEC
+		assert spec_for("claude") is CLAUDE_SPEC
 		assert spec_for("pi-research") is PI_RESEARCH_SPEC
 
 	def test_unknown_harness_names_the_configured_set(self) -> None:
-		with pytest.raises(KeyError, match="configured harnesses: dsh, pi"):
+		with pytest.raises(KeyError, match="configured harnesses: claude, dsh, pi"):
 			spec_for("omp")
 
 	def test_the_research_spec_is_a_deliberate_variant_of_the_build_spec(self) -> None:
@@ -164,6 +166,56 @@ class TestMeasuredSpecs:
 	def test_dsh_cannot_disable_context_files_but_pi_can(self) -> None:
 		assert PI_SPEC.supports_context_file_flag is True
 		assert DSH_SPEC.supports_context_file_flag is False
+
+	def test_claude_argv_matches_the_2026_10_12_measurement(self) -> None:
+		"""The `--` is load-bearing: `--tools` is variadic and would eat the goal."""
+		assert CLAUDE_SPEC.argv[0] == "claude"
+		assert "--print" in CLAUDE_SPEC.argv
+		assert CLAUDE_SPEC.argv[-1] == "--", (
+			"without the terminator the variadic --tools swallows the goal text as "
+			"another tool name, and the child exits 1 asking for a prompt"
+		)
+		assert CLAUDE_SPEC.argv.index("--tools") < CLAUDE_SPEC.argv.index("--")
+		assert CLAUDE_SPEC.env == (("CLAUDE_CONFIG_DIR", "{session_dir}"),), (
+			"without this the child appends to the operator's own ~/.claude history"
+		)
+		assert CLAUDE_SPEC.session_glob == "**/projects/*/{session_id}.jsonl"
+		assert CLAUDE_SPEC.session_is_zstd is False
+
+	def test_claude_completion_is_a_stop_reason_not_an_exit_code(self) -> None:
+		"""A real completion signal, unlike pi -- so precision is measurable for it."""
+		assert CLAUDE_SPEC.completion_event == "assistant"
+		assert CLAUDE_SPEC.completion_reason_path == ("message", "stop_reason")
+		assert CLAUDE_SPEC.completion_reason_value == "end_turn"
+		assert CLAUDE_SPEC.usage_path == ("message", "usage", "output_tokens"), (
+			"the underscore spelling; not the dsh path and not the pi path"
+		)
+
+	def test_claude_tool_names_are_capitalised_and_translated(self) -> None:
+		"""Measured: `--tools read,write` is ACCEPTED and leaves the producer with none.
+
+		It exits 0, reports `terminal_reason: completed`, and writes nothing --
+		the producer answers "I'll create that file" and stops. `--tools Read,Write`
+		writes the file. So the spelling is not a formatting detail; a wrong name is a
+		producer that cannot work while looking exactly like one that finished.
+		"""
+		assert CLAUDE_SPEC.tool_names, "claude needs the translation or every build is inert"
+		assert dict(CLAUDE_SPEC.tool_names)["write"] == "Write"
+		assert dict(CLAUDE_SPEC.tool_names)["read"] == "Read"
+
+	def test_claude_notes_record_the_unconfined_child_and_the_egress(self) -> None:
+		"""A measured negative and an unmitigated egress route must stay visible.
+
+		`sandboxable: absent` is the row a reader is most likely to want rounded off,
+		because it says the producer SoFact dispatches to can write anywhere. It is a
+		measurement, not a caveat: a child told to escape wrote one directory above its
+		workspace with `--tools Read,Write,Edit` in force. If a later edit drops it from
+		the notes, nothing else in the suite would notice.
+		"""
+		low = CLAUDE_SPEC.notes.lower()
+		assert "sandboxable" in low or "does not contain the child" in low
+		assert "absent" in low
+		assert "egress" in low, "the unmitigated telemetry route is FR-152's open finding"
 
 	def test_a_spec_naming_no_argv_is_refused(self) -> None:
 		with pytest.raises(ValueError, match="declares no argv"):
@@ -236,6 +288,46 @@ class TestBuildArgv:
 			ConfiguredHarnessAdapter(
 				PI_SPEC, workspace=tmp_path, session_dir=tmp_path, model="m", probe_timeout=0.0
 			)
+
+
+class TestTheToolVocabulary:
+	"""One allowlist spelling for the operator; each harness's own for the child.
+
+	The translation exists because the failure it prevents is silent in the worst
+	direction. A harness that rejects an unknown tool name tells the operator; Claude
+	Code accepts `read,write`, exits 0, reports a completed turn, and hands the
+	producer nothing -- so the build "succeeds" having written no code.
+	"""
+
+	def test_a_spec_with_no_table_passes_the_operator_spelling_through(
+		self, tmp_path: Path
+	) -> None:
+		adapter = adapter_for(tmp_path, "complete")
+		assert adapter.render_tools() == adapter.tools
+		assert adapter.render_tools("bash,read") == "bash,read"
+
+	def test_a_known_name_is_translated(self, tmp_path: Path) -> None:
+		adapter = make_adapter(tmp_path, CLAUDE_SPEC)
+		assert adapter.render_tools("read,write,edit,bash") == "Read,Write,Edit,Bash"
+
+	def test_an_unknown_name_is_passed_through_not_dropped(self, tmp_path: Path) -> None:
+		"""Dropping it would turn a spelling SoFact does not know into a capability
+		silently removed, which is the failure mode the translation exists to prevent."""
+		adapter = make_adapter(tmp_path, CLAUDE_SPEC)
+		assert adapter.render_tools("read,mystery") == "Read,mystery"
+
+	def test_the_slot_renders_the_translated_set(self, tmp_path: Path) -> None:
+		"""The argv must carry the translated set, not the operator's raw string."""
+		adapter = make_adapter(tmp_path, CLAUDE_SPEC)
+		argv = adapter.build_argv("g", "s1")
+		handed = argv[argv.index("--tools") + 1]
+		assert handed == "Read,Write,Edit,Bash"
+		assert "read,write" not in handed
+
+	def test_the_confinement_probe_measures_the_translated_set(self, tmp_path: Path) -> None:
+		"""Otherwise the sandbox row reports confinement for a child that had no tools."""
+		adapter = make_adapter(tmp_path, CLAUDE_SPEC)
+		assert adapter.render_tools(CLAUDE_SPEC.confinement_tools) == "Read,Write,Edit"
 
 
 # --------------------------------------------------------------------------- #
