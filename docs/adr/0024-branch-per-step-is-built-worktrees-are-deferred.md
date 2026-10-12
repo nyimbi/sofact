@@ -6,6 +6,11 @@
 * Supersedes: the first version of this record, which claimed a branch was "a *record*
   of separation" while nothing committed to it — a claim refuted by measurement the same
   day (§ Consequences, "the seal")
+* Superseded by: [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md),
+  for the branch's *name* only. This record built branch-per-**step**, because a step's
+  ordinal and kind were all the plan could supply before a module identity existed; the
+  branch is now named for the module and several steps share it. The deferral of FR-141
+  recorded here stands.
 * Related: [ADR-0005](0005-no-container-runtime.md),
   [ADR-0006](0006-the-verifier-cannot-reach-the-executor.md),
   [ADR-0023](0023-a-record-is-addressed-by-a-path.md)
