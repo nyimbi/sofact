@@ -820,9 +820,11 @@ unattended factory, because it consumes wall clock — the binding resource.
 **FR-135** The harness **capability matrix** (D11) must record per candidate: goal
 mode present; unattended/non-interactive operation; budget controls;
 completion-signal semantics; telemetry available; sandboxability; concurrent
-instances; ability to bootstrap an empty repository; and whether the goal text
-survives compaction. **A harness lacking goal mode or interactive-free operation is
-disqualifying for P5** (see FR-144 for the reduced mode).
+instances; ability to bootstrap an empty repository; whether the goal text
+survives compaction; and whether the spec's declared containment variables actually
+contain the child's private store (FR-019). **A harness lacking goal mode or
+interactive-free operation is disqualifying for P5** (see FR-144 for the reduced
+mode).
 
 **FR-136** Contract → goal plan compilation (§8.4), with per-step budget and exit
 evidence.
@@ -892,10 +894,11 @@ cleanly or did not), `model_resolved` (FR-164), `goal_mode` **on positive eviden
 only** (FR-153), and `bootstrap_empty_repo` **on positive evidence only** — the
 probe invokes the harness with its workspace as `cwd`, so a cold start is counted
 *before* the child runs, and a workspace that is not empty is reported as an
-unwitnessed capability rather than as a failure to bootstrap. The remaining four
-rows — `sandboxable`, `concurrent`, `budget_control`, `goal_survives_compaction` —
-are **attempted** (FR-165), each by a *differential* rather than by a longer look at
-one run, and each reports the attempt it made even when the answer is inconclusive.
+unwitnessed capability rather than as a failure to bootstrap. The remaining five
+rows — `sandboxable`, `concurrent`, `budget_control`, `goal_survives_compaction`,
+`store_isolated` — are **attempted** (FR-165), each by a *differential* rather than
+by a longer look at one run, and each reports the attempt it made even when the
+answer is inconclusive.
 
 **Two rows gate, and they gate differently.** `non_interactive` refuses dispatch
 (FR-145); `model_resolved` also refuses it, but only for the model the refusal was
@@ -925,7 +928,7 @@ finding describes the configuration that was measured, not the harness's name.
 **measured by a differential**, not left as an unmeasured default. A probe is what a
 dispatch is allowed to assume, so a row the probe did not attempt has to be
 *indistinguishable from a row it attempted and could not decide* — and the two are
-different statements about different things. Four rows are attempted this way:
+different statements about different things. Five rows are attempted this way:
 
 - **`sandboxable`** — one child, handed a tool set that cannot write outside its
   directory, is told to work there and then to **attempt an escape** one directory
@@ -949,6 +952,21 @@ different statements about different things. Four rows are attempted this way:
   cap is `CONFIRMED`, and neither is `INCONCLUSIVE`, because absence under a cap
   proves nothing while the uncapped run did no work. By FR-140 nothing depends on
   this row: SoFact holds the wall clock either way.
+- **`store_isolated`** — only attempted when the spec **declares containment
+  variables** (FR-161, `isolation_env`); a harness that declares none is
+  `INCONCLUSIVE` *for that reason*, and one isolated by argv instead (`pi`'s
+  `--session-dir`) is not decided by it in either direction. Where they are declared,
+  the same goal runs twice with `HOME` pointed at a fresh empty directory — once with
+  those variables applied, once with them withheld and every other spec variable held
+  constant — and the observable is the file count under each arm's own `HOME`. The
+  isolated arm empty **and** the control arm non-empty is `CONFIRMED`; the isolated arm
+  non-empty is `ABSENT`, which is OpenRig's warning measured rather than quoted; a
+  control arm that is also empty is `INCONCLUSIVE`, because a harness that writes
+  nothing under `HOME` in any configuration has not been shown to be contained, only to
+  be invisible to this instrument (ADR-0019). The **control arm is the row**: without
+  it an empty `HOME` reads as containment for a harness whose store the probe cannot
+  see. This row measures the *store* and not the child — `sandboxable` is where
+  confinement is decided, and the two are not allowed to stand in for each other.
 - **`goal_survives_compaction`** — costs no child, because it reads the **primary**
   run's own record: a declared compaction event (FR-161) with at least one turn the
   harness itself numbered is `CONFIRMED`, and either half alone is `INCONCLUSIVE`. A

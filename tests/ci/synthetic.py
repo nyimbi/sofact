@@ -60,6 +60,7 @@ SCRIPT = '''\
 """A real harness: writes a session record into the session dir, then exits."""
 
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -216,6 +217,26 @@ if "repair" in mode:
 	if "Repair" in goal and "refuted" in goal and "repair-never" not in mode:
 		pathlib.Path("repair-marker.txt").write_text("REPAIRED", encoding="utf-8")
 
+if "store-marker.txt" in goal:
+	# The store-isolation differential. A harness keeps its own state somewhere, and
+	# SoFact's specs redirect that somewhere with an environment variable -- which is
+	# exactly the claim under test, because an isolation variable that nothing measures
+	# is not a boundary. Here the variable is SYNTHETIC_HOME: set, the private store
+	# goes there; unset, it falls back to the operator's HOME, which is what a real
+	# harness does and what makes the control arm a live variable rather than a dud.
+	# `nostore` is the harness that keeps nothing under HOME at all -- the case the
+	# control arm exists to catch, where an empty HOME means the instrument is blind
+	# rather than the store contained.
+	pathlib.Path("store-marker.txt").write_text("STORE", encoding="utf-8")
+	if "nostore" not in mode:
+		private = os.environ.get("SYNTHETIC_HOME")
+		if private:
+			store = pathlib.Path(private) / "synthetic-store"
+		else:
+			store = pathlib.Path(os.environ.get("HOME", ".")) / ".synthetic"
+		store.mkdir(parents=True, exist_ok=True)
+		(store / f"{session_id}.json").write_text("{}", encoding="utf-8")
+
 if "budget-marker.txt" in goal:
 	# A cap is honoured when the harness was handed one and does not ignore it. The
 	# uncapped run and the flag-ignoring run both do the work, which is what makes the
@@ -331,6 +352,7 @@ def base_spec(
 		name=name,
 		argv=(sys.executable, str(script), "{session_dir}", "{session_id}", suffix, "{tools}"),
 		env=(("SYNTHETIC_HOME", "{session_dir}"),),
+		isolation_env=("SYNTHETIC_HOME",),
 		session_glob=glob,
 		session_is_zstd=zstd,
 		version_argv=(sys.executable, "-c", "print('synthetic 1.2.3')"),

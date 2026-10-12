@@ -44,6 +44,7 @@ than argued. Numbering is sequential and never reused.
 | [0029](0029-an-append-takes-an-exclusive-lock.md) | An append takes an exclusive lock across the read-modify-write: `fcntl.flock` on a sibling `ledger.lock` covers read-tail-and-append and the cache is dropped inside the lock, so two processes cannot both chain onto the same tail — the chain made history tamper-evident, and this makes it append-safe | Accepted |
 | [0030](0030-phases-are-a-state-machine-and-a-gate-is-a-type-boundary.md) | Phases become an explicit state machine in the ledger (FR-060), and FR-061 becomes a type boundary rather than a check: the constructor refuses a completed gate phase with no approver, `advance_phase` cannot pass a gate, and one refusal on incomplete earlier phases makes P5 unreachable without P2 and P3 | Accepted |
 | [0031](0031-a-specification-derives-what-the-contract-says-and-declares-what-it-does-not.md) | P2 produces a specification: requirements derived one-per-clause with the clause's own oracle as the criterion, and the model, non-goals, assumptions and value hypothesis supplied by the operator because inventing them would gate green on sentences nobody approved. The FR-081 entity reference is a declared link rather than a prose search, which fails open on an entity called `id` | Accepted |
+| [0032](0032-an-isolation-variable-is-measured-by-a-differential-with-a-control.md) | An isolation variable is measured, not asserted: `store_isolated` runs the same goal twice with `HOME` relocated and the spec's declared containment variables applied in one arm, withheld in the other, so the isolated arm's empty `HOME` is evidence only once the control arm's filled. A spec names which of its `env` keys make the claim, and a harness the probe cannot see reports a limit of the probe rather than a property of the harness | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -64,9 +65,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Sixteen records here answer questions the specification
+Not every decision resolves a `D`. Seventeen records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and thirteen because the rule each replaces was never written
+about the factory's behaviour, and fourteen because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -85,3 +86,4 @@ down at all and so had no `D` to resolve:
 | [0023](0023-a-record-is-addressed-by-a-path.md) | Which harnesses the adapter can address at all. The rule it makes explicit is that `session_glob` is a filesystem glob, so a record kept in a database is unreachable no matter how good its telemetry — which is what drops `opencode` while admitting `claude` |
 | [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Which half of the isolation requirement is buildable now. FR-100 and FR-141 were asserted as done by the goal text and by the spec's tooling table while no code invoked git; this record builds the branch half (a step needs only its own ordinal), defers the worktree half (which needs a module identity the plan cannot supply), and refuses to sell worktrees as confinement when the measurement says a tool allowlist is not one |
 | [0029](0029-an-append-takes-an-exclusive-lock.md) | That the log is append-safe, which ADR-0003 never asked. The chain was built to make history tamper-*evident*, and it is easy to mistake that for making it append-*safe*: an unlocked read-modify-write let two processes claim the same index and the same `prev_hash`, and the symptom was not a lost row but an unreadable project |
+| [0032](0032-an-isolation-variable-is-measured-by-a-differential-with-a-control.md) | Whether an isolation variable is a boundary. The rule it replaces read "the store moved when the variable was set" as "the variable contains the store", which is a measurement of the variable and not of the boundary — and a row keyed on the operator's own live store would have reported the measuring session's own writes as a leak |

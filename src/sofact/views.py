@@ -1892,6 +1892,7 @@ class HarnessCapability(StrEnum):
 	GOAL_SURVIVES_COMPACTION = "goal_survives_compaction"
 	CONTEXT_FILES_DISABLED = "context_files_disabled"
 	MODEL_RESOLVED = "model_resolved"
+	STORE_ISOLATED = "store_isolated"
 
 
 class ProbeOutcome(StrEnum):

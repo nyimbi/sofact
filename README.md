@@ -231,14 +231,18 @@ and never rounds a report with no sources into research that happened: on a loca
 the extension's own timeout binds first, and that fact reads *unmeasured*, not *none
 found* (NFR-024).
 
-The probe's remaining rows are **attempted rather than assumed** (FR-165). Four of them
+The probe's remaining rows are **attempted rather than assumed** (FR-165). Five of them
 need more than one child, so each is a *differential*: `sandboxable` hands one child a tool
 set that cannot write outside its directory and tells it to attempt an escape (the escape
 file appearing is the negative, and the finding names the tool set, because confinement is
 SoFact's tool allowlist and not a harness property); `concurrent` runs two children at once
 and compares the record paths they wrote, since a shared path would make a wave destroy its
 own evidence; `budget_control` runs the same goal capped and uncapped and compares the
-artefact, but only when the spec declares a budget flag; `goal_survives_compaction` reads
+artefact, but only when the spec declares a budget flag; `store_isolated` runs the same goal
+twice with `HOME` relocated and the spec's declared containment variables applied in one arm
+and withheld in the other, so the isolated arm's empty `HOME` is evidence only once the
+control arm's filled — the control is what stops a harness the probe cannot see from reading
+as a contained one; `goal_survives_compaction` reads
 the primary run's record and costs no child. The extras run **after** the primary and only
 if it actually did work, because they share one local model and a contention artefact would
 be blamed on the harness. `probe --quick` skips the ones needing a second child and records

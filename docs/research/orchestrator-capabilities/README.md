@@ -72,7 +72,7 @@ inferred from the presence of a similarly-named type. The disposition is one of:
 | Capability | Vendor evidence | SoFact status | Disposition |
 | --- | --- | --- | --- |
 | Producer isolation by enforced boundary | tmux + workspace trust; Paperclip workspaces & runtime | `CLAUDE_CONFIG_DIR`, `OPENCODE_DB`+`OPENCODE_TEST_HOME` as env vars; `--standalone` measured to matter (ADR-0028). No worktree | **Gap — build** (FR-141 + FR-059). See §3.1: the deferral's condition has fired |
-| "An isolation variable is not a boundary" | stated outright: `OPENRIG_HOME` alone does not isolate provider config | The probe has `_probe_concurrent` machinery (FR-019/FR-165) but **no row asserts the private store was honoured** | **Gap — build** — scheduled in [neighbouring §3], still unbuilt. A spec field that *looks* like isolation and has never been observed to isolate is the exact hazard S26 names |
+| "An isolation variable is not a boundary" | stated outright: `OPENRIG_HOME` alone does not isolate provider config | The `store_isolated` row (FR-019) now runs the same goal twice with `HOME` relocated and the spec's containment variables applied in one arm, withheld in the other | **Closed 2026-10-12** — see §3.3. The store is contained and measured; the *child* is not, and `sandboxable` still reads absent for both harnesses |
 | Imported-bundle SHA-256 integrity | `RigBundle`, `bundle-audit.jsonl` | No import mechanism at all, so nothing to protect. The archive discipline for *sources* is a human process (`docs/sources/archive/`, global rule) | **Not applicable** — and if a bundle import is ever built, this row becomes a build item, not a nice-to-have |
 | Multi-organization isolation | "Company-scoped access checks keep each organization's work, agents, and activity separate" | One goal per state directory; `current_goal()` returns the most recent (`service.py:297`) | **Not applicable now** — S27 says the same. It becomes relevant at FR-124 (per-deployment topology ceilings), which is itself unbuilt |
 
@@ -142,7 +142,28 @@ redesign.
 ### 3.3 FR-019 isolation differential
 
 Scheduled in [neighbouring §3] as "worth adding to the probe rather than assuming". The
-probe already has the second-child machinery for the rows that need one. Unbuilt.
+probe already has the second-child machinery for the rows that need one.
+
+**Done 2026-10-12.** `HarnessCapability.STORE_ISOLATED` is the eleventh row, and it is a
+differential *with a control arm*, because one arm cannot answer the question: both arms
+run the same goal in their own workspace with `HOME` pointed at a fresh empty directory,
+and they differ in exactly one thing — whether the spec's declared containment variables
+(`HarnessSpec.isolation_env`) are applied. The isolated arm's empty `HOME` is evidence
+only once the control arm has filled its own; without that the row would report
+`CONFIRMED` for a harness that writes nothing under `HOME` at all, which is the
+fabricated capability `ProbeOutcome` exists to prevent. Canaried by deleting the
+control-arm branch and watching `test_the_control_arm_is_what_makes_the_empty_home_mean_something`
+fail.
+
+Measured against the real `claude` spec on 2026-10-12: with `CLAUDE_CONFIG_DIR` applied
+the child left its `HOME` holding **zero** files; with the variable withheld it wrote
+`.claude.json`, `.claude/projects/<slug>/<id>.jsonl` and a backup. So the variable is what
+contains the store.
+
+What this does **not** decide, and the row says so in its own output: where the child may
+**write** (`sandboxable` remains `ABSENT` for both `pi` and `claude`), and egress
+(FR-152). A contained store and an uncontained child are both true at once, and the row
+must not be read as the second.
 
 ## 4. What SoFact has that neither does
 
@@ -172,10 +193,11 @@ Dependency-ordered, largest lever first:
    and gates on the model, non-goals, assumptions and value hypothesis. What remains of
    that gap is FR-115/FR-116 — the P7 conformance check and system-level criteria now have
    a model to conform against and conform nothing yet.
-3. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem, and the
-   cheapest way to make an existing claim measured rather than asserted, which is what
-   FR-148 requires. Pairs with §3.1: an isolation boundary nothing has observed is the
-   hazard S26 names outright.
+3. ~~**FR-019 isolation differential row** (§3.3)~~ — **done 2026-10-12**. The
+   `store_isolated` row is a differential with a control arm, so "an isolation variable
+   is not a boundary" is measured rather than assumed. It narrows §3.1's hazard without
+   closing it: a contained store is not a confined child, and `sandboxable` still reads
+   absent.
 4. **FR-141 worktree per module** (§3.1) — cheap to *decide* (the deferral's condition
    has fired and the tree should stop claiming otherwise) and moderate to build. It is
    not urgent while `concurrent` is unreachable from the CLI, and building it is also

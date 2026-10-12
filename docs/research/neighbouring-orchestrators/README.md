@@ -139,6 +139,17 @@ not move, is a differential measurement of the kind FR-165 already describes. Th
 worth adding to the probe rather than assuming; the alternative is a spec field that
 *looks* like isolation and has never been observed to isolate.
 
+**Built 2026-10-12** as `HarnessCapability.STORE_ISOLATED`, and the shape differs from
+the paragraph above in one way that matters: the second child is a **control arm**, not a
+second observation. Both arms relocate `HOME` to a fresh directory and run the same goal;
+one applies the spec's declared containment variables (`HarnessSpec.isolation_env`) and
+one withholds them. The isolated arm's empty `HOME` only means containment if the control
+arm's `HOME` filled — otherwise the harness simply never writes under `HOME`, and the row
+would have reported a contained store for a harness whose store the instrument cannot
+see. Measured against the real `claude` spec: zero files isolated, three withheld. What
+it does not decide is where the child may *write*: `sandboxable` is still `ABSENT` for
+both harnesses, so the store is contained and the child is not.
+
 ## 4. The negative result: differentiation is not orchestration
 
 S22 found that every mechanism SoFact treats as differentiated already exists free in

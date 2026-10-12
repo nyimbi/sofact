@@ -12,7 +12,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at this snapshot: **715 passed, 0 failed**.
+`tests/ci` at this snapshot: **725 passed, 0 failed**.
 
 ---
 
@@ -25,7 +25,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-007 O1 alone caps at L2 | **Implemented** | `ceiling_for_rank` (`views.py:209`); `test_rank_maps_to_ceiling` (`test_views.py:97`). |
 | FR-008–011 mutation score per module, thresholds, trend | **Not built** | No mutation-scoring code. Oracle *rank* is a declaration, not a measurement. |
 | FR-012–015 adversarial audit, sampling, exploit metric | **Not built** | No code. |
-| FR-016–020 isolation | **Not built** | Producer isolation is **asserted in goal text only** (`planner.py:127`, FR-059). No enforced boundary. |
+| FR-016–020 isolation | **Partly** | No enforced boundary: producer isolation is **asserted in goal text only** (`planner.py:127`, FR-059), and ADR-0005 refuses the container layer FR-019 names. What *is* measured now is the narrower claim a spec makes about its own environment: the `store_isolated` probe row (`harness.py`, `_probe_store_isolated`) runs the same goal twice with `HOME` relocated and the spec's containment variables applied in one arm and withheld in the other, so "an isolation variable is not a boundary" is decided rather than assumed. Measured 2026-10-12 for `claude`: zero files under the isolated arm's `HOME`, three under the control's. |
 | FR-021–023 escape oracle, automatic downgrade | **Not built** | No code. |
 | FR-024–035 routing function, blast bounds, ladder, per-deployment ceilings | **Not built** | No code. |
 | FR-036 per-language mutation/property tooling | **Not built** | Cited once in a spec open-decision; no code. |
@@ -149,9 +149,9 @@ file (47/21/1/48) did not match the rows they claimed to count.
 | Verdict | n |
 | --- | --- |
 | Implemented | 59 |
-| Partly | 27 |
+| Partly | 28 |
 | Deferred (ADR-0024) | 1 |
-| Not built | 32 |
+| Not built | 31 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -187,6 +187,12 @@ only).
    measurement that forced this is in ADR-0024: neither `pi` nor `claude` confines
    its child. **Blocker: confinement needs a filesystem/network boundary
    (ADR-0005 refuses containers), so there is no layer left to put it in.**
+   **Narrowed 2026-10-12**, and the narrowing is worth stating precisely because it
+   does not close the gap: the `store_isolated` row now measures whether the spec's
+   environment contains the child's *private store*, which is the claim OpenRig's own
+   warning is about. It does not measure where the child may **write** — that is
+   `sandboxable`, still absent for both harnesses — and it does not bound egress
+   (FR-152). A store that is contained and a child that is not are both true at once.
 3. **No oracle manufacturing and no measured oracle strength (FR-103–107, FR-008–
    011, FR-110).** `suggest_oracle` picks a class from clause polarity; nothing
    generates a test, nothing measures whether an oracle measures anything, and the

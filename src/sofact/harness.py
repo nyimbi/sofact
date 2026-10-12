@@ -86,6 +86,17 @@ __all__ = [
 	"spec_for",
 ]
 
+STORE_PROBE_GOAL: Final = (
+	"Do this in the directory you are running in: write the file store-marker.txt "
+	"containing the word STORE. Then stop."
+)
+"""The goal for the store-isolation differential (FR-019).
+
+Deliberately a *real* goal that does real work, for the same reason the sandbox goal is:
+a child that did nothing proves nothing about where its store went, and the two arms
+would agree on an empty answer for the wrong reason.
+"""
+
 DEFAULT_PROBE_GOAL: Final = "Reply with the single word: ready"
 DEFAULT_PROBE_TIMEOUT_SECONDS: Final = 180.0
 DEFAULT_DISPATCH_TIMEOUT_SECONDS: Final = 3600.0
@@ -127,6 +138,7 @@ fails, so this is data the spec must carry rather than a detail the caller can k
 # dataclass the first time a field was added.
 _TUPLE_FIELDS: Final = (
 	"budget_argv",
+	"isolation_env",
 	"research_tools",
 	"completion_reason_path",
 	"goal_event_types",
@@ -230,6 +242,17 @@ class HarnessSpec:
 	name: str
 	argv: tuple[str, ...]
 	env: tuple[tuple[str, str], ...] = ()
+	isolation_env: tuple[str, ...] = ()
+	"""Which of ``env``'s keys this spec *asserts* contain the child's private store.
+
+	Not every entry in ``env`` is an isolation claim: ``pi-research`` sets
+	``RESEARCH_MODEL`` to pin a model and ``npm_config_*`` to quieten npm, and neither
+	claims to bound anything. Naming the containment variables separately is what lets the
+	store-isolation row measure exactly the variables that make the claim (FR-019) and
+	report "this spec asserts no containment" for the rest, rather than burning two
+	children on a question nobody asked.
+	"""
+
 	session_glob: str = "**/*{session_id}*.jsonl"
 	session_is_zstd: bool = False
 	record_format: str = "jsonl"
@@ -617,6 +640,7 @@ DSH_SPEC: Final = HarnessSpec(
 		"{workspace}",
 	),
 	env=(("DSH_HOME", "{session_dir}"),),
+	isolation_env=("DSH_HOME",),
 	session_glob="**/session-{session_id}/session.v3.jsonl.zstd",
 	session_is_zstd=True,
 	version_argv=("dsh", "--version"),
@@ -670,6 +694,7 @@ CLAUDE_SPEC: Final = HarnessSpec(
 		"--",
 	),
 	env=(("CLAUDE_CONFIG_DIR", "{session_dir}"),),
+	isolation_env=("CLAUDE_CONFIG_DIR",),
 	# Measured: <CLAUDE_CONFIG_DIR>/projects/<cwd-slug>/<session-id>.jsonl, where the
 	# slug is the absolute workspace path with separators replaced by '-'. The glob is
 	# anchored on the session id, which is the file's own name.
@@ -718,6 +743,14 @@ CLAUDE_SPEC: Final = HarnessSpec(
 		"operator's own ~/.claude, and a dispatch would append its session to the "
 		"producer's real history -- measured, the store moved wholesale when the "
 		"variable was set. "
+		"CONTAINMENT IS NOW MEASURED, not inferred from that, by the store_isolated "
+		"row (FR-019): 2026-10-12, the same goal run twice with HOME pointed at a "
+		"fresh empty directory. With CLAUDE_CONFIG_DIR applied the child left that "
+		"HOME holding ZERO files and wrote its record into the private store; with the "
+		"variable withheld it wrote .claude.json, .claude/projects/<slug>/<id>.jsonl "
+		"and a backup under it. So the variable is what contains the store, and the "
+		"control arm is what makes the first arm's silence evidence rather than an "
+		"instrument that cannot see anything. "
 		"THE TOOL NAMES ARE CAPITALISED AND THE MISMATCH IS SILENT: --tools "
 		"read,write is accepted, exits 0, reports terminal_reason 'completed', and "
 		"leaves the producer with NO TOOLS -- it answered 'I'll create that file' and "
@@ -772,6 +805,7 @@ OPENCODE_SPEC: Final = HarnessSpec(
 		("OPENCODE_DB", "{session_dir}/opencode.db"),
 		("OPENCODE_TEST_HOME", "{session_dir}/home"),
 	),
+	isolation_env=("OPENCODE_DB", "OPENCODE_TEST_HOME"),
 	# No glob: the history is a SQLite row, and session_command is what turns it back
 	# into a file. session_glob is left at its default and is never consulted.
 	record_format="json",
@@ -848,6 +882,19 @@ SPECS: Final[dict[str, HarnessSpec]] = {
 # --------------------------------------------------------------------------- #
 # session-record parsing
 # --------------------------------------------------------------------------- #
+
+
+def _files_under(root: Path) -> int:
+	"""Count the files beneath ``root``, or ``0`` when it does not exist.
+
+	A count rather than a boolean because the store-isolation row's two arms are compared
+	against each other: the number is what says the control arm's HOME was live, and an
+	existence check would collapse "one backup file" and "the whole provider store" into
+	the same answer.
+	"""
+	if not root.is_dir():
+		return 0
+	return sum(1 for path in root.rglob("*") if path.is_file())
 
 
 def _is_mapping(value: object) -> TypeGuard[Mapping[str, object]]:
@@ -975,6 +1022,7 @@ class ConfiguredHarnessAdapter:
 		tools: str = DEFAULT_TOOLS,
 		probe_timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 		env: Mapping[str, str] | None = None,
+		spec_env: bool = True,
 	) -> None:
 		assert spec.name, "spec must be named"
 		assert model.strip(), "a dispatch needs a model"
@@ -986,6 +1034,7 @@ class ConfiguredHarnessAdapter:
 		self.tools = tools
 		self.probe_timeout = probe_timeout
 		self.env = dict(env or {})
+		self.spec_env = spec_env
 
 	def __repr__(self) -> str:
 		return f"ConfiguredHarnessAdapter({self.spec.name!r}, workspace={self.workspace})"
@@ -995,6 +1044,8 @@ class ConfiguredHarnessAdapter:
 		*,
 		workspace: Path | None = None,
 		tools: str | None = None,
+		env: Mapping[str, str] | None = None,
+		spec_env: bool | None = None,
 	) -> ConfiguredHarnessAdapter:
 		"""This adapter with one slot changed, everything else held equal.
 
@@ -1003,6 +1054,11 @@ class ConfiguredHarnessAdapter:
 		difference in behaviour cannot be the model, the flags, or the session directory.
 		``tools`` is taken verbatim -- already resolved -- because the caller is deciding a
 		capability, not a default.
+
+		``spec_env=False`` drops the spec's own isolation variables while leaving everything
+		else -- argv, workspace, model, the operator's overrides -- byte-identical. It
+		exists for one row: the control arm of the store-isolation differential, where the
+		question is precisely what the spec's ``env`` is doing.
 		"""
 		return ConfiguredHarnessAdapter(
 			self.spec,
@@ -1011,7 +1067,8 @@ class ConfiguredHarnessAdapter:
 			model=self.model,
 			tools=self.tools if tools is None else tools,
 			probe_timeout=self.probe_timeout,
-			env=self.env,
+			env=self.env if env is None else env,
+			spec_env=self.spec_env if spec_env is None else spec_env,
 		)
 
 	def _slots(self, session_id: str) -> dict[str, str]:
@@ -1092,8 +1149,16 @@ class ConfiguredHarnessAdapter:
 		return argv
 
 	def _child_env(self, session_id: str) -> dict[str, str]:
-		"""Environment for the child; caller overrides win over spec env."""
-		merged = {**os.environ, **self.spec.formatted_env(self._slots(session_id))}
+		"""Environment for the child; caller overrides win over spec env.
+
+		``spec_env=False`` omits the spec's own entries and changes nothing else, which is
+		the control arm of the store-isolation differential: same argv, same workspace,
+		same overrides, with the isolation variables removed -- so whatever the child does
+		differently can be attributed to them rather than to the relocation they share.
+		"""
+		merged = dict(os.environ)
+		if self.spec_env:
+			merged.update(self.spec.formatted_env(self._slots(session_id)))
 		merged.update(self.env)
 		return merged
 
@@ -1531,6 +1596,7 @@ class ConfiguredHarnessAdapter:
 		)
 		findings.append(extras[HarnessCapability.SANDBOXABLE])
 		findings.append(extras[HarnessCapability.CONCURRENT])
+		findings.append(extras[HarnessCapability.STORE_ISOLATED])
 		findings.append(compaction)
 
 		profile = HarnessProfile(
@@ -1599,7 +1665,7 @@ class ConfiguredHarnessAdapter:
 		budget: float,
 		skip_reason: str | None,
 	) -> dict[HarnessCapability, CapabilityFinding]:
-		"""The three rows that need more than one child, attempted together and gated.
+		"""The four rows that need more than one child, attempted together and gated.
 
 		They run as a group *after* the primary attempt has finished, because a probe is a
 		statement about what this deployment can do, and a deployment whose children
@@ -1611,6 +1677,7 @@ class ConfiguredHarnessAdapter:
 			HarnessCapability.SANDBOXABLE,
 			HarnessCapability.CONCURRENT,
 			HarnessCapability.BUDGET_CONTROL,
+			HarnessCapability.STORE_ISOLATED,
 		)
 		if not deep:
 			why = (
@@ -1624,15 +1691,17 @@ class ConfiguredHarnessAdapter:
 				capability: self._unattempted(capability, skip_reason)
 				for capability in capabilities
 			}
-		sandbox, concurrent, capped = await asyncio.gather(
+		sandbox, concurrent, capped, isolated = await asyncio.gather(
 			self._probe_sandboxable(budget=budget),
 			self._probe_concurrent(budget=budget),
 			self._probe_budget_control(budget=budget),
+			self._probe_store_isolated(budget=budget),
 		)
 		return {
 			HarnessCapability.SANDBOXABLE: sandbox,
 			HarnessCapability.CONCURRENT: concurrent,
 			HarnessCapability.BUDGET_CONTROL: capped,
+			HarnessCapability.STORE_ISOLATED: isolated,
 		}
 
 	def _scratch(self, session_id: str, name: str = "work") -> Path:
@@ -1645,6 +1714,143 @@ class ConfiguredHarnessAdapter:
 		directory = self.session_dir / ".probe" / session_id / name
 		directory.mkdir(parents=True, exist_ok=True)
 		return directory
+
+	async def _probe_store_isolated(self, *, budget: float) -> CapabilityFinding:
+		"""Whether the spec's environment actually contains the child's private store.
+
+		OpenRig states the hazard plainly about its own isolation variable: changing it
+		alone does not isolate provider configuration. SoFact's specs isolate the same way
+		-- ``CLAUDE_CONFIG_DIR`` for claude, ``OPENCODE_DB`` + ``OPENCODE_TEST_HOME`` for
+		opencode -- and a spec field that *looks* like a boundary and has never been
+		observed to bound anything is the hazard S26 names (FR-019).
+
+		The instrument is a differential with a **control arm**, because one arm cannot
+		answer it. Both arms run the same goal in their own workspace with ``HOME`` pointed
+		at a fresh empty directory; they differ in exactly one thing -- whether the spec's
+		``env`` is applied. The isolated arm leaving that HOME empty is only evidence if
+		the control arm fills its own: the control proves a relocated ``HOME`` is a live
+		variable for this harness, so the first arm's silence is containment rather than an
+		instrument that cannot see anything. Without the control the row would report
+		``CONFIRMED`` for a harness that never writes under ``HOME`` at all.
+
+		Measured 2026-10-12 for claude: with ``CLAUDE_CONFIG_DIR`` applied the child left a
+		fresh ``HOME`` holding zero files and wrote its record into the private store, and
+		with the variable withheld it wrote ``$HOME/.claude/projects/<slug>/<session>.jsonl``.
+
+		Only the keys named in :attr:`HarnessSpec.isolation_env` are varied. Everything else
+		the spec sets -- a pinned model, npm's log level -- stays applied in both arms, so
+		the difference between them is the containment claim and nothing else. A spec that
+		names none is not measured here at all: it asserts no containment, and two children
+		spent deciding a question nobody asked would be a row reported for its own sake.
+		"""
+		declared = self.spec.isolation_env
+		if not declared:
+			return self._unattempted(
+				HarnessCapability.STORE_ISOLATED,
+				(
+					"this harness declares no containment variables (isolation_env), so there "
+					"is nothing to apply and nothing to withhold. The row measures whether a "
+					"spec's environment contains the child's store; a harness isolated by argv "
+					"instead (pi's --session-dir) is not decided by it in either direction"
+				),
+			)
+		scratch_id = self.session_id("probe-store")
+		work_isolated = self._scratch(scratch_id, "store-isolated")
+		work_control = self._scratch(scratch_id, "store-control")
+		home_isolated = work_isolated.parent / "home-isolated"
+		home_control = work_control.parent / "home-control"
+		home_isolated.mkdir(parents=True, exist_ok=True)
+		home_control.mkdir(parents=True, exist_ok=True)
+		iso_id, ctl_id = self.session_id("probe-store-a"), self.session_id("probe-store-b")
+		# The control arm keeps every other spec variable and drops only the declared
+		# containment ones: one thing varies, so the difference is attributable.
+		rest = {
+			key: value
+			for key, value in self.spec.formatted_env(self._slots(ctl_id)).items()
+			if key not in declared
+		}
+		isolated = self.variant(workspace=work_isolated, env={"HOME": str(home_isolated)})
+		control = self.variant(
+			workspace=work_control,
+			env={"HOME": str(home_control), **rest},
+			spec_env=False,
+		)
+		exit_a, _, stderr_a, timed_out_a = await isolated._invoke(
+			isolated.build_argv(STORE_PROBE_GOAL, iso_id), timeout=budget, session_id=iso_id
+		)
+		exit_b, _, stderr_b, timed_out_b = await control._invoke(
+			control.build_argv(STORE_PROBE_GOAL, ctl_id), timeout=budget, session_id=ctl_id
+		)
+		marker_a = work_isolated / "store-marker.txt"
+		marker_b = work_control / "store-marker.txt"
+		escaped = _files_under(home_isolated)
+		witnessed = _files_under(home_control)
+		variables = ", ".join(declared)
+		attempted = (
+			"ran the same goal twice with HOME pointed at a fresh empty directory "
+			f"({home_isolated.name} and {home_control.name}): once with {variables} applied "
+			"and once with them withheld (every other spec variable held constant), then "
+			"counted the files each arm left under its own HOME"
+		)
+		if escaped:
+			outcome, reason = (
+				ProbeOutcome.ABSENT,
+				(
+					f"with its isolation variables applied the child still wrote {escaped} "
+					f"file(s) under {home_isolated}, so {variables} do not contain its store: a "
+					"dispatch would write into the operator's own home and two steps would share "
+					"one history (FR-019, FR-141)"
+				),
+			)
+		elif timed_out_a or exit_a != 0 or not marker_a.exists():
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"the isolated arm did no work (exit {exit_a}, timed out {timed_out_a}, "
+					f"{marker_a.name} {'written' if marker_a.exists() else 'absent'}), so its "
+					"HOME being empty says nothing about where its store went"
+					+ (f"; stderr said {stderr_a.strip()[:200]!r}" if stderr_a.strip() else "")
+				),
+			)
+		elif timed_out_b or exit_b != 0 or not marker_b.exists():
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"the control arm did no work (exit {exit_b}, timed out {timed_out_b}, "
+					f"{marker_b.name} {'written' if marker_b.exists() else 'absent'}), so there "
+					"is nothing showing that a fresh HOME is a live variable for this harness "
+					"and the isolated arm's empty HOME cannot be read as containment"
+					+ (f"; stderr said {stderr_b.strip()[:200]!r}" if stderr_b.strip() else "")
+				),
+			)
+		elif witnessed == 0:
+			outcome, reason = (
+				ProbeOutcome.INCONCLUSIVE,
+				(
+					f"the control arm -- the spec's env withheld -- also left {home_control} "
+					"empty, so this harness writes nothing under a fresh HOME whether or not its "
+					"isolation variables are applied. The instrument cannot see this harness's "
+					"store, so the isolated arm's empty HOME is not evidence that it was "
+					"contained, and this row reports a limit of the probe rather than a property "
+					"of the harness (ADR-0019)"
+				),
+			)
+		else:
+			outcome, reason = (
+				ProbeOutcome.CONFIRMED,
+				(
+					f"with {variables} applied the child left {home_isolated} empty, and with "
+					f"them withheld it wrote {witnessed} file(s) under {home_control} -- so the "
+					"variables are what contained the store, and the private store SoFact reads "
+					"is the only one the run touched (FR-019)"
+				),
+			)
+		return CapabilityFinding(
+			capability=HarnessCapability.STORE_ISOLATED,
+			outcome=outcome,
+			attempted=attempted,
+			observed=reason,
+		)
 
 	async def _probe_sandboxable(self, *, budget: float) -> CapabilityFinding:
 		"""One confined child, told to work inside its directory and then to try to escape.

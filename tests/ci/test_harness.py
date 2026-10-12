@@ -223,6 +223,32 @@ class TestMeasuredSpecs:
 		with pytest.raises(ValueError, match="declares no argv"):
 			HarnessSpec(name="empty", argv=())
 
+	def test_the_specs_that_claim_containment_declare_which_variables_do_it(self) -> None:
+		"""FR-019: the variables a spec *asserts* isolate, named apart from the rest.
+
+		``env`` carries two different kinds of thing -- a containment claim and an
+		ordinary setting -- and the store-isolation row measures only the first. Without
+		this declaration the row would withhold ``RESEARCH_MODEL`` and npm's log level
+		alongside ``CLAUDE_CONFIG_DIR``, and a difference between the two arms could no
+		longer be attributed to containment. ``pi`` and ``pi-research`` declare none, which
+		is the honest answer: ``pi`` isolates by ``--session-dir`` in its argv.
+		"""
+		assert CLAUDE_SPEC.isolation_env == ("CLAUDE_CONFIG_DIR",)
+		assert DSH_SPEC.isolation_env == ("DSH_HOME",)
+		assert OPENCODE_SPEC.isolation_env == ("OPENCODE_DB", "OPENCODE_TEST_HOME")
+		assert PI_SPEC.isolation_env == (), "pi isolates by --session-dir, not by env"
+		assert PI_RESEARCH_SPEC.isolation_env == ()
+
+	def test_a_containment_variable_is_one_the_spec_actually_sets(self) -> None:
+		"""A declared name the env does not carry would measure a variable never applied."""
+		for spec in SPECS.values():
+			declared = set(spec.isolation_env)
+			applied = {key for key, _ in spec.env}
+			assert declared <= applied, (
+				f"{spec.name!r} declares containment on {sorted(declared - applied)}, "
+				"which its env never sets"
+			)
+
 	def test_opencode_takes_its_record_from_a_command_not_a_glob(self) -> None:
 		"""The seam that makes a database-backed harness wireable at all (FR-058).
 
@@ -894,7 +920,7 @@ class TestModelResolution:
 
 	async def test_every_capability_including_this_one_is_reported(self, tmp_path: Path) -> None:
 		profile = await adapter_for(tmp_path, "complete").probe()
-		assert len(profile.findings) == len(HarnessCapability) == 10
+		assert len(profile.findings) == len(HarnessCapability) == 11
 
 	async def test_dispatch_refuses_when_the_profile_watched_the_refusal(
 		self, tmp_path: Path, plan: GoalPlan
@@ -1337,6 +1363,7 @@ class TestTheExtraAttempts:
 			HarnessCapability.SANDBOXABLE,
 			HarnessCapability.CONCURRENT,
 			HarnessCapability.BUDGET_CONTROL,
+			HarnessCapability.STORE_ISOLATED,
 		):
 			finding = profile.finding(capability)
 			assert finding is not None
@@ -1362,8 +1389,139 @@ class TestTheExtraAttempts:
 			HarnessCapability.SANDBOXABLE,
 			HarnessCapability.CONCURRENT,
 			HarnessCapability.BUDGET_CONTROL,
+			HarnessCapability.STORE_ISOLATED,
 		):
 			finding = profile.finding(capability)
 			assert finding is not None
 			assert finding.outcome is ProbeOutcome.INCONCLUSIVE
 			assert "exit 7" in finding.observed
+
+
+class TestStoreIsolation:
+	"""(FR-019) An isolation variable is measured, not asserted.
+
+	The hazard is OpenRig's own warning about its equivalent variable: setting it does
+	not by itself isolate provider configuration. A spec field that looks like a boundary
+	and has never been observed to bound anything is worse than no field, because a
+	reader counts it as one. The row is therefore a *differential with a control arm* --
+	the isolated arm's silence is only evidence once the control arm has proved a fresh
+	``HOME`` is a live variable for this harness.
+	"""
+
+	async def test_a_spec_whose_env_contains_the_store_is_confirmed(self, tmp_path: Path) -> None:
+		"""The positive: applied, HOME stays empty; withheld, the store lands there."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "SYNTHETIC_HOME" in finding.observed
+		assert "home-control" in finding.observed
+
+	async def test_the_row_names_the_variables_it_applied(self, tmp_path: Path) -> None:
+		"""A finding about isolation has to say *which* isolation it measured."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert "SYNTHETIC_HOME" in finding.attempted
+		assert "withheld" in finding.attempted
+
+	async def test_a_spec_with_no_isolation_variables_is_not_measured_by_this_row(
+		self, tmp_path: Path
+	) -> None:
+		"""Nothing to apply and nothing to withhold: a gap in the row, said as one.
+
+		``pi`` isolates by ``--session-dir`` in its argv rather than by an environment
+		variable, so this row cannot decide it in either direction -- and reporting
+		``CONFIRMED`` for a harness the instrument cannot see would be the fabricated
+		capability ``ProbeOutcome`` exists to prevent.
+		"""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, "complete"), env=(), isolation_env=()
+		)
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "declares no containment variables" in finding.observed
+
+	async def test_the_control_arm_is_what_makes_the_empty_home_mean_something(
+		self, tmp_path: Path
+	) -> None:
+		"""Without a live control the row reports a limit of the *probe*, not a property.
+
+		A harness that writes nothing under ``HOME`` either way would otherwise read as
+		perfectly isolated, which is the fabricated capability ``ProbeOutcome`` exists to
+		prevent. The ``nostore`` child keeps no state under ``HOME`` at all, so both arms
+		are empty and the row has nothing to compare.
+		"""
+		spec = base_spec(tmp_path, "complete-nostore")
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "also left" in finding.observed
+		assert "limit of the probe" in finding.observed
+
+	async def test_a_variable_that_does_not_contain_the_child_is_absent(
+		self, tmp_path: Path
+	) -> None:
+		"""The negative, and the one this row exists for: the store escaped anyway.
+
+		The spec *asserts* containment on a variable the child ignores, so the isolated arm
+		writes under its own ``HOME`` -- and the control arm's HOME is a *different*
+		directory, so the control stays clean and cannot mask the escape. This is the
+		measured shape of OpenRig's warning: a variable that names isolation and delivers
+		none.
+		"""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, "complete"),
+			env=(("SYNTHETIC_IGNORED", "1"),),
+			isolation_env=("SYNTHETIC_IGNORED",),
+		)
+		adapter = make_adapter(tmp_path, spec)
+		profile = await adapter.probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.ABSENT
+		assert "do not contain its store" in finding.observed
+		assert "FR-019" in finding.observed
+
+	async def test_only_the_declared_variables_are_withheld_from_the_control(
+		self, tmp_path: Path
+	) -> None:
+		"""A differential varies one thing: the containment claim, not the whole env.
+
+		``pi-research`` sets a pinned model and npm's log level, neither of which claims to
+		bound anything. Withholding those too would leave the two arms differing in three
+		ways at once, and a difference could no longer be attributed to containment.
+		"""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, "complete"),
+			env=(("SYNTHETIC_HOME", "{session_dir}"), ("SYNTHETIC_EXTRA", "kept")),
+			isolation_env=("SYNTHETIC_HOME",),
+		)
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.CONFIRMED
+		assert "SYNTHETIC_HOME" in finding.attempted
+		assert "SYNTHETIC_EXTRA" not in finding.attempted
+
+	async def test_a_spec_that_asserts_no_containment_is_not_measured(
+		self, tmp_path: Path
+	) -> None:
+		"""``pi`` isolates by ``--session-dir`` in its argv, and never claims this row."""
+		spec = dataclasses.replace(base_spec(tmp_path, "complete"), isolation_env=())
+		profile = await make_adapter(tmp_path, spec).probe()
+		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
+		assert finding is not None
+		assert finding.outcome is ProbeOutcome.INCONCLUSIVE
+		assert "no attempt was made" in finding.attempted
+
+	async def test_the_store_probe_leaves_the_build_workspace_untouched(
+		self, tmp_path: Path
+	) -> None:
+		"""Both arms work in scratch: a probe never writes into the tree it is about."""
+		profile = await adapter_for(tmp_path, "complete").probe()
+		assert profile.finding(HarnessCapability.STORE_ISOLATED) is not None
+		assert list((tmp_path / "workspace").iterdir()) == []
