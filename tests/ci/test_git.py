@@ -8,6 +8,7 @@ believed were correct, which is exactly the belief FR-100 exists to check.
 from __future__ import annotations
 
 import asyncio
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -295,6 +296,38 @@ async def test_the_earlier_steps_file_is_not_stageable_on_the_later_branch(tmp_p
 	assert (await run_git(workspace, "status", "--porcelain")).strip() == "", (
 		"the first step's file is still pending on the second step's branch"
 	)
+
+
+async def test_module_branches_are_cumulative_not_isolated(tmp_path: Path) -> None:
+	"""A measured limitation, pinned so no later reader mistakes these for isolation.
+
+	Each module's branch is created off the previous one's tip, so a later module's branch
+	*contains* every earlier module's files and is a descendant of its branch. Measured:
+	after three module steps, ``sofact/reporting`` listed ``ledger-model.py`` and
+	``ledger-core.py`` alongside its own, and each branch was an ancestor of the next.
+
+	This is what a branch can be. A branch is a pointer into one history, so separate
+	branches over one working tree cannot hold separate files — only a worktree can
+	(FR-141, deferred in ADR-0024). P7's import analysis must therefore read a module's
+	files from the *commit range* between its branch and its parent, not from the branch's
+	tree, or every module would appear to contain every other module's code and FR-113's
+	"no module reaches another module's internals" would be untestable.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	modules = ("ledger-model", "ledger-core", "reporting")
+	branches: list[str] = []
+	for ordinal, module in enumerate(modules):
+		checkout = await ensure_module_branch(workspace, ordinal, "operation", module=module)
+		(workspace / f"{module}.py").write_text(f"# {module}\n", encoding="utf-8")
+		await seal_branch(checkout, workspace, note=f"{module} work")
+		branches.append(checkout.branch)
+
+	last = await run_git(workspace, "ls-files")
+	assert "ledger-model.py" in last, "the measurement changed: branches are no longer cumulative"
+	assert "reporting.py" in last
+	for earlier, later in pairwise(branches):
+		await run_git(workspace, "merge-base", "--is-ancestor", earlier, later)
 
 
 async def test_a_step_that_changed_nothing_seals_nothing(tmp_path: Path) -> None:

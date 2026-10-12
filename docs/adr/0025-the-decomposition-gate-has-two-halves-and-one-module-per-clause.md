@@ -73,8 +73,17 @@ it turns *off*.
   several steps, all on that module's branch. `Decomposition.module_for_clauses` resolves
   a step's clauses to their single owner, and `dispatch_step` passes that name to
   `ensure_module_branch`, which names the branch `sofact/<module>`. Two steps of one
-  module therefore land on one branch, and the separation FR-100 wants is between
-  modules rather than between steps.
+  module therefore land on one branch.
+- **The branches are cumulative, not isolated, and that is a measured limitation.** Each
+  module's branch is created off the previous one's tip, so a later module's branch
+  *contains* every earlier module's files and descends from its branch. Measured after
+  three module steps: `sofact/reporting` listed `ledger-model.py` and `ledger-core.py`
+  alongside its own, and each branch was an ancestor of the next. This is what a branch
+  can be — a pointer into one history — so separate branches over one working tree cannot
+  hold separate files. Only a worktree can, which is FR-141 and stays deferred. P7's
+  import analysis must therefore read a module's files from the commit range between its
+  branch and its parent rather than from the branch's tree, or every module would appear
+  to contain every other module's code and FR-113 would be untestable.
 - **`None` is a real answer from that lookup, and the branch falls back to the step.**
   A bootstrap step covers no clause; a step whose clauses span two modules belongs to
   neither; a clause owned by two modules is ambiguous. In each case naming a module would
@@ -137,6 +146,11 @@ deleted from the `ensure_module_branch` call in `dispatch_step`:
   because a step with no module is supposed to fall back.
 
 That third row is the point of the canary: it shows the two failures were the wiring
-being absent rather than the suite being broadly red. `test_two_steps_of_one_module_share_one_branch`
+being absent rather than the suite being broadly red.
+
+The cumulative-branch limitation is pinned by
+`test_module_branches_are_cumulative_not_isolated`, which asserts the containment rather
+than describing it, so a change to the branch topology fails a test instead of quietly
+invalidating P7's plan for import analysis. `test_two_steps_of_one_module_share_one_branch`
 dispatches both steps for real and compares the recorded branches, and it is asserted
 to have run rather than skipped — a skip would have made it a gate nobody watched.
