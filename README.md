@@ -67,6 +67,15 @@ uv run sofact gate --approve P2 --by you   # the human half, recorded with who a
 A clause without an oracle cannot exist, which is the type-level enforcement of the
 spec's first rule: **no oracle, no autonomy** (FR-001).
 
+P2 turns the contract into a **specification**
+([ADR-0031](docs/adr/0031-a-specification-derives-what-the-contract-says-and-declares-what-it-does-not.md)):
+one requirement per clause, each carrying that clause's own oracle as its acceptance
+criterion, plus the system model, non-goals, assumptions and value hypothesis. The
+requirements are *derived* and the rest is *yours* — the factory invents none of it,
+because a specification filled with plausible sentences would pass its own gate while you
+had approved nothing. A criterion no command can evaluate is marked `human-verified` and
+counted, not failed: FR-082 permits it and makes its cost visible instead.
+
 ## Harness
 
 SoFact contains no coding loop. `dispatch` hands each plan step to a harness as an
@@ -76,6 +85,11 @@ Which harness is a **row of data, not a class**:
 
 ```sh
 uv run sofact contract --command 'pytest -q'   # every stem needs an oracle
+uv run sofact specify                          # contract → requirements, gated but unapproved
+uv run sofact specify --approve --by me \
+  --entity 'Reminder:1' \
+  --assumption 'client schedules | a server scheduler appears' \
+  --value 'fewer missed | the end user | session logs'
 uv run sofact decompose                        # contract → modules, gated but unapproved
 uv run sofact decompose --approve --by me      # the operator's half of the gate (FR-087)
 uv run sofact plan                             # contract → ordered goal sessions

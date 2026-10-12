@@ -610,8 +610,9 @@ class TestThroughTheService:
 		service = synthetic_service(home, tmp_path, "writes-work-complete")
 		await service.probe_harness(None)
 		_, contract_id = await elicitation_to_contract(service)
-		from synthetic import decompose_and_approve
+		from synthetic import decompose_and_approve, specify_and_approve
 
+		await specify_and_approve(service, contract_id)
 		await decompose_and_approve(service, contract_id)
 		plan = await service.compile_plan(contract_id)
 		await service.dispatch_plan(plan.id)

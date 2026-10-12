@@ -12,7 +12,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at this snapshot: **630 passed, 0 failed**.
+`tests/ci` at this snapshot: **715 passed, 0 failed**.
 
 ---
 
@@ -37,7 +37,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-059 harness cannot reach oracle corpus/credentials | **Partly** | Prompt text only (`planner.py:127`). No sandbox, no check. |
 | FR-060 phase state machine, resumable after SIGKILL | **Implemented** (2026-10-12, ADR-0030) | `Phase`/`PHASE_SEQUENCE`/`PhaseAdvance` (`views.py`), `advance_phase`/`approve_gate`/`current_phase`/`open_gate` (`service.py`), `sofact phase` and `sofact gate`; `test_the_phase_survives_a_restart_because_it_is_in_the_log` (`test_phase.py`). A transition is its own ledger row, so a new process reads the phase off disk. |
 | FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
-| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, and a phase transition now is too (`LedgerKind.PHASE_ADVANCED`). There is still **no P2 specification artifact** (FR-076) and no findings artifact beyond a research report path, so P1 and P2 have no artefact of their own. |
+| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), and **P2 now is too** (`SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`). P1 still has no findings artefact beyond a research report path. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
 | FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:231`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
@@ -51,17 +51,17 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-073 contradiction detection | **Not built** | No code. |
 | FR-074 evidence vs positioning classification | **Not built** | No code. |
 | FR-075 self-staleness / expiry | **Not built** | No code. |
-| FR-076 specification as traceable requirements | **Not built** | There is no P2 specification artifact; `ClauseStem`→`Clause` is contract-level, not spec-level. |
-| FR-077 machine-checkable acceptance criterion per requirement | **Partly** | A `Clause` cannot exist without an oracle (`views.py:351`), which is the same idea one phase later. No spec-level gate. |
-| FR-078 system model in the specification | **Not built** | Researched (`docs/research/system-model/`), not built. |
-| FR-079 non-goals and assumptions declared | **Not built** | No code. |
-| FR-080 P2 gate presents the spec in the operator's language | **Not built** | No P2 gate. |
-| FR-081 internal consistency check | **Not built** | No code. |
-| FR-082 testability check, `human-verified` marking | **Not built** | No code. |
-| FR-083 machine-readable system model as the single interface source | **Not built** | The research note says exactly this is the blocker for FR-112/115; ADR-0027 routes around it for FR-112. |
+| FR-076 specification as traceable requirements | **Implemented** (2026-10-12) | `Specification`/`Requirement` (`views.py`), `specify` derives one requirement per clause (`specification.py`), `sofact specify`; both traceability directions are gate checks. `test_every_clause_reaches_a_requirement` (`test_specification.py`). |
+| FR-077 machine-checkable acceptance criterion per requirement | **Implemented** | `Requirement.criterion` is required and non-empty (`views.py`), taken from the clause's own oracle so the two cannot drift; `every_requirement_has_a_criterion` is a gate check. |
+| FR-078 system model in the specification | **Implemented** (2026-10-12) | `SystemModel`/`SystemEntity`/`SystemRelationship`/`SystemInvariant` (`views.py`); entities, relationships and invariants, machine-readable, carried on `Specification`. **State machines are not modelled** — the spec's FR-078 lists them and the type does not have them. |
+| FR-079 non-goals and assumptions declared | **Implemented** | `NonGoal`/`Assumption` (`views.py`); `Assumption.refuted_by` is required, so an unfalsifiable assumption cannot be declared. Non-goals are *proposed* from NEGATIVE clauses and never invented. Both are gate checks and both are printed by `sofact specify`. |
+| FR-080 P2 gate presents the spec in the operator's language | **Implemented** (2026-10-12) | `SpecificationGate` + `sofact specify`/`--approve`; the proposal, its checks, its non-goals, its assumptions and its value hypothesis print in the operator's own words, since every statement is theirs. Approval is a separate act and cannot waive a failed check. |
+| FR-081 internal consistency check | **Partly** (2026-10-12) | Two of three clauses. **Every entity referenced by a requirement** is a gate check over declared links, and **every requirement maps to a module** is checked in the P3 gate where modules exist. **"No two requirements may contradict" is not machine-decidable in prose** — the check covers the polarity case only (one statement asserted and denied) and says so in its own detail line rather than claiming a clean bill. |
+| FR-082 testability check, `human-verified` marking | **Implemented** (2026-10-12) | `VerificationMethod` (`views.py`); a requirement whose oracle names no command is `HUMAN`, counted and printed at the gate. The check **reports rather than fails**, which is FR-082's own rule: a criterion needing a person is permitted, it must have its cost counted. |
+| FR-083 machine-readable system model as the single interface source | **Partly** | The model is machine-readable and carries entities/relationships/invariants. It is **not yet the single source for interface definitions**: ADR-0027 still declares surfaces on `Module`, and nothing derives a module's surface from the model. |
 | FR-084 model updated as part of any change | **Not built** | No model. |
-| FR-085 falsifiable value hypothesis | **Not built** | No code. |
-| FR-086 factory must not certify value | **Not built** | Nothing to certify against; no delivery report (FR-118). |
+| FR-085 falsifiable value hypothesis | **Implemented** | `ValueHypothesis` (`views.py`) names effect, beneficiary and refuting instrument; `value_hypothesis_is_falsifiable` is a gate check. |
+| FR-086 factory must not certify value | **Partly** (2026-10-12) | The type carries no verdict field and nothing in `specification.py` can mark a hypothesis satisfied — the factory's only permitted statement about one is that it was *declared*, and `sofact specify` prints it under "declared, never certified". **The delivery-report half is unbuilt**: FR-118 has nowhere to make the statement. |
 | FR-087 decomposition machine-proposed, human-validated | **Implemented** | `propose` (`decomposition.py:282`), `approve` (`:493`); `test_the_proposal_is_deterministic` (`test_decomposition.py:93`), `test_approval_names_who_and_when` (`:340`). |
 | FR-088 traceability both directions | **Implemented** | `gate` checks `every_module_traces_to_a_requirement` and `every_requirement_traces_to_a_module` (`decomposition.py:423,438`); `test_an_unowned_clause_fails_the_gate` (`test_decomposition.py:260`). |
 | FR-089 DAG, no cycles | **Implemented** | `test_the_proposal_never_contains_a_cycle` (`test_decomposition.py:109`), `test_a_cycle_fails_the_gate` (`:239`). |
@@ -142,13 +142,20 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
+Recounted from the table above on 2026-10-12 after the P2 unit, by reading the verdict
+column rather than by arithmetic on the previous snapshot — the earlier numbers in this
+file (47/21/1/48) did not match the rows they claimed to count.
+
 | Verdict | n |
 | --- | --- |
-| Implemented | 47 |
-| Partly | 21 |
+| Implemented | 59 |
+| Partly | 27 |
 | Deferred (ADR-0024) | 1 |
-| Not built | 48 |
-| **Total FR numbers in the spec** | **144** (some are stated only as retained ranges, counted once) |
+| Not built | 32 |
+| **Total rows** | **119** |
+
+Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
+this counts the classification units rather than the FR identifiers inside them.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
 restated, so there is nothing to check them against. Of the new ones, NFR-025
@@ -161,14 +168,18 @@ only).
 
 ## 2. Gaps, ranked by what they block
 
-1. **No system model and no P2 specification (FR-076, FR-078, FR-083, FR-115,
-   FR-116).** One absent artifact blocks four requirements and both remaining P7
-   checks. Every downstream phase that the spec says consumes the model — P3's
-   decomposition, P6's structural oracles, P7's conformance check — reads the
-   contract instead. ADR-0026 named it; ADR-0027 worked around it for FR-112 by
-   declaring surfaces on the module. **Blocker: nothing defines what a
-   machine-readable system model *is*, and the research note in
-   `docs/research/system-model/` deliberately does not pick one.**
+1. ~~**No system model and no P2 specification (FR-076, FR-078, FR-083, FR-115,
+   FR-116).**~~ **Mostly closed 2026-10-12.** P2 now produces a `Specification` —
+   requirements traceable to clauses, a machine-readable model of entities,
+   relationships and invariants, non-goals, assumptions and a value hypothesis — and
+   gates on it. What remains of this gap, named so it does not read as finished:
+   **FR-083 is half done** (the model is machine-readable but is not yet the single
+   source for interface definitions, which ADR-0027 still routes around by declaring
+   surfaces on `Module`), **FR-078 omits state machines**, **FR-081's first clause is
+   not machine-decidable** and the check says so rather than pretending, and
+   **FR-115/FR-116 remain unbuilt** — the P7 conformance check and system-level
+   acceptance criteria now have a model to conform against and still do not conform
+   anything. That last part is the next unit, not a blocker.
 2. **No isolation boundary of any kind (FR-016–020, FR-059, FR-141).** FR-141 is
    deferred by ADR-0024 and is the gap the README itself names as mattering most;
    FR-059's "the harness cannot reach the oracle corpus" is prompt text and nothing

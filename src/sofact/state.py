@@ -38,7 +38,9 @@ from sofact.views import (
 	ProjectState,
 	RepairAttempt,
 	ResearchRecord,
+	Specification,
 	SpecificationDraft,
+	SpecificationGate,
 	VerificationReport,
 )
 
@@ -56,6 +58,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	claims: list[CompletionClaim] = []
 	notes: list[str] = []
 	plans: list[GoalPlan] = []
+	specifications: list[Specification] = []
+	specification_gates: list[SpecificationGate] = []
 	decompositions: list[Decomposition] = []
 	gates: list[DecompositionGate] = []
 	dispatches: list[DispatchRecord] = []
@@ -97,6 +101,10 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				notes.append(str(payload["text"]))
 			case LedgerKind.PLAN_COMPILED:
 				plans.append(GoalPlan.model_validate(payload["plan"]))
+			case LedgerKind.SPECIFICATION_PROPOSED:
+				specifications.append(Specification.model_validate(payload["specification"]))
+			case LedgerKind.SPECIFICATION_GATED:
+				specification_gates.append(SpecificationGate.model_validate(payload["gate"]))
 			case LedgerKind.DECOMPOSITION_PROPOSED:
 				decompositions.append(Decomposition.model_validate(payload["decomposition"]))
 			case LedgerKind.DECOMPOSITION_GATED:
@@ -122,6 +130,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		claims=tuple(claims),
 		notes=tuple(notes),
 		plans=tuple(plans),
+		specifications=tuple(specifications),
+		specification_gates=tuple(specification_gates),
 		decompositions=tuple(decompositions),
 		gates=tuple(gates),
 		dispatches=tuple(dispatches),

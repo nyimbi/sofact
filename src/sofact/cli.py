@@ -20,6 +20,7 @@ from pathlib import Path
 import typer
 
 from sofact import __version__
+from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
@@ -33,7 +34,9 @@ from sofact.service import (
 from sofact.views import (
 	PHASE_GATE,
 	PHASE_SEQUENCE,
+	Assumption,
 	ClauseKind,
+	Contract,
 	Decomposition,
 	DecompositionGate,
 	DispatchRecord,
@@ -47,8 +50,13 @@ from sofact.views import (
 	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
+	Specification,
 	SpecificationDraft,
+	SpecificationGate,
 	StepOutcome,
+	SystemEntity,
+	SystemModel,
+	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
 )
@@ -61,6 +69,22 @@ app = typer.Typer(
 
 _HOME_OPTION = typer.Option(
 	None, "--home", help="State directory (default: ./.sofact or $SOFACT_HOME)."
+)
+
+_ENTITY_OPTION = typer.Option(
+	None,
+	"--entity",
+	help="A system-model entity, as NAME:CLAUSE-INDEX. Repeatable (FR-078).",
+)
+_ASSUMPTION_OPTION = typer.Option(
+	None,
+	"--assumption",
+	help="An assumption, as STATEMENT | REFUTED-BY. Repeatable (FR-079).",
+)
+_VALUE_OPTION = typer.Option(
+	None,
+	"--value",
+	help="The value hypothesis, as EFFECT | BENEFICIARY | REFUTING-INSTRUMENT (FR-085).",
 )
 
 # Hoisted rather than written inline: ruff's B008 rejects a call in an argument
@@ -567,6 +591,182 @@ async def _draft(svc: FactoryService) -> None:
 	except ValueError as exc:
 		typer.secho(f"not ready: {exc}", fg="yellow")
 		raise typer.Exit(code=1) from exc
+
+
+@app.command(name="specify")
+def specify(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	entity: list[str] | None = _ENTITY_OPTION,
+	assumption: list[str] | None = _ASSUMPTION_OPTION,
+	value: str | None = _VALUE_OPTION,
+	approve: bool = typer.Option(
+		False,
+		"--approve",
+		help="Record the operator's approval of the proposed specification (FR-080).",
+	),
+	by: str = typer.Option("operator", "--by", help="Who is approving. Required with --approve."),
+) -> None:
+	"""Propose a specification for the current contract, and gate it (FR-076).
+
+	Without ``--approve`` this proposes and reports the machine checks — traceability,
+	criteria, the system model, the value hypothesis. §3.3 places a gate here because
+	"no oracle exists for 'this specification expresses your actual intent'", so the
+	other half is the operator's, and it is a separate act rather than something a
+	passing check implies.
+
+	``--entity``, ``--assumption`` and ``--value`` carry the parts of the specification
+	that are the *operator's own statements* rather than derivations. FR-078, FR-079 and
+	FR-085 make them requirements, and a verb that could not accept them would be a verb
+	whose gate could never pass — which is a gate that has been disabled while still
+	reporting itself as one.
+	"""
+	asyncio.run(
+		_specify(
+			_service(_home_of(ctx, home)),
+			entities=tuple(entity or ()),
+			assumptions=tuple(assumption or ()),
+			value=value,
+			approve=approve,
+			by=by,
+		)
+	)
+
+
+def _entity_option(raw: str, contract: Contract) -> SystemEntity:
+	"""Parse ``NAME:CLAUSE-INDEX`` into an entity linked to that clause (FR-081).
+
+	By *index* rather than by clause id because the operator reads a numbered clause list,
+	and asking them to paste a UUID would make declaring a model an exercise in copying
+	identifiers. The index is 1-based to match what ``sofact contract`` prints.
+	"""
+	name, _, index_text = raw.partition(":")
+	if not name.strip() or not index_text.strip():
+		raise ValueError(f"--entity wants NAME:CLAUSE-INDEX, got {raw!r}")
+	try:
+		index = int(index_text)
+	except ValueError as exc:
+		raise ValueError(f"--entity clause index must be a number, got {index_text!r}") from exc
+	if not 1 <= index <= len(contract.clauses):
+		raise ValueError(
+			f"--entity names clause {index}, but the contract has {len(contract.clauses)} clause(s)"
+		)
+	clause = contract.clauses[index - 1]
+	return SystemEntity(name=name.strip(), description=clause.statement, clause_ids=(clause.id,))
+
+
+def _assumption_option(raw: str) -> Assumption:
+	"""Parse ``STATEMENT | REFUTED-BY`` into an assumption (FR-079)."""
+	statement, sep, refuted_by = raw.partition("|")
+	if not sep or not statement.strip() or not refuted_by.strip():
+		raise ValueError(
+			f"--assumption wants STATEMENT | REFUTED-BY, got {raw!r}. An assumption "
+			"without a refuting observation is a belief, not a declared uncertainty "
+			"(FR-079)"
+		)
+	return Assumption(id=uuid7str(), statement=statement.strip(), refuted_by=refuted_by.strip())
+
+
+def _value_option(raw: str) -> ValueHypothesis:
+	"""Parse ``EFFECT | BENEFICIARY | INSTRUMENT`` into a value hypothesis (FR-085)."""
+	parts = [p.strip() for p in raw.split("|")]
+	if len(parts) != 3 or not all(parts):
+		raise ValueError(
+			f"--value wants EFFECT | BENEFICIARY | REFUTING-INSTRUMENT, got {raw!r} (FR-085)"
+		)
+	return ValueHypothesis(effect=parts[0], beneficiary=parts[1], refuting_instrument=parts[2])
+
+
+async def _specify(
+	svc: FactoryService,
+	*,
+	entities: tuple[str, ...],
+	assumptions: tuple[str, ...],
+	value: str | None,
+	approve: bool,
+	by: str,
+) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	try:
+		model = SystemModel(entities=tuple(_entity_option(e, built) for e in entities))
+		declared = tuple(_assumption_option(a) for a in assumptions)
+		hypothesis = _value_option(value) if value is not None else None
+	except ValueError as exc:
+		typer.secho(f"bad option: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	proposal = await svc.specify(
+		built.id,
+		system_model=model,
+		assumptions=declared,
+		value_hypothesis=hypothesis,
+	)
+	_print_specification(proposal, await svc.specification_gate(proposal.id))
+	if not approve:
+		return
+	try:
+		result = await svc.approve_specification(proposal.id, by=by)
+	except ValueError as exc:
+		typer.secho(f"cannot approve: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(f"\napproved by {result.approved_by}", fg="green")
+
+
+def _print_specification(proposal: Specification, result: SpecificationGate) -> None:
+	typer.secho(f"\nspecification {proposal.id}", fg="cyan", bold=True)
+	typer.echo(
+		f"  {len(proposal.requirements)} requirement(s) over {len(proposal.clause_ids)} clause(s)"
+	)
+	# The human-verified count is printed first among the counts because it is the one
+	# FR-082 makes cost something: a requirement a person must check is not a defect, but
+	# it is the number that decides whether the gate is affordable.
+	human = proposal.human_verified
+	typer.secho(
+		f"  {len(proposal.requirements) - len(human)} machine-checkable, "
+		f"{len(human)} human-verified (FR-082)",
+		fg="yellow" if human else "green",
+	)
+	for requirement in proposal.requirements:
+		mark = "oracle" if requirement.is_machine_checkable else "human "
+		typer.secho(f"    [{mark}] {requirement.statement}", fg="cyan")
+		typer.secho(f"        criterion: {requirement.criterion}", fg="bright_black")
+	model = proposal.system_model
+	if not model.is_empty:
+		typer.secho(
+			f"  model: {len(model.entities)} entity(ies), "
+			f"{len(model.relationships)} relationship(s), "
+			f"{len(model.invariants)} invariant(s)",
+			fg="cyan",
+		)
+	if proposal.non_goals:
+		typer.secho("  non-goals", fg="cyan")
+		for non_goal in proposal.non_goals:
+			typer.echo(f"    - {non_goal.statement}")
+	if proposal.assumptions:
+		typer.secho("  assumptions", fg="cyan")
+		for assumption in proposal.assumptions:
+			typer.echo(f"    - {assumption.statement}")
+			typer.secho(f"        refuted by {assumption.refuted_by}", fg="bright_black")
+	if proposal.value_hypothesis is not None:
+		value = proposal.value_hypothesis
+		typer.secho("  value hypothesis (declared, never certified -- FR-086)", fg="cyan")
+		typer.echo(f"    - {value.effect} for {value.beneficiary}")
+		typer.secho(f"        refuted by {value.refuting_instrument}", fg="bright_black")
+	typer.secho("\n  gate", fg="cyan", bold=True)
+	for check in result.checks:
+		mark = "ok  " if check.passed else "FAIL"
+		colour = "green" if check.passed else "red"
+		typer.secho(f"    [{mark}] {check.name}: {check.detail}", fg=colour)
+	typer.secho(
+		"  approved" if result.is_approved else "  NOT approved: P2 is a human gate (FR-080)",
+		fg="green" if result.is_approved else "yellow",
+	)
 
 
 @app.command(name="decompose")

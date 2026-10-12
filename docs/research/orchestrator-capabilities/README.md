@@ -165,21 +165,25 @@ Dependency-ordered, largest lever first:
    Phases are a state machine in the ledger, `sofact phase` reports position and exits
    non-zero while a gate is open, and a restart reads the phase off disk. FR-061 is now
    structural: a completed gate phase cannot be constructed without an approver, and P5
-   is unreachable without P2 and P3. **This unblocks the P2 gate**, which is the
-   roadmap audit's Gap #1 — the specification and system model, four requirements and
-   both remaining P7 checks.
-2. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem, and the
+   is unreachable without P2 and P3.
+2. ~~**The P2 gate** (roadmap gap 1, FR-076–086)~~ — **done 2026-10-12**, ADR-0031.
+   Not on the original list, and it should have been: item 1 unblocked it, and it was the
+   roadmap audit's top-ranked gap. `sofact specify` derives requirements one per clause
+   and gates on the model, non-goals, assumptions and value hypothesis. What remains of
+   that gap is FR-115/FR-116 — the P7 conformance check and system-level criteria now have
+   a model to conform against and conform nothing yet.
+3. **FR-019 isolation differential row** (§3.3) — a probe row, not a subsystem, and the
    cheapest way to make an existing claim measured rather than asserted, which is what
    FR-148 requires. Pairs with §3.1: an isolation boundary nothing has observed is the
    hazard S26 names outright.
-3. **FR-141 worktree per module** (§3.1) — cheap to *decide* (the deferral's condition
+4. **FR-141 worktree per module** (§3.1) — cheap to *decide* (the deferral's condition
    has fired and the tree should stop claiming otherwise) and moderate to build. It is
    not urgent while `concurrent` is unreachable from the CLI, and building it is also
    what would let `concurrent` become an operator flag.
-4. **Ledger rollback to a chosen entry** (§2.1) — an operator verb over the fold;
+5. **Ledger rollback to a chosen entry** (§2.1) — an operator verb over the fold;
    pairs with FR-094 and is what Paperclip's "rollback" is. Small, and only safe once
-   the tree is isolated (item 3).
-5. **FR-070 addressable source ledger** (§2.4) — the stronger version of the durable
+   the tree is isolated (item 4).
+6. **FR-070 addressable source ledger** (§2.4) — the stronger version of the durable
    activity log both vendors ship; already recorded as unbuilt in the roadmap audit.
 
 Items 1–3 are the answer to the operator's request, in the order that serves the rest

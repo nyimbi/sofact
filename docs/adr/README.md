@@ -43,6 +43,7 @@ than argued. Numbering is sequential and never reused.
 | [0028](0028-a-record-source-may-be-a-command-whose-stdout-is-the-record.md) | A record source may be a command whose stdout is the record: `session_command` and `record_format` are added, the stdout is materialised into a file so the seam stays singular, completion is read from the document rather than the exit code (opencode exits 0 for a failed session), and `opencode` joins the producer set — superseding ADR-0023 decision 1 | Accepted |
 | [0029](0029-an-append-takes-an-exclusive-lock.md) | An append takes an exclusive lock across the read-modify-write: `fcntl.flock` on a sibling `ledger.lock` covers read-tail-and-append and the cache is dropped inside the lock, so two processes cannot both chain onto the same tail — the chain made history tamper-evident, and this makes it append-safe | Accepted |
 | [0030](0030-phases-are-a-state-machine-and-a-gate-is-a-type-boundary.md) | Phases become an explicit state machine in the ledger (FR-060), and FR-061 becomes a type boundary rather than a check: the constructor refuses a completed gate phase with no approver, `advance_phase` cannot pass a gate, and one refusal on incomplete earlier phases makes P5 unreachable without P2 and P3 | Accepted |
+| [0031](0031-a-specification-derives-what-the-contract-says-and-declares-what-it-does-not.md) | P2 produces a specification: requirements derived one-per-clause with the clause's own oracle as the criterion, and the model, non-goals, assumptions and value hypothesis supplied by the operator because inventing them would gate green on sentences nobody approved. The FR-081 entity reference is a declared link rather than a prose search, which fails open on an entity called `id` | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -63,9 +64,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Fifteen records here answer questions the specification
+Not every decision resolves a `D`. Sixteen records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and twelve because the rule each replaces was never written
+about the factory's behaviour, and thirteen because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |

@@ -54,12 +54,16 @@ from sofact.planner import (
 	refutation_diagnosis,
 	revised_plan,
 )
+from sofact.specification import approve as record_specification_approval
+from sofact.specification import gate as gate_specification
+from sofact.specification import specify as propose_specification
 from sofact.state import fold
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	PHASE_GATE,
 	PHASE_SEQUENCE,
 	Advice,
+	Assumption,
 	ChainStatus,
 	Clause,
 	ClauseVerdict,
@@ -81,6 +85,7 @@ from sofact.views import (
 	IntegrationReport,
 	IntegrityCheck,
 	LedgerKind,
+	NonGoal,
 	OracleDeclaration,
 	Phase,
 	PhaseAdvance,
@@ -91,9 +96,13 @@ from sofact.views import (
 	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
+	Specification,
 	SpecificationDraft,
+	SpecificationGate,
 	StepBudget,
 	StepOutcome,
+	SystemModel,
+	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
 	now,
@@ -778,6 +787,124 @@ class FactoryService:
 
 	# ------------------------------------------------- P3: contract to goal plan
 
+	# -------------------------------------------------------- P2: specification
+
+	async def specify(
+		self,
+		contract_id: str,
+		*,
+		system_model: SystemModel | None = None,
+		non_goals: tuple[NonGoal, ...] = (),
+		assumptions: tuple[Assumption, ...] = (),
+		value_hypothesis: ValueHypothesis | None = None,
+	) -> Specification:
+		"""Propose a specification for a contract, and gate it (FR-076).
+
+		Same shape as :meth:`decompose`, for the same reason: a proposal nobody gated is
+		not an artefact the factory can act on, and recording it without its checks would
+		leave the log showing an ungated specification with no reason why. The gate is
+		recorded *unapproved* — FR-080's operator half is :meth:`approve_specification`,
+		and no code path here can set it.
+
+		The four operator-supplied arguments are passed through rather than derived.
+		FR-079's non-goals and assumptions and FR-085's value hypothesis are the
+		operator's own statements, and a factory that invented them would be gating on its
+		own paraphrase of a conversation it did not have.
+		"""
+		contract = await self.contract_by_id(contract_id)
+		proposal = propose_specification(
+			contract,
+			system_model=system_model,
+			non_goals=non_goals,
+			assumptions=assumptions,
+			value_hypothesis=value_hypothesis,
+		)
+		self._commit(
+			LedgerKind.SPECIFICATION_PROPOSED,
+			{"specification": proposal.model_dump(mode="json")},
+		)
+		result = gate_specification(proposal, contract)
+		self._commit(
+			LedgerKind.SPECIFICATION_GATED,
+			{"gate": result.model_dump(mode="json")},
+		)
+		return proposal
+
+	async def latest_specification(self, contract_id: str) -> Specification | None:
+		"""Most recent specification proposed for a contract, if any (FR-094)."""
+		state = await self.state()
+		return state.latest_specification(contract_id)
+
+	async def specification_gate(self, specification_id: str) -> SpecificationGate:
+		"""The gate result for a specification, raising if it was never gated."""
+		state = await self.state()
+		found = state.latest_specification_gate(specification_id)
+		if found is None:
+			raise KeyError(f"specification {specification_id} was never gated")
+		return found
+
+	async def approve_specification(
+		self,
+		specification_id: str,
+		*,
+		by: str,
+	) -> SpecificationGate:
+		"""Record the operator's approval of a specification (FR-080).
+
+		Refuses when the machine half failed, and refuses when the specification has been
+		superseded. §3.3 places a gate at P2 because "no oracle exists for 'this
+		specification expresses your actual intent'" — so the approval is the operator
+		confirming *their* intent was captured, and it may not be recorded against a
+		revision they are not looking at.
+		"""
+		state = await self.state()
+		found = state.specification(specification_id)
+		if found is None:
+			raise KeyError(f"no such specification: {specification_id}")
+		contract = await self.contract_by_id(found.contract_id)
+		latest = state.latest_specification(found.contract_id)
+		if latest is not None and latest.id != found.id:
+			raise ValueError(
+				f"specification {specification_id} has been superseded by {latest.id}; "
+				"approving a revision that is no longer current would approve a document "
+				"the operator cannot be reading (FR-094)"
+			)
+		# Recomputed rather than read back from the log, for the same reason
+		# ``approve_decomposition`` does: the log holds the gate as it was rendered, and
+		# approval must be decided against the specification as it *is*.
+		approved = record_specification_approval(gate_specification(found, contract), by=by)
+		self._commit(
+			LedgerKind.SPECIFICATION_GATED,
+			{"gate": approved.model_dump(mode="json")},
+		)
+		return approved
+
+	async def require_approved_specification(self, contract_id: str) -> Specification:
+		"""The contract's approved specification, or a refusal (FR-061).
+
+		The P2 hard stop, and the reason P3 now runs through it: a decomposition of an
+		unapproved specification decomposes an artefact the operator has not confirmed
+		says what they meant, which is machine work downstream of an open gate.
+		"""
+		state = await self.state()
+		proposal = state.latest_specification(contract_id)
+		if proposal is None:
+			raise ValueError(
+				f"contract {contract_id} has no specification; P2 is a gate and must be "
+				"proposed and approved before anything is decomposed (FR-080)"
+			)
+		result = state.latest_specification_gate(proposal.id)
+		if result is None:
+			raise ValueError(f"specification {proposal.id} was never gated")
+		if not result.is_satisfied:
+			reasons = "; ".join(f"{c.name}: {c.detail}" for c in result.failed)
+			raise ValueError(
+				"cannot proceed past P2: "
+				+ ("the operator has not approved it (FR-080)" if not result.is_approved else "")
+				+ (f" machine checks failed -- {reasons}" if reasons else "")
+			)
+		return proposal
+
 	# ------------------------------------------------------- P3: decomposition
 
 	async def decompose(self, contract_id: str) -> Decomposition:
@@ -788,7 +915,14 @@ class FactoryService:
 		would leave the log showing an ungated architecture with no reason why. The gate
 		result is recorded *unapproved*: FR-087's human half is
 		:meth:`approve_decomposition`, and no code path here can set it.
+
+		Refuses unless the contract's specification is approved (FR-061). This is the
+		same hard stop :meth:`require_approved_decomposition` applies one phase later, and
+		it has to be here rather than only in the phase machine: a decomposition of an
+		unapproved specification is machine work downstream of an open gate, and a gate
+		enforced only by the caller's discipline is a gate with an undocumented bypass.
 		"""
+		await self.require_approved_specification(contract_id)
 		contract = await self.contract_by_id(contract_id)
 		proposal = propose(contract)
 		self._commit(

@@ -31,6 +31,7 @@ __all__ = [
 	"INTEGRATION_REQUIREMENTS",
 	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
+	"Assumption",
 	"AutonomyLevel",
 	"CapabilityFinding",
 	"Clause",
@@ -72,6 +73,7 @@ __all__ = [
 	"Module",
 	"ModuleCheckout",
 	"ModuleClass",
+	"NonGoal",
 	"OracleClass",
 	"OracleDeclaration",
 	"Phase",
@@ -84,10 +86,19 @@ __all__ = [
 	"Readiness",
 	"RepairAttempt",
 	"RepairOutcome",
+	"Requirement",
+	"Specification",
 	"SpecificationDraft",
+	"SpecificationGate",
 	"StepBudget",
 	"StepOutcome",
+	"SystemEntity",
+	"SystemInvariant",
+	"SystemModel",
+	"SystemRelationship",
+	"ValueHypothesis",
 	"VerdictOutcome",
+	"VerificationMethod",
 	"VerificationReport",
 	"canonical_json",
 	"ceiling_for_rank",
@@ -774,6 +785,312 @@ class DecompositionGate(View):
 		Both halves, and the machine half is not negotiable by approving: an operator can
 		approve a *sound* decomposition, but approval cannot make an unsound one sound.
 		"""
+		return not self.failed and self.is_approved
+
+
+# --------------------------------------------------------------------------- #
+# P2 — the specification artifact (FR-076 to FR-086)
+# --------------------------------------------------------------------------- #
+
+
+class VerificationMethod(StrEnum):
+	"""How a requirement's acceptance criterion is evaluated (FR-077, FR-082).
+
+	``HUMAN`` is first-class and is not a failure. FR-082 says a requirement whose
+	criterion cannot be mechanically evaluated "must be marked ``human-verified`` and its
+	verification cost counted against the human budget". Collapsing it into the
+	machine-checkable set would make the human budget a number nobody computes, and
+	collapsing it into a defect would make an honest specification look broken.
+	"""
+
+	ORACLE = "oracle"
+	"""A machine runs the clause's oracle. The only method that costs no human time."""
+
+	HUMAN = "human"
+	"""The operator reads an artefact and decides. Counted against the human budget."""
+
+
+class Requirement(View):
+	"""One specification-level requirement, traceable to the clauses that stated it.
+
+	FR-076 asks for requirements traceable to intent clauses; FR-077 requires each to
+	carry a machine-checkable acceptance criterion, and makes its absence "a defect in
+	the specification" that "must block the P2 gate".
+
+	``criterion`` is required and non-empty for the same reason a :class:`Clause` cannot
+	exist without an oracle: a requirement nobody can evaluate is not a weaker
+	requirement, it is a wish. ``verification_method`` is what keeps FR-082 honest — a
+	criterion stated in prose is allowed, but only as ``HUMAN``, where its cost is
+	visible at the gate rather than hidden in the word "checkable".
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	criterion: NonEmptyStr
+	"""How the requirement is known to hold, in a form the method below can evaluate."""
+
+	verification_method: VerificationMethod
+	clause_ids: tuple[UUID7, ...]
+	"""The intent clauses this requirement traces to (FR-076). Never empty."""
+
+	@model_validator(mode="after")
+	def _traces_to_something(self) -> Self:
+		if not self.clause_ids:
+			raise ValueError(
+				f"requirement {self.statement[:40]!r} traces to no intent clause, so "
+				"nothing the operator said requires it (FR-076)"
+			)
+		return self
+
+	@property
+	def is_machine_checkable(self) -> bool:
+		"""Whether an oracle can decide this without a human (FR-077, FR-082)."""
+		return self.verification_method is VerificationMethod.ORACLE
+
+
+class NonGoal(View):
+	"""Something the specification explicitly does not do (FR-079).
+
+	Declared rather than inferred. A non-goal is the operator's boundary decision, and
+	the spec's own elicitation already asks for it (the ``BOUNDARY`` dimension) — this
+	is where that answer becomes part of the artefact P2 gates on.
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	clause_ids: tuple[UUID7, ...] = ()
+
+
+class Assumption(View):
+	"""Load-bearing uncertainty, declared and visible at the gate (FR-079).
+
+	FR-079: "Assumptions are the load-bearing uncertainty and must be visible at the
+	gate, not buried." ``refuted_by`` is what makes an assumption falsifiable rather
+	than a disclaimer: it names the observation that would show the assumption false,
+	which is the same shape FR-085 asks of the value hypothesis.
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	refuted_by: NonEmptyStr
+	"""What would show this assumption false. Required: an unfalsifiable assumption
+	is a belief, and FR-079 asks for uncertainty the gate can act on."""
+
+
+class ValueHypothesis(View):
+	"""What economic effect the platform is expected to produce, and how to refute it.
+
+	FR-085 requires it falsifiable, naming the effect, for whom, and the instrument that
+	would refute it. FR-086 then forbids SoFact from certifying it, which is why this
+	type carries no verdict field and nothing in this module can mark it satisfied: the
+	factory's only permitted statement about a value hypothesis is that it was *declared*.
+	"""
+
+	effect: NonEmptyStr
+	"""The economic effect expected, stated so that its absence would be observable."""
+
+	beneficiary: NonEmptyStr
+	"""Who the effect accrues to."""
+
+	refuting_instrument: NonEmptyStr
+	"""The measurement that would show the effect did not occur (FR-085)."""
+
+
+class SystemEntity(View):
+	"""A thing the system stores or manipulates (FR-078, FR-083).
+
+	FR-083 makes the model "the single source for interface definitions", so an entity
+	here is not documentation: it is what P3 decomposes against and what P7 checks the
+	assembled system for (FR-115).
+
+	``clause_ids`` is FR-081's "every entity in the model must be referenced by a
+	requirement", declared rather than searched. The cheap check is to look for the
+	entity's name inside a requirement's prose, and it fails open: an entity called
+	``id`` or ``job`` occurs in unrelated sentences, so a text search passes on
+	specifications that reference nothing. The link points at the *clause* rather than at
+	a requirement id because :func:`~sofact.specification.specify` derives requirements
+	one per clause and mints their ids, so a clause is the stable thing an operator can
+	actually name when declaring the model.
+	"""
+
+	name: NonEmptyStr
+	description: NonEmptyStr
+	clause_ids: tuple[UUID7, ...] = ()
+
+
+class SystemRelationship(View):
+	"""How two entities are related (FR-078).
+
+	Named by entity *name* rather than id because the model is declared before any
+	entity has an identity, and a relationship that had to wait for ids could not be
+	part of the same declaration the entities are.
+	"""
+
+	subject: NonEmptyStr
+	predicate: NonEmptyStr
+	object: NonEmptyStr
+
+	@model_validator(mode="after")
+	def _not_reflexive_by_accident(self) -> Self:
+		if self.subject == self.object and self.predicate.strip().lower() in {
+			"is",
+			"equals",
+			"same",
+		}:
+			raise ValueError(
+				f"{self.subject!r} {self.predicate} itself asserts nothing; a "
+				"relationship names two entities or it is a tautology"
+			)
+		return self
+
+
+class SystemInvariant(View):
+	"""A property the system must hold at all times (FR-078).
+
+	The model's invariants are the second oracle class §9.2 calls O3 structural: they
+	are checkable against a declaration before any code runs, which is why they belong
+	in the model rather than in the contract's oracle set.
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	entity_names: tuple[NonEmptyStr, ...] = ()
+
+
+class SystemModel(View):
+	"""The machine-readable model: entities, relationships, invariants (FR-078, FR-083).
+
+	FR-083: "must be machine-readable and must be the single source for interface
+	definitions". The interface half lives on :class:`Module.surface`, derived from the
+	contract, and this type carries the half that is not per-module — the entities and
+	relationships that only exist once the system is assembled, which is exactly what
+	FR-115 checks and what ADR-0027 could not reach.
+	"""
+
+	entities: tuple[SystemEntity, ...] = ()
+	relationships: tuple[SystemRelationship, ...] = ()
+	invariants: tuple[SystemInvariant, ...] = ()
+
+	@model_validator(mode="after")
+	def _relationships_name_declared_entities(self) -> Self:
+		"""FR-081: "every entity in the model must be referenced by a requirement".
+
+		The converse — a relationship naming an entity the model does not declare — is
+		the defect this catches, and it is a real one: a relationship over an undeclared
+		entity is a statement about something P3 cannot decompose and P7 cannot check.
+		"""
+		known = {e.name for e in self.entities}
+		for rel in self.relationships:
+			for side in (rel.subject, rel.object):
+				if side not in known:
+					raise ValueError(
+						f"relationship {rel.subject!r} {rel.predicate} {rel.object!r} "
+						f"names {side!r}, which the model does not declare as an entity "
+						"(FR-081)"
+					)
+		return self
+
+	@property
+	def is_empty(self) -> bool:
+		"""Whether the model declares nothing, so nothing can be conformed against."""
+		return not (self.entities or self.relationships or self.invariants)
+
+	@property
+	def entity_names(self) -> frozenset[str]:
+		"""Every declared entity name, for reference checks."""
+		return frozenset(e.name for e in self.entities)
+
+
+class Specification(View):
+	"""P2's artefact: requirements, the system model, non-goals, assumptions, value (FR-076).
+
+	The thing the first gate is a gate *on*. Before this type existed, P2 produced
+	nothing and the gate had no subject, which is why FR-076 through FR-086 were all
+	unbuilt and why both remaining P7 checks were blocked.
+
+	A *proposal* until the operator approves it, exactly as :class:`Decomposition` is:
+	the machine proposes and the human validates (FR-087's precedent), and the two are
+	separate types so a proposal cannot be mistaken for an approved one.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	contract_id: UUID7
+	created_at: datetime
+	requirements: tuple[Requirement, ...]
+	system_model: SystemModel = SystemModel()
+	non_goals: tuple[NonGoal, ...] = ()
+	assumptions: tuple[Assumption, ...] = ()
+	value_hypothesis: ValueHypothesis | None = None
+
+	@model_validator(mode="after")
+	def _requires_requirements(self) -> Self:
+		if not self.requirements:
+			raise ValueError("a specification with no requirements specifies nothing")
+		return self
+
+	@property
+	def clause_ids(self) -> frozenset[str]:
+		"""Every intent clause this specification traces to (FR-076)."""
+		return frozenset(cid for r in self.requirements for cid in r.clause_ids)
+
+	def requirements_for_clause(self, clause_id: str) -> tuple[Requirement, ...]:
+		"""Requirements that trace to one intent clause."""
+		return tuple(r for r in self.requirements if clause_id in r.clause_ids)
+
+	def uncovered_clauses(self, clause_ids: frozenset[str]) -> tuple[str, ...]:
+		"""Clauses in ``clause_ids`` that no requirement traces to (FR-076).
+
+		FR-076 says every requirement is traceable *to* a clause; the direction that
+		makes the specification complete is the other one, and it is the same two-way
+		rule FR-088 applies one phase later.
+		"""
+		return tuple(sorted(clause_ids - self.clause_ids))
+
+	@property
+	def human_verified(self) -> tuple[Requirement, ...]:
+		"""Requirements whose criterion needs a person (FR-082)."""
+		return tuple(r for r in self.requirements if not r.is_machine_checkable)
+
+	@property
+	def content_hash(self) -> str:
+		"""Hash of the specification, so a later phase can prove which one it read."""
+		return content_hash(self.model_dump(mode="json"))
+
+
+class SpecificationGate(View):
+	"""P2's gate: what the machine can check, and what only the operator can (FR-061, FR-080).
+
+	The same two-half shape as :class:`DecompositionGate`, for the same reason: §3.3
+	places a gate at P2 because "no oracle exists for 'this specification expresses your
+	actual intent'", so :attr:`is_satisfied` is false until a human says so, and a
+	passing machine half cannot be approved into soundness.
+	"""
+
+	specification_id: UUID7
+	checks: tuple[GateCheck, ...]
+	approved_by: NonEmptyStr | None = None
+	approved_at: datetime | None = None
+
+	@model_validator(mode="after")
+	def _approval_is_whole(self) -> Self:
+		if (self.approved_by is None) != (self.approved_at is None):
+			raise ValueError("an approval names both who approved it and when")
+		return self
+
+	@property
+	def failed(self) -> tuple[GateCheck, ...]:
+		"""Machine checks that did not hold."""
+		return tuple(c for c in self.checks if not c.passed)
+
+	@property
+	def is_approved(self) -> bool:
+		"""Whether a human has approved this specification."""
+		return self.approved_by is not None
+
+	@property
+	def is_satisfied(self) -> bool:
+		"""Whether work may proceed past P2. Both halves (FR-061)."""
 		return not self.failed and self.is_approved
 
 
@@ -2015,6 +2332,8 @@ class LedgerKind(StrEnum):
 	REPAIR_ATTEMPTED = "repair.attempted"
 	DECOMPOSITION_PROPOSED = "decomposition.proposed"
 	DECOMPOSITION_GATED = "decomposition.gated"
+	SPECIFICATION_PROPOSED = "specification.proposed"
+	SPECIFICATION_GATED = "specification.gated"
 	PHASE_ADVANCED = "phase.advanced"
 
 
@@ -2115,6 +2434,8 @@ class ProjectState(View):
 	evidence: tuple[Evidence, ...] = ()
 	reports: tuple[VerificationReport, ...] = ()
 	plans: tuple[GoalPlan, ...] = ()
+	specifications: tuple[Specification, ...] = ()
+	specification_gates: tuple[SpecificationGate, ...] = ()
 	decompositions: tuple[Decomposition, ...] = ()
 	gates: tuple[DecompositionGate, ...] = ()
 	dispatches: tuple[DispatchRecord, ...] = ()
@@ -2212,6 +2533,20 @@ class ProjectState(View):
 		never a unique artefact — a gate approval has to name which revision it approved.
 		"""
 		matching = [d for d in self.decompositions if d.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def specification(self, specification_id: str) -> Specification | None:
+		"""Look up a proposed specification by id."""
+		return next((s for s in self.specifications if s.id == specification_id), None)
+
+	def latest_specification(self, contract_id: str) -> Specification | None:
+		"""Most recent specification proposed for a contract, if any (FR-094)."""
+		matching = [s for s in self.specifications if s.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def latest_specification_gate(self, specification_id: str) -> SpecificationGate | None:
+		"""Most recent gate result for a specification, if it has been gated."""
+		matching = [g for g in self.specification_gates if g.specification_id == specification_id]
 		return matching[-1] if matching else None
 
 	def latest_gate(self, decomposition_id: str) -> DecompositionGate | None:

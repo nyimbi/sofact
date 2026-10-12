@@ -11,7 +11,13 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from synthetic import elicitation_to_contract, gated_contract, kinds, synthetic_service
+from synthetic import (
+	elicitation_to_contract,
+	gated_contract,
+	kinds,
+	specify_and_approve,
+	synthetic_service,
+)
 
 from sofact._uuid7 import uuid7str
 from sofact.decomposition import (
@@ -424,6 +430,7 @@ class TestTheHardStop:
 		"""The machine half passing is not the gate passing (FR-087)."""
 		service = synthetic_service(home, tmp_path, "complete")
 		_, contract_id = await elicitation_to_contract(service)
+		await specify_and_approve(service, contract_id)
 		await service.decompose(contract_id)
 
 		with pytest.raises(ValueError, match="has not approved it"):
@@ -455,6 +462,7 @@ class TestTheHardStop:
 		"""No code path may set ``approved_by``: it is the operator's field alone."""
 		service = synthetic_service(home, tmp_path, "complete")
 		_, contract_id = await elicitation_to_contract(service)
+		await specify_and_approve(service, contract_id)
 		proposal = await service.decompose(contract_id)
 
 		result = await service.decomposition_gate(proposal.id)
@@ -470,6 +478,7 @@ class TestTheHardStop:
 		"""FR-094: approving an older revision approves a proposal nobody is looking at."""
 		service = synthetic_service(home, tmp_path, "complete")
 		_, contract_id = await elicitation_to_contract(service)
+		await specify_and_approve(service, contract_id)
 		first = await service.decompose(contract_id)
 		await service.decompose(contract_id)  # a revision supersedes it
 
@@ -487,6 +496,7 @@ class TestTheHardStop:
 		"""
 		service = synthetic_service(home, tmp_path, "complete")
 		_, contract_id = await elicitation_to_contract(service)
+		await specify_and_approve(service, contract_id)
 		proposal = await service.decompose(contract_id)
 		contract = await service.contract_by_id(contract_id)
 		# Point every module at one clause: the other clause is now owned by nobody.

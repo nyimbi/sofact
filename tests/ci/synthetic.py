@@ -22,13 +22,23 @@ from pathlib import Path
 
 from conftest import answer_everything
 
+from sofact._uuid7 import uuid7str
 from sofact.harness import HarnessSpec
 from sofact.service import FactoryService
-from sofact.views import GoalEntry, GoalPlan
+from sofact.views import (
+	Assumption,
+	Contract,
+	GoalEntry,
+	GoalPlan,
+	SystemEntity,
+	SystemModel,
+	ValueHypothesis,
+)
 
 __all__ = [
 	"SCRIPT",
 	"SCRIPT_NAME",
+	"a_model_for",
 	"base_spec",
 	"db_spec",
 	"decompose_and_approve",
@@ -39,6 +49,7 @@ __all__ = [
 	"reset_calls",
 	"seed_store",
 	"spec_json",
+	"specify_and_approve",
 	"synthetic_service",
 	"write_script",
 ]
@@ -440,13 +451,87 @@ async def elicitation_to_contract(
 	return goal.id, contract.id
 
 
+def a_model_for(contract: Contract) -> SystemModel:
+	"""The system model an operator would declare for the synthetic contract.
+
+	One entity per clause, each linked to the clause it came from, so the FR-081
+	reference check has a real one-to-one link to compare rather than a set that happens
+	to intersect. This is not the machine inventing a model — the model is an operator
+	artefact (FR-078) and this helper stands in for the operator — but it is *derived*
+	rather than hand-written so it cannot drift out of step with the contract it is a
+	model of, which is the drift FR-084 exists to prevent.
+	"""
+	entities = tuple(
+		SystemEntity(
+			name=_entity_name(clause.statement, index),
+			description=clause.statement,
+			clause_ids=(clause.id,),
+		)
+		for index, clause in enumerate(contract.clauses)
+	)
+	return SystemModel(entities=entities)
+
+
+def _entity_name(statement: str, index: int) -> str:
+	"""A stable, unique entity name taken from a clause's own opening words.
+
+	Uniqueness is by index rather than by hope: two clauses opening with the same three
+	words would otherwise collide, and a model with two entities of one name is a model
+	whose references cannot be told apart.
+	"""
+	words = [w.strip(".,;:") for w in statement.split()[:3]]
+	return f"{'-'.join(w for w in words if w) or 'entity'}-{index}"
+
+
+async def specify_and_approve(
+	service: FactoryService,
+	contract_id: str,
+	*,
+	by: str = "operator",
+) -> str:
+	"""Take a contract through the P2 gate honestly. Returns the specification id.
+
+	Every test that wants a decomposition has to come through here, because
+	``decompose`` refuses downstream of an unapproved specification (FR-061) and the
+	alternative — a test-only bypass — would leave the suite exercising a path
+	production does not have.
+
+	The operator-supplied halves — the model, one assumption, the value hypothesis — are
+	supplied here rather than left empty, because FR-079 and FR-085 make them
+	requirements and the gate fails without them. A helper that omitted them would make
+	every downstream test a test of the refusal, and the refusal is what
+	``test_specification.py`` is for.
+	"""
+	contract = await service.contract_by_id(contract_id)
+	proposal = await service.specify(
+		contract_id,
+		system_model=a_model_for(contract),
+		assumptions=(
+			Assumption(
+				id=uuid7str(),
+				statement="Reminders are scheduled by the client, not by the server.",
+				refuted_by="A server-side scheduler process appearing in the deployment.",
+			),
+		),
+		value_hypothesis=ValueHypothesis(
+			effect="Operators stop missing scheduled reminders.",
+			beneficiary="The end user reading the dashboard.",
+			refuting_instrument="Dashboard session logs showing reminders read late.",
+		),
+	)
+	await service.approve_specification(proposal.id, by=by)
+	return proposal.id
+
+
 async def gated_contract(
 	service: FactoryService,
 	*,
 	commands: str | None = None,
 	by: str = "operator",
 ) -> tuple[str, str]:
-	"""P0 through P3: a contract, decomposed and approved. Returns ``(goal_id, contract_id)``.
+	"""P0 through P3: a contract, specified, decomposed and approved.
+
+	Returns ``(goal_id, contract_id)``.
 
 	The default entry point for any test that wants to *build* something, because
 	planning requires an approved decomposition (FR-061) and a test that skipped the gate
@@ -454,6 +539,7 @@ async def gated_contract(
 	:func:`elicitation_to_contract` and assert on the refusal.
 	"""
 	goal_id, contract_id = await elicitation_to_contract(service, commands=commands)
+	await specify_and_approve(service, contract_id, by=by)
 	await decompose_and_approve(service, contract_id, by=by)
 	return goal_id, contract_id
 

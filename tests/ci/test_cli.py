@@ -284,16 +284,37 @@ def _answers() -> str:
 	return "\n".join(GOOD_ANSWERS[spec.dimension] for spec in DIMENSIONS)
 
 
-def _contract(home: Path) -> Result:
-	"""Run P4, then P3, then approve — the gate FR-061 says nothing may pass unapproved.
+SPECIFY_ARGS: list[str] = [
+	"--entity",
+	"Reminder:1",
+	"--assumption",
+	"Reminders are scheduled client-side | a server scheduler in the deployment",
+	"--value",
+	"Fewer missed reminders | the end user | dashboard session logs",
+]
+"""The operator's half of the P2 gate, as flags.
 
-	``plan`` refuses a contract whose decomposition is unapproved, so every test that
-	wants a plan has to come through the gate. Folding it into the helper rather than
-	passing ``require_approval=False`` keeps the suite on the path production has.
+FR-078, FR-079 and FR-085 make the model, the assumptions and the value hypothesis
+required, and they are the operator's own statements rather than derivations — so a
+pipeline that wants to reach P3 has to supply them, exactly as production does. Kept in
+one place because every CLI test that wants a plan now runs through this gate.
+"""
+
+
+def _contract(home: Path) -> Result:
+	"""Run P4, then P2, then P3, then approve — the gates FR-061 says nothing may pass.
+
+	``decompose`` refuses a contract whose specification is unapproved, and ``plan``
+	refuses one whose decomposition is unapproved, so every test that wants a plan has to
+	come through both gates. Folding them into the helper rather than passing a bypass
+	keeps the suite on the path production has.
 	"""
 	result = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
 	if result.exit_code != 0:
 		return result
+	specified = RUNNER.invoke(app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS])
+	if specified.exit_code != 0:
+		return specified
 	decomposed = RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"])
 	if decomposed.exit_code != 0:
 		return decomposed
@@ -456,6 +477,12 @@ class TestConfiguredHarnesses:
 		conversation(home)
 		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "false"])
 		assert contract.exit_code == 0, contract.output
+		assert (
+			RUNNER.invoke(
+				app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS]
+			).exit_code
+			== 0
+		)
 		assert RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
@@ -953,6 +980,12 @@ class TestTheRepairVerb:
 		conversation(home)
 		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", REPAIR_ORACLE])
 		assert contract.exit_code == 0, contract.output
+		assert (
+			RUNNER.invoke(
+				app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS]
+			).exit_code
+			== 0
+		)
 		assert RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
 		probed = RUNNER.invoke(app, ["--home", str(home), "probe"])
