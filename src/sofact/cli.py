@@ -830,11 +830,17 @@ def _print_dispatch(record: DispatchRecord) -> None:
 		fg=colour,
 	)
 	typer.secho(f"      argv: {' '.join(record.argv[:6])} …", fg="bright_black")
-	if record.note and record.outcome is StepOutcome.NOT_DISPATCHED:
-		# For a step that never ran, the note *is* the fact: without it the operator sees
-		# `not_dispatched` and no reason, and a refusal whose reason is invisible is
-		# indistinguishable from a bug.
-		typer.secho(f"      {record.note}", fg="red")
+	if record.note:
+		# The note is where a record states what it could not witness, so it is printed
+		# whatever the outcome. Printing it only for ``NOT_DISPATCHED`` was a real defect:
+		# a session that exited 0 and left no record read as `completed` in green with
+		# "its artefact was checked" underneath, while the one sentence saying nothing was
+		# witnessed sat unprinted in this field. A caveat the operator cannot see is a
+		# caveat that does not exist, and this one contradicts the line above it.
+		typer.secho(
+			f"      {record.note}",
+			fg="red" if record.outcome is StepOutcome.NOT_DISPATCHED else "yellow",
+		)
 	if record.tokens_observed is not None:
 		typer.echo(f"      output tokens: {record.tokens_observed}")
 	if record.capability_loss is not None:

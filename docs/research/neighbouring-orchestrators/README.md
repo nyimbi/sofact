@@ -90,15 +90,34 @@ have:
 
 SoFact's `StepOutcome` is `NOT_DISPATCHED | COMPLETED | FAILED | BUDGET_EXHAUSTED`. A
 step whose session left no record — the harness exited without writing one, or the
-record command printed nothing (ADR-0028) — currently reads as `NOT_DISPATCHED` or
-`FAILED`, and neither says *the work may have happened and cannot be recovered*. That
-distinction is load-bearing for FR-006's verdict reuse: a verdict keyed to an artefact
-whose provenance is unknown is a verdict standing on nothing.
+record command printed nothing (ADR-0028) — was **measured** on this tree to read as
+`outcome=completed, exit_code=0, session_path=None`, with a note beginning "no session
+record was found, so nothing about this session was witnessed beyond the process exit".
 
-OpenRig's five states are the shape of the fix, and NFR-024 is the reason to make it:
-an absent observation must not be rounded into a present one. This is a small change to
-an enum and to the dispatch path that sets it, and it should be scheduled rather than
-done opportunistically.
+`completed` is **correct** and is not the defect. FR-163 triggers the check on the
+session's *process* outcome — "when its process exits without timing out" — and the
+verdict is about the artefact in the workspace, not about the record. The spec already
+documents a prior defect caused by gating that trigger on a declaration the default
+harness cannot make, and re-gating it on the record would repeat it. An earlier reading
+of this section proposed a `StepOutcome.UNWITNESSED`; that was wrong for exactly that
+reason and was reverted.
+
+The defect was in the **display**. `_print_dispatch` printed `record.note` only when
+the outcome was `NOT_DISPATCHED`, so a session that exited 0 and left no record read as
+`completed` in green with "its artefact was checked" underneath, while the one sentence
+saying nothing was witnessed sat unprinted in a field the operator never sees. A caveat
+the operator cannot see is a caveat that does not exist, and this one contradicts the
+line above it. The fix prints the note for every outcome — red for `NOT_DISPATCHED`,
+yellow otherwise — with the defect recorded in the comment, and
+`test_a_recordless_session_does_not_read_as_a_green_completion` in `tests/ci/test_cli.py`
+holds it, canaried against the unpatched `cli.py` where it fails.
+
+OpenRig's five states remain a fair shape for a *future* state that says *the work may
+have happened and cannot be recovered*, which is load-bearing for FR-006's verdict
+reuse: a verdict keyed to an artefact whose provenance is unknown stands on nothing.
+That is a real distinction NFR-024 would want named. It is **not** what the outcome
+field is for, and it is not needed to fix the reporting: the note already carries it,
+and the note is now visible. Queued as a separate question, not folded into the enum.
 
 ## 3. An isolation hazard to check: an env var is not a boundary
 

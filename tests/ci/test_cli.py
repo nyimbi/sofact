@@ -271,6 +271,28 @@ class TestConfiguredHarnesses:
 		assert measured.exit_code == 0, measured.output
 		assert "declaration precision of synthetic" in measured.output
 
+	def test_a_recordless_session_does_not_read_as_a_green_completion(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The caveat must be visible, not merely recorded.
+
+		Measured on this tree before the note was printed for every outcome: a child that
+		exits 0 and leaves no session record read as ``[0] completed`` in green with "the
+		session completed, so its artefact was checked (FR-163)" underneath it — while the
+		one sentence saying nothing was witnessed sat unprinted in ``record.note``, shown
+		only for ``NOT_DISPATCHED``. The outcome is correct (FR-163 triggers on the
+		process, not on the record, and the verdict is about the tree), so the fix is the
+		*display*: a caveat the operator cannot see contradicts the line above it.
+		"""
+		configure(tmp_path, monkeypatch, mode="silent")
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		assert "nothing about this session was witnessed" in dispatched.output, dispatched.output
+
 	def test_a_failing_wave_exits_nonzero(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:
