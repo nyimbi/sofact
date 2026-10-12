@@ -39,7 +39,9 @@ than argued. Numbering is sequential and never reused.
 | [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Branch-per-step (FR-100) is built, sealed and recorded on the dispatch (the branch's *name* is revised by ADR-0025); worktree isolation (FR-141) is deferred until a wave runs concurrently or a plan spans more than one module, and worktrees are containment rather than confinement | Accepted |
 | [0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) | The decomposition gate has two halves and a module is one clause: the proposal is a function of the contract and calls no model, the machine half is facts and cannot be waived by approval, and a step names the module it implements so the branch is per module with several steps sharing it, reconciling FR-100 with FR-136 | Accepted |
 | [0026](0026-p7-checks-three-of-six-requirements-and-names-the-rest.md) | P7 checks three of §10's six requirements (FR-111 build order, FR-113 import discipline by parsing the sealed files, FR-114 minimum violating set) and names the other three on every report rather than reporting green: FR-112 needs a machine-readable interface, FR-115 the system model, FR-116 system-level criteria | Accepted |
+| [0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md) | A declared surface is diffed in both directions and a claim is not a discharge: FR-112 becomes checkable once a module declares a machine-readable surface, and `not_implemented` is the complement of what the checks *discharge* — amending ADR-0026 point 1 | Accepted |
 | [0028](0028-a-record-source-may-be-a-command-whose-stdout-is-the-record.md) | A record source may be a command whose stdout is the record: `session_command` and `record_format` are added, the stdout is materialised into a file so the seam stays singular, completion is read from the document rather than the exit code (opencode exits 0 for a failed session), and `opencode` joins the producer set — superseding ADR-0023 decision 1 | Accepted |
+| [0029](0029-an-append-takes-an-exclusive-lock.md) | An append takes an exclusive lock across the read-modify-write: `fcntl.flock` on a sibling `ledger.lock` covers read-tail-and-append and the cache is dropped inside the lock, so two processes cannot both chain onto the same tail — the chain made history tamper-evident, and this makes it append-safe | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -60,9 +62,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Thirteen records here answer questions the specification
+Not every decision resolves a `D`. Fourteen records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and ten because the rule each replaces was never written
+about the factory's behaviour, and eleven because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -80,5 +82,4 @@ down at all and so had no `D` to resolve:
 | [0022](0022-a-refutation-is-a-work-order.md) | What happens after a refuted wave, which is the one place the factory stopped being able to finish. The rule it replaces read FR-101's "not retry indefinitely" as "do not retry" and halted for good, so `DEFAULT_STEP_ATTEMPTS = 1` carried the whole policy — and the halt was in the constant, not in the architecture |
 | [0023](0023-a-record-is-addressed-by-a-path.md) | Which harnesses the adapter can address at all. The rule it makes explicit is that `session_glob` is a filesystem glob, so a record kept in a database is unreachable no matter how good its telemetry — which is what drops `opencode` while admitting `claude` |
 | [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Which half of the isolation requirement is buildable now. FR-100 and FR-141 were asserted as done by the goal text and by the spec's tooling table while no code invoked git; this record builds the branch half (a step needs only its own ordinal), defers the worktree half (which needs a module identity the plan cannot supply), and refuses to sell worktrees as confinement when the measurement says a tool allowlist is not one |
-| [0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md) | FR-112 becomes checkable once a module *declares* a machine-readable surface (rather than SoFact inventing one, which ADR-0025 refuses): the built public names are read from the AST and diffed both ways, so a producer that widens its surface is a finding too. Amends ADR-0026 point 1 — `not_implemented` is the complement of what the checks *discharge*, not of what they *claim*, because a check that diffs nothing has discharged nothing | Accepted |
-| [0028](0028-a-record-source-may-be-a-command-whose-stdout-is-the-record.md) | A record source may be a command whose stdout is the record: `session_command` and `record_format` are added, the stdout is materialised into a file so the seam stays singular, completion is read from the document rather than the exit code (opencode exits 0 for a failed session), and `opencode` joins the producer set — superseding ADR-0023 decision 1 | Accepted |
+| [0029](0029-an-append-takes-an-exclusive-lock.md) | That the log is append-safe, which ADR-0003 never asked. The chain was built to make history tamper-*evident*, and it is easy to mistake that for making it append-*safe*: an unlocked read-modify-write let two processes claim the same index and the same `prev_hash`, and the symptom was not a lost row but an unreadable project |

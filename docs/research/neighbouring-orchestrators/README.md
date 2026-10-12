@@ -6,10 +6,10 @@ product READMEs, read in full; neither was installed or executed. Both sit at th
 layer as SoFact — above the harnesses, not inside one — so they are the nearest
 available evidence about what that layer's hard parts actually are.
 
-**Outcome:** one defect found and reproduced in SoFact (the ledger has no atomic
-append), one reporting gap, one isolation hazard to check, and one negative result
-about differentiation. Nothing here changes the spec; the defect is a bug against
-FR-003.
+**Outcome:** one defect found and reproduced in SoFact (the ledger had no atomic
+append), now fixed under [ADR-0029](../../adr/0029-an-append-takes-an-exclusive-lock.md);
+one reporting gap; one isolation hazard to check; and one negative result about
+differentiation. Nothing here changes the spec; the defect was a bug against FR-003.
 
 ## 1. The finding: SoFact's ledger is not atomic, and Paperclip names the fix
 
@@ -53,7 +53,7 @@ halts the tool rather than corrupting one answer is the worse of the two failure
 
 ```python
 if concurrent and len(wave) > 1:
-    records = list(await asyncio.gather(*(self.dispatch_step(...) for step in wave)))
+	records = list(await asyncio.gather(*(self.dispatch_step(...) for step in wave)))
 ```
 
 Every `dispatch_step` ends in `self._commit(...)`, and `_commit` calls
@@ -64,18 +64,21 @@ reproduced above, and it is not zero. The two-process case is the real one: noth
 SoFact claims the log has a single writer, and `sofact --home <shared>` from two shells
 is an ordinary thing to do.
 
-**This is a bug, not a design decision, and it should be fixed rather than recorded.**
+**This is a bug, not a design decision, and it is fixed rather than merely recorded.**
 The fix is an exclusive lock held across read-tail-and-append, which is what Paperclip's
-"execution locks" are. `fcntl.flock` on the ledger file is the POSIX answer and is
-already available; the lock must cover the whole read-modify-write, not only the write.
-A second, weaker option — re-read the tail under the lock and re-chain — is the same fix
-with the cache invalidated, and is worth doing anyway because the cache is what makes
-the window wide.
+"execution locks" are. `fcntl.flock` on a sibling `ledger.lock` is the POSIX answer and
+was already available; the lock covers the whole read-modify-write, and the read cache
+is dropped inside it so the tail chained onto is the one on disk rather than the one
+this process remembers. The lock file is a sibling rather than the log itself because
+`flock` binds to an inode, and the log's inode is not something this code owns. This is
+recorded as [ADR-0029](../../adr/0029-an-append-takes-an-exclusive-lock.md), with
+`TestConcurrentAppend` in `tests/ci/test_ledger.py` driving two real subprocesses
+synchronised on marker files.
 
 **The generalisable lesson** (this is the one worth keeping): a hash-chained log makes
 history *tamper-evident*, and it is easy to mistake that for making it
-*append-safe*. The chain detects a fork after the fact and then refuses to read; it does
-nothing to prevent one. Detection is not prevention, and a store whose response to
+*append-safe*. The chain detects a fork after the fact and then refuses to read; it
+does nothing to prevent one. Detection is not prevention, and a store whose response to
 corruption is to halt is a store that needs a lock, not a better hash.
 
 ## 2. A reporting gap: "the work cannot be resumed without a human"

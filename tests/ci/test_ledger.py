@@ -6,6 +6,9 @@ rather than merely exercising it: edit an entry, reorder entries, break the JSON
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -73,6 +76,84 @@ class TestChaining:
 	def test_ledger_must_be_jsonl(self, tmp_path: Path) -> None:
 		with pytest.raises(AssertionError, match="jsonl"):
 			Ledger(tmp_path / "ledger.json")
+
+
+class TestConcurrentAppend:
+	"""Two writers, one log.
+
+	The chain makes history tamper-*evident*; it does nothing to make it
+	append-*safe*. An append that reads the tail, chains onto it and writes, with no
+	lock and no re-read, lets two writers claim the same index and the same
+	``prev_hash`` — and the result is not a lost row but a broken chain, which
+	``require_intact`` turns into an unreadable project.
+
+	The failure is deterministic only if both writers have read the tail before
+	either writes, so the children synchronise on marker files rather than on
+	``sleep``: a test that races on timing passes for the wrong reason.
+	"""
+
+	# Both children read the (empty) tail, announce readiness, and wait for the go
+	# marker before appending. Neither can append until both have read.
+	_CHILD = """
+import sys, time
+from pathlib import Path
+from sofact.ledger import Ledger
+from sofact.views import LedgerKind
+
+path, barrier, name, text = (Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+ledger = Ledger(path)
+assert len(ledger) == 0, "child started after the log was already written"
+(barrier / f"{name}.ready").write_text("", encoding="utf-8")
+deadline = time.monotonic() + 10
+while not (barrier / "go").exists():
+    assert time.monotonic() < deadline, "barrier timed out"
+    time.sleep(0.005)
+ledger.append(LedgerKind.ADVISOR_NOTE, {"text": text})
+"""
+
+	def _race(self, tmp_path: Path) -> tuple[Ledger, list[subprocess.Popen[str]]]:
+		path = tmp_path / "ledger.jsonl"
+		barrier = tmp_path / "barrier"
+		barrier.mkdir()
+		children = [
+			subprocess.Popen(
+				[sys.executable, "-c", self._CHILD, str(path), str(barrier), name, name],
+				cwd=tmp_path,
+				stdout=subprocess.PIPE,
+				stderr=subprocess.PIPE,
+				text=True,
+			)
+			for name in ("a", "b")
+		]
+		deadline = time.monotonic() + 10
+		while len(list(barrier.glob("*.ready"))) < 2:
+			assert time.monotonic() < deadline, "children never reached the barrier"
+			time.sleep(0.005)
+		(barrier / "go").write_text("", encoding="utf-8")
+		return Ledger(path), children
+
+	def _finish(self, children: list[subprocess.Popen[str]]) -> None:
+		for child in children:
+			_, err = child.communicate(timeout=30)
+			assert child.returncode == 0, f"child failed: {err}"
+
+	def test_two_writers_do_not_fork_the_chain(self, tmp_path: Path) -> None:
+		ledger, children = self._race(tmp_path)
+		self._finish(children)
+		ledger.invalidate()
+		status = ledger.verify_chain()
+		assert status.ok, f"chain forked: {status.reason}"
+		assert status.length == 2
+		assert sorted(e.payload["text"] for e in ledger.entries()) == ["a", "b"]
+
+	def test_a_writer_sees_the_other_writers_entry(self, tmp_path: Path) -> None:
+		"""The second appender must chain onto the first, not onto the empty log."""
+		ledger, children = self._race(tmp_path)
+		self._finish(children)
+		ledger.invalidate()
+		entries = ledger.entries()
+		assert [e.index for e in entries] == [0, 1]
+		assert entries[1].prev_hash == entries[0].entry_hash
 
 
 class TestTamperDetection:

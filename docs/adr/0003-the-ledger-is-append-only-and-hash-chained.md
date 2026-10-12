@@ -51,6 +51,13 @@ state that looks current.
   rewrite the whole file and recompute every hash. Detecting that requires an anchor
   outside the file (a signed head, an external notary), which is out of scope for v1
   and is recorded here so the gap is not mistaken for a guarantee.
+- **Tamper-evident is not append-safe, and this record originally conflated the two.**
+  The chain detects a fork after the fact and then refuses to read; it does nothing to
+  prevent one. An unlocked read-modify-write in `append` let two writers claim the same
+  index and the same `prev_hash`, which broke the chain and made the project
+  unreadable. [ADR-0029](0029-an-append-takes-an-exclusive-lock.md) closes that with an
+  exclusive lock across the read-modify-write. A store whose response to corruption is
+  to halt is a store that needs a lock, not a better hash.
 - Cost is disk, and the log grows monotonically. Acceptable: events are small and the
   delivery envelope is bounded (spec §1.3).
 - Verification can cite the exact clause set it judged: `VerificationReport` carries

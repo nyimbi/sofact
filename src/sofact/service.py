@@ -45,7 +45,7 @@ from sofact.harness import (
 	spec_for as harness_spec_for,
 )
 from sofact.integration import integrate
-from sofact.ledger import LEDGER_FILENAME, Ledger, LedgerEntry
+from sofact.ledger import LEDGER_FILENAME, LOCK_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
 from sofact.planner import (
 	DEFAULT_REPAIR_ATTEMPTS,
@@ -898,7 +898,7 @@ class FactoryService:
 		resolved = workspace.resolve()
 		if resolved != home and home not in resolved.parents:
 			return ()
-		unowned = (LEDGER_FILENAME, "sessions")
+		unowned = (LEDGER_FILENAME, LOCK_FILENAME, "sessions")
 		return tuple(name for name in unowned if (resolved / name).exists())
 
 	async def _module_for(self, plan: GoalPlan, clause_ids: tuple[str, ...]) -> str | None:

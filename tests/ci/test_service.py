@@ -40,6 +40,7 @@ from sofact.harness import (
 	SPECS,
 	ConfiguredHarnessAdapter,
 )
+from sofact.ledger import LOCK_FILENAME
 from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home, resolve_tools
 from sofact.views import (
 	ElicitationDimension,
@@ -1273,22 +1274,28 @@ class TestWhatGetsWritten:
 	async def test_the_service_writes_exactly_one_file(self, home: Path, tmp_path: Path) -> None:
 		"""Every fact SoFact knows must be in the log, or it is not auditable.
 
-		Two trees are excluded, and each for a stated reason rather than to make this
+		Three trees are excluded, and each for a stated reason rather than to make this
 		pass. ``sessions`` is the harness's own session records, which SoFact reads and
 		does not author. ``.git`` is git's metadata inside the workspace SoFact created
-		(FR-100): it is the repository, not a record of what happened. Everything SoFact
+		(FR-100): it is the repository, not a record of what happened. ``ledger.lock``
+		is the advisory lock :meth:`Ledger.append` holds across its read-modify-write;
+		it is a synchronisation primitive, not an account of the run, and it is asserted
+		empty below so the exclusion cannot smuggle a record through. Everything SoFact
 		*writes as its own account of the run* must still be the ledger alone, so a
 		second bookkeeping file appearing anywhere is still a failure.
 		"""
 		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")
 		await service.dispatch_step(plan_id, step_id)
 		await service.check_integrity(plan_id)
+		excluded = {"sessions", ".git", LOCK_FILENAME}
 		written = {
 			path.relative_to(home)
 			for path in home.rglob("*")
-			if path.is_file() and "sessions" not in path.parts and ".git" not in path.parts
+			if path.is_file() and not excluded & set(path.parts)
 		}
 		assert written == {Path("ledger.jsonl")}
+		for lock in home.rglob(LOCK_FILENAME):
+			assert lock.stat().st_size == 0, f"{lock} holds content, so it is not a lock"
 
 	async def test_the_log_verifies_after_a_full_run(self, home: Path, tmp_path: Path) -> None:
 		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")

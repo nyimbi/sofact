@@ -9,14 +9,22 @@ three properties a mutable store would not:
   history invalidates the tail;
 * **an audit trail that is the artefact**, not a description of it.
 
+The chain makes history tamper-*evident*. It does not make it append-*safe*: a fork
+is discovered after the fact, and the discovery is a refusal to read. Appending
+therefore takes an exclusive lock across the whole read-modify-write, so two writers
+cannot both chain onto the same tail.
+
 Deliberately synchronous. The work is one ``write`` of one short line; there is no
 real await point, and pretending otherwise would only hide the fact that appends are
-serialised anyway.
+serialised anyway — now by an actual lock rather than by assumption.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +38,7 @@ from sofact.views import (
 __all__ = ["Ledger", "LedgerCorruptError"]
 
 LEDGER_FILENAME = "ledger.jsonl"
+LOCK_FILENAME = "ledger.lock"
 
 
 class LedgerCorruptError(RuntimeError):
@@ -47,10 +56,32 @@ class Ledger:
 	def __init__(self, path: Path) -> None:
 		assert path.suffix == ".jsonl", f"ledger must be a .jsonl file, got {path.name!r}"
 		self.path = path
+		self.lock_path = path.with_name(LOCK_FILENAME)
 		self._cache: tuple[LedgerEntry, ...] | None = None
 
 	def __repr__(self) -> str:
 		return f"Ledger({self.path}, entries={len(self.entries())})"
+
+	@contextmanager
+	def _exclusive(self) -> Generator[None]:
+		"""Hold an exclusive lock across a read-modify-write of the log.
+
+		The lock is a sibling file, not the log itself: ``flock`` binds to an inode,
+		and the log is created and unlinked by other code (``remove()``), so locking
+		the log would lock whichever inode happened to be open. A dedicated lock file
+		is created once and never replaced, so every writer contends on one inode.
+
+		The lock is advisory, so every writer in this tree must go through
+		:meth:`append` — which is why the module docstring states it as a rule rather
+		than leaving it to the reader.
+		"""
+		self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+		with self.lock_path.open("a", encoding="utf-8") as handle:
+			fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+			try:
+				yield
+			finally:
+				fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 	# ------------------------------------------------------------------ read
 
@@ -128,26 +159,36 @@ class Ledger:
 	def append(self, kind: LedgerKind, payload: dict[str, Any]) -> LedgerEntry:
 		"""Append one event and return it.
 
-		The new entry is chained onto the current tail, so an out-of-band edit
-		elsewhere in the file is detected by :meth:`verify_chain` rather than silently
-		absorbed.
+		The new entry is chained onto the tail of the log *as it is under the lock*, so
+		a second writer chains onto the first rather than onto the log both of them
+		read before either wrote. An out-of-band edit elsewhere in the file is still
+		detected by :meth:`verify_chain` rather than silently absorbed.
+
+		The cache is dropped on entry and rebuilt from disk inside the lock: the whole
+		point is that this process's cached tail may already be stale.
 		"""
 		assert isinstance(kind, LedgerKind), f"kind must be a LedgerKind, got {type(kind)}"
-		self.require_intact()
-		entries = self.entries()
-		entry = LedgerEntry.create(
-			index=len(entries),
-			kind=kind,
-			payload=payload,
-			prev_hash=self.last_hash(),
-		)
-		self.path.parent.mkdir(parents=True, exist_ok=True)
-		with self.path.open("a", encoding="utf-8") as handle:
-			handle.write(json.dumps(entry.model_dump(mode="json"), separators=(",", ":")) + "\n")
-			handle.flush()
-		self._cache = (*entries, entry)
-		assert self._cache[-1].entry_hash == entry.entry_hash, "append did not reach the cache tail"
-		return entry
+		with self._exclusive():
+			self._cache = None
+			self.require_intact()
+			entries = self.entries()
+			entry = LedgerEntry.create(
+				index=len(entries),
+				kind=kind,
+				payload=payload,
+				prev_hash=self.last_hash(),
+			)
+			self.path.parent.mkdir(parents=True, exist_ok=True)
+			with self.path.open("a", encoding="utf-8") as handle:
+				handle.write(
+					json.dumps(entry.model_dump(mode="json"), separators=(",", ":")) + "\n"
+				)
+				handle.flush()
+			self._cache = (*entries, entry)
+			assert self._cache[-1].entry_hash == entry.entry_hash, (
+				"append did not reach the cache tail"
+			)
+			return entry
 
 	def invalidate(self) -> None:
 		"""Drop the read cache, forcing a re-read from disk.
