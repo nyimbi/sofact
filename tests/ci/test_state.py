@@ -39,6 +39,8 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.CLAIM_DECLARED: "claims",
 	LedgerKind.ADVISOR_NOTE: "notes",
 	LedgerKind.PLAN_COMPILED: "plans",
+	LedgerKind.DECOMPOSITION_PROPOSED: "decompositions",
+	LedgerKind.DECOMPOSITION_GATED: "gates",
 	LedgerKind.CAPABILITY_PROBED: "profiles",
 	LedgerKind.STEP_DISPATCHED: "dispatches",
 	LedgerKind.RESEARCH_RUN: "research",
@@ -79,7 +81,7 @@ def test_every_event_kind_lands_in_a_field_and_every_field_has_a_kind() -> None:
 def test_an_empty_log_folds_to_a_state_with_every_field_empty() -> None:
 	state = fold(())
 
-	assert len(ProjectState.model_fields) == 14, "a new state field must be folded too"
+	assert len(ProjectState.model_fields) == 16, "a new state field must be folded too"
 	for name in ProjectState.model_fields:
 		value = getattr(state, name)
 		assert value == (), f"{name} should be empty, got {value!r}"

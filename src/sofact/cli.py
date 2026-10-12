@@ -32,6 +32,8 @@ from sofact.service import (
 )
 from sofact.views import (
 	ClauseKind,
+	Decomposition,
+	DecompositionGate,
 	DispatchRecord,
 	GoalPlan,
 	GoalStyle,
@@ -440,6 +442,75 @@ async def _draft(svc: FactoryService) -> None:
 	except ValueError as exc:
 		typer.secho(f"not ready: {exc}", fg="yellow")
 		raise typer.Exit(code=1) from exc
+
+
+@app.command(name="decompose")
+def decompose(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	approve: bool = typer.Option(
+		False,
+		"--approve",
+		help="Record the operator's approval of the proposed decomposition (FR-087).",
+	),
+	by: str = typer.Option("operator", "--by", help="Who is approving. Required with --approve."),
+) -> None:
+	"""Propose modules for the current contract, and gate the proposal (FR-087).
+
+	Without ``--approve`` this proposes and reports the machine checks, which is the
+	half a machine can do. FR-087's other half is the operator's, because §7.1 says no
+	oracle covers "this is the right architecture" — so approval is a separate, explicit
+	act rather than something a passing check implies.
+	"""
+	asyncio.run(_decompose(_service(_home_of(ctx, home)), approve=approve, by=by))
+
+
+async def _decompose(svc: FactoryService, *, approve: bool, by: str) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	proposal = await svc.decompose(built.id)
+	_print_decomposition(proposal, await svc.decomposition_gate(proposal.id))
+	if not approve:
+		return
+	try:
+		result = await svc.approve_decomposition(proposal.id, by=by)
+	except ValueError as exc:
+		typer.secho(f"cannot approve: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(f"\napproved by {result.approved_by}", fg="green")
+
+
+def _print_decomposition(proposal: Decomposition, result: DecompositionGate) -> None:
+	typer.secho(f"\ndecomposition {proposal.id}", fg="cyan", bold=True)
+	typer.echo(
+		f"  {proposal.interface_count} module(s); "
+		f"G1-G2 share {proposal.target_class_share:.0%} (FR-125)"
+	)
+	order = proposal.build_order()
+	typer.secho("  build order: " + " -> ".join(m.name for m in order), fg="bright_black")
+	for module in order:
+		typer.secho(f"    {module.name} [{module.module_class.value}]", fg="cyan")
+		typer.echo(f"        {module.interface}")
+		if module.depends_on:
+			names = ", ".join(
+				d.name for d in (proposal.module(i) for i in module.depends_on) if d is not None
+			)
+			typer.secho(f"        depends on {names}", fg="bright_black")
+	typer.secho("\n  gate", fg="cyan", bold=True)
+	for check in result.checks:
+		mark = "ok  " if check.passed else "FAIL"
+		colour = "green" if check.passed else "red"
+		typer.secho(f"    [{mark}] {check.name}: {check.detail}", fg=colour)
+	typer.secho(
+		"  approved" if result.is_approved else "  NOT approved: P3 is a human gate (FR-087)",
+		fg="green" if result.is_approved else "yellow",
+	)
 
 
 @app.command(name="plan")

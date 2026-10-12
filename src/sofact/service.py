@@ -20,6 +20,7 @@ from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, suggest_oracle
+from sofact.decomposition import approve, gate, propose
 from sofact.elicitation import (
 	DimensionSpec,
 	advise_prompt,
@@ -62,6 +63,8 @@ from sofact.views import (
 	CompletionClaim,
 	Contract,
 	DeclarationPrecision,
+	Decomposition,
+	DecompositionGate,
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
@@ -638,20 +641,129 @@ class FactoryService:
 
 	# ------------------------------------------------- P3: contract to goal plan
 
+	# ------------------------------------------------------- P3: decomposition
+
+	async def decompose(self, contract_id: str) -> Decomposition:
+		"""Propose modules for a contract, and gate the proposal (FR-087).
+
+		Proposing and gating are one call because a proposal nobody gated is not an
+		artefact the factory can act on, and recording the proposal without its checks
+		would leave the log showing an ungated architecture with no reason why. The gate
+		result is recorded *unapproved*: FR-087's human half is
+		:meth:`approve_decomposition`, and no code path here can set it.
+		"""
+		contract = await self.contract_by_id(contract_id)
+		proposal = propose(contract)
+		self._commit(
+			LedgerKind.DECOMPOSITION_PROPOSED,
+			{"decomposition": proposal.model_dump(mode="json")},
+		)
+		result = gate(proposal, contract)
+		self._commit(
+			LedgerKind.DECOMPOSITION_GATED,
+			{"gate": result.model_dump(mode="json")},
+		)
+		return proposal
+
+	async def latest_decomposition(self, contract_id: str) -> Decomposition | None:
+		"""Most recent proposal for a contract, if any (FR-094: revisions are normal)."""
+		state = await self.state()
+		return state.latest_decomposition(contract_id)
+
+	async def decomposition_gate(self, decomposition_id: str) -> DecompositionGate:
+		"""The gate result for a decomposition, raising if it was never gated."""
+		state = await self.state()
+		found = state.latest_gate(decomposition_id)
+		if found is None:
+			raise KeyError(f"decomposition {decomposition_id} was never gated")
+		return found
+
+	async def approve_decomposition(
+		self,
+		decomposition_id: str,
+		*,
+		by: str,
+	) -> DecompositionGate:
+		"""Record the operator's approval of a decomposition (FR-087).
+
+		Refuses when the machine half failed, and refuses when the decomposition is not
+		the one that was gated. An approval is the operator's judgement about
+		architecture — the one thing §7.1 says no oracle covers — so it may not be
+		recorded against a proposal the operator did not see.
+		"""
+		state = await self.state()
+		found = state.decomposition(decomposition_id)
+		if found is None:
+			raise KeyError(f"no such decomposition: {decomposition_id}")
+		contract = await self.contract_by_id(found.contract_id)
+		latest = state.latest_decomposition(found.contract_id)
+		if latest is not None and latest.id != found.id:
+			raise ValueError(
+				f"decomposition {decomposition_id} has been superseded by {latest.id}; "
+				"approving a revision that is no longer current would approve a proposal "
+				"the operator cannot be looking at (FR-094)"
+			)
+		# Recomputed rather than read from the log: the log holds the gate as it was
+		# rendered, and approving must be decided against the decomposition as it *is*.
+		# A stale gate row would otherwise let a revision be approved on an earlier
+		# revision's passing checks.
+		approved = approve(gate(found, contract), by=by)
+		self._commit(
+			LedgerKind.DECOMPOSITION_GATED,
+			{"gate": approved.model_dump(mode="json")},
+		)
+		return approved
+
+	async def require_approved_decomposition(self, contract_id: str) -> Decomposition:
+		"""The contract's approved decomposition, or a refusal (FR-061).
+
+		The hard stop. Planning a contract whose decomposition is unapproved is machine
+		work downstream of an unapproved gate, which FR-061 forbids under every
+		configuration — so the refusal is here, at the one call site that could proceed,
+		rather than in a caller's discipline.
+		"""
+		state = await self.state()
+		proposal = state.latest_decomposition(contract_id)
+		if proposal is None:
+			raise ValueError(
+				f"contract {contract_id} has no decomposition; P3 is a gate and must be "
+				"proposed and approved before anything is planned (FR-087)"
+			)
+		result = state.latest_gate(proposal.id)
+		if result is None:
+			raise ValueError(f"decomposition {proposal.id} was never gated")
+		if not result.is_satisfied:
+			reasons = "; ".join(f"{c.name}: {c.detail}" for c in result.failed)
+			raise ValueError(
+				"cannot proceed past P3: "
+				+ ("the operator has not approved it (FR-087)" if not result.is_approved else "")
+				+ (f" machine checks failed -- {reasons}" if reasons else "")
+			)
+		return proposal
+
 	async def compile_plan(
 		self,
 		contract_id: str,
 		*,
 		budget: StepBudget | None = None,
 		goal_style: GoalStyle = GoalStyle.LABELLED,
+		require_approval: bool = True,
 	) -> GoalPlan:
 		"""Compile a contract into ordered goal sessions (FR-136).
 
 		Deterministic and model-free: no prompt here is drafted by an LLM, because a
 		compiler that let a model write the goal would make FR-139's "did the producer
 		rewrite its own objective?" check a comparison of the compiler against itself.
+
+		``require_approval`` defaults to **true**, because FR-061 says there must be no
+		configuration under which the factory proceeds past an unapproved gate. The flag
+		exists only so a test or a demonstration can compile a plan without first
+		standing up an operator, and it is named for what it turns off rather than for
+		what it turns on.
 		"""
 		contract = await self.contract_by_id(contract_id)
+		if require_approval:
+			await self.require_approved_decomposition(contract_id)
 		plan = compile_plan(contract, budget=budget, goal_style=goal_style)
 		self._commit(
 			LedgerKind.PLAN_COMPILED,

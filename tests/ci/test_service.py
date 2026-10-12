@@ -23,7 +23,7 @@ import pytest
 from conftest import GOOD_ANSWERS, answer_everything
 from synthetic import (
 	base_spec,
-	elicitation_to_contract,
+	gated_contract,
 	kinds,
 	plan_and_service,
 	reset_calls,
@@ -308,7 +308,7 @@ class TestTheToolSet:
 
 class TestPlanThroughTheService:
 	async def test_a_contract_compiles_into_a_recorded_plan(self, service: FactoryService) -> None:
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		plan = await service.compile_plan(contract_id)
 		assert LedgerKind.PLAN_COMPILED.value in kinds(service)
 		assert await service.latest_plan(contract_id) == plan
@@ -320,26 +320,26 @@ class TestPlanThroughTheService:
 
 	async def test_the_plan_is_for_the_named_contract(self, service: FactoryService) -> None:
 		"""A caller naming a contract must get a plan for *that* contract."""
-		_, first = await elicitation_to_contract(service)
+		_, first = await gated_contract(service)
 		plan = await service.compile_plan(first)
 		contract = await service.contract_by_id(first)
 		assert plan.contract_id == contract.id
 		assert plan.contract_hash == contract.content_hash
 
 	async def test_goal_style_reaches_the_compiler(self, service: FactoryService) -> None:
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		plan = await service.compile_plan(contract_id, goal_style=GoalStyle.OBJECTIVE)
 		assert plan.goal_style is GoalStyle.OBJECTIVE
 
 	async def test_latest_plan_is_none_before_anything_is_compiled(
 		self, service: FactoryService
 	) -> None:
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		assert await service.latest_plan(contract_id) is None
 
 	async def test_compiling_twice_keeps_both_plans(self, service: FactoryService) -> None:
 		"""Superseding a plan must not destroy the one already dispatched against."""
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		first = await service.compile_plan(contract_id)
 		second = await service.compile_plan(contract_id)
 		assert first.id != second.id
@@ -468,7 +468,7 @@ class TestModelResolutionThroughTheService:
 		registered = synthetic_service(home, tmp_path, "badmodel-once")
 		profile = await registered.probe_harness(None)
 		assert profile.model_resolved is ProbeOutcome.ABSENT
-		_, contract_id = await elicitation_to_contract(registered)
+		_, contract_id = await gated_contract(registered)
 		plan = await registered.compile_plan(contract_id)
 		record = await registered.dispatch_step(plan.id, plan.steps[0].id)
 		assert record.outcome is StepOutcome.NOT_DISPATCHED
@@ -484,7 +484,7 @@ class TestModelResolutionThroughTheService:
 		"""A refusal a later reader cannot find is not auditable."""
 		registered = synthetic_service(home, tmp_path, "badmodel-once")
 		await registered.probe_harness(None)
-		_, contract_id = await elicitation_to_contract(registered)
+		_, contract_id = await gated_contract(registered)
 		plan = await registered.compile_plan(contract_id)
 		await registered.dispatch_step(plan.id, plan.steps[0].id)
 		state = await registered.state()
@@ -499,7 +499,7 @@ class TestModelResolutionThroughTheService:
 		"""The instrument must not be a blanket refusal: a good model still dispatches."""
 		registered = synthetic_service(home, tmp_path, "complete")
 		assert (await registered.probe_harness(None)).model_resolved is ProbeOutcome.CONFIRMED
-		_, contract_id = await elicitation_to_contract(registered)
+		_, contract_id = await gated_contract(registered)
 		plan = await registered.compile_plan(contract_id)
 		record = await registered.dispatch_step(plan.id, plan.steps[0].id)
 		assert record.outcome is StepOutcome.COMPLETED
@@ -516,7 +516,7 @@ async def dispatched_service(
 	"""Probe, run P0 to a contract, compile a plan. Returns ``(service, plan, step)``."""
 	registered = synthetic_service(home, tmp_path, mode)
 	await registered.probe_harness(None)
-	_, contract_id = await elicitation_to_contract(registered)
+	_, contract_id = await gated_contract(registered)
 	plan = await registered.compile_plan(contract_id)
 	return registered, plan.id, plan.steps[-1].id
 
@@ -561,7 +561,7 @@ class TestDispatchStep:
 	async def test_without_a_probe_nothing_is_dispatched(self, home: Path, tmp_path: Path) -> None:
 		"""FR-148: no capability may be assumed because it was declared."""
 		service = synthetic_service(home, tmp_path, "complete")
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		plan = await service.compile_plan(contract_id)
 		record = await service.dispatch_step(plan.id, plan.steps[-1].id)
 		assert record.outcome is StepOutcome.NOT_DISPATCHED
@@ -573,7 +573,7 @@ class TestDispatchStep:
 	) -> None:
 		"""A missing row is indistinguishable from a step nobody got to."""
 		service = synthetic_service(home, tmp_path, "complete")
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		plan = await service.compile_plan(contract_id)
 		await service.dispatch_step(plan.id, plan.steps[-1].id)
 		state = await service.state()
@@ -694,7 +694,7 @@ class TestDispatchPlan:
 	) -> None:
 		"""Without a probe the very first wave already stalls, so nothing runs."""
 		service = synthetic_service(home, tmp_path, "complete")
-		_, contract_id = await elicitation_to_contract(service)
+		_, contract_id = await gated_contract(service)
 		plan = await service.compile_plan(contract_id)
 		records = await service.dispatch_plan(plan.id)
 		assert len(records) == 1
@@ -1183,7 +1183,7 @@ class TestDeclaredCompletionPrecision:
 
 
 async def _compiled_plan(service: FactoryService):
-	_, contract_id = await elicitation_to_contract(service)
+	_, contract_id = await gated_contract(service)
 	return await service.compile_plan(contract_id)
 
 

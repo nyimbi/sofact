@@ -170,7 +170,19 @@ def _answers() -> str:
 
 
 def _contract(home: Path) -> Result:
-	return RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
+	"""Run P4, then P3, then approve — the gate FR-061 says nothing may pass unapproved.
+
+	``plan`` refuses a contract whose decomposition is unapproved, so every test that
+	wants a plan has to come through the gate. Folding it into the helper rather than
+	passing ``require_approval=False`` keeps the suite on the path production has.
+	"""
+	result = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
+	if result.exit_code != 0:
+		return result
+	decomposed = RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"])
+	if decomposed.exit_code != 0:
+		return decomposed
+	return result
 
 
 # --------------------------------------------------------------------------- #
@@ -307,6 +319,7 @@ class TestConfiguredHarnesses:
 		conversation(home)
 		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "false"])
 		assert contract.exit_code == 0, contract.output
+		assert RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
 
@@ -803,6 +816,7 @@ class TestTheRepairVerb:
 		conversation(home)
 		contract = RUNNER.invoke(app, ["--home", str(home), "contract", "--command", REPAIR_ORACLE])
 		assert contract.exit_code == 0, contract.output
+		assert RUNNER.invoke(app, ["--home", str(home), "decompose", "--approve"]).exit_code == 0
 		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
 		probed = RUNNER.invoke(app, ["--home", str(home), "probe"])
 		assert probed.exit_code == 0, probed.output

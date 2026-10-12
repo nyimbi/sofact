@@ -28,6 +28,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
 	"AutonomyLevel",
 	"CapabilityFinding",
@@ -38,6 +39,8 @@ __all__ = [
 	"CompletionClaim",
 	"Contract",
 	"DeclarationPrecision",
+	"Decomposition",
+	"DecompositionGate",
 	"DimensionStatus",
 	"DispatchMode",
 	"DispatchRecord",
@@ -45,6 +48,7 @@ __all__ = [
 	"ElicitationDimension",
 	"Evidence",
 	"EvidenceKind",
+	"GateCheck",
 	"Goal",
 	"GoalEntry",
 	"GoalPlan",
@@ -58,7 +62,9 @@ __all__ = [
 	"IntegritySubject",
 	"LedgerEntry",
 	"LedgerKind",
+	"Module",
 	"ModuleCheckout",
+	"ModuleClass",
 	"OracleClass",
 	"OracleDeclaration",
 	"PlanStepKind",
@@ -188,7 +194,7 @@ ORACLE_RANK: dict[OracleClass, int] = {
 	OracleClass.EXAMPLE: 6,
 	OracleClass.GOLDEN: 7,
 }
-"""Rank 1 is strongest. Ranks 1–2 are mandatory above autonomy L2."""
+"""Rank 1 is strongest. Ranks 1-2 are mandatory above autonomy L2."""
 
 STRONG_ORACLE_MAX_RANK = 2
 
@@ -434,6 +440,270 @@ class Contract(View):
 		)
 		assert contract.weakest_oracle_rank >= 1, "contract has no ranked oracle"
 		return contract
+
+
+# --------------------------------------------------------------------------- #
+# P3 — decomposition
+# --------------------------------------------------------------------------- #
+
+
+class ModuleClass(StrEnum):
+	"""The Mode G lane classes (spec §14), which fix a module's oracle ceiling.
+
+	The ceiling is a property of the *class*, not of a measurement, because it is a
+	statement about what kinds of oracle are manufacturable for that kind of code —
+	G7 is auth, secrets, payments or PII, and no manufactured oracle justifies autonomy
+	there (FR-126). The measured ceiling from the contract still applies on top: the
+	effective ceiling is the lower of the two, which is what keeps a G7 module from
+	inheriting L4 because someone wrote strong oracles for it.
+	"""
+
+	G1 = "G1"
+	G2 = "G2"
+	G3 = "G3"
+	G4 = "G4"
+	G5 = "G5"
+	G6 = "G6"
+	G7 = "G7"
+	G8 = "G8"
+
+
+MODULE_CLASS_CEILING: dict[ModuleClass, AutonomyLevel] = {
+	ModuleClass.G1: AutonomyLevel.L4,
+	ModuleClass.G2: AutonomyLevel.L4,
+	ModuleClass.G3: AutonomyLevel.L3,
+	ModuleClass.G4: AutonomyLevel.L3,
+	ModuleClass.G5: AutonomyLevel.L2,
+	ModuleClass.G6: AutonomyLevel.L2,
+	ModuleClass.G7: AutonomyLevel.L1,
+	ModuleClass.G8: AutonomyLevel.L2,
+}
+"""Spec §14's table. G7 is L1 *by class* — FR-126 makes it human-authored."""
+
+
+class Module(View):
+	"""One unit of decomposition: what gets built, and what it may depend on (FR-090).
+
+	``interface`` is declared rather than inferred. FR-090 forbids depending on another
+	module's internals, and the only way that is checkable is if the permitted surface
+	is written down before the module exists. ``depends_on`` names module ids, and
+	:meth:`Decomposition` refuses a cycle (FR-089).
+
+	``clause_ids`` is FR-088's traceability in one direction: the requirements this
+	module exists to satisfy. The other direction — every requirement reaching a module
+	— is a property of the whole decomposition, so it is checked there rather than here.
+	"""
+
+	id: UUID7
+	name: NonEmptyStr
+	module_class: ModuleClass
+	interface: NonEmptyStr
+	clause_ids: tuple[UUID7, ...] = ()
+	depends_on: tuple[UUID7, ...] = ()
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if not self.clause_ids:
+			raise ValueError(
+				f"module {self.name!r} maps to no requirement, so nothing would be missed "
+				"if it were never built (FR-088)"
+			)
+		if self.id in self.depends_on:
+			raise ValueError(f"module {self.name!r} depends on itself")
+		return self
+
+	@property
+	def ceiling(self) -> AutonomyLevel:
+		"""The highest autonomy this module's *class* permits (FR-125/FR-126)."""
+		return MODULE_CLASS_CEILING[self.module_class]
+
+
+class GateCheck(View):
+	"""One machine-checkable precondition of a gate, and whether it holds.
+
+	Modelled as a check with a reason rather than a bare boolean so a refusal can name
+	*which* precondition failed. A gate that returns only "no" is one an operator has to
+	re-derive by hand, which is how a gate becomes theatre.
+	"""
+
+	name: NonEmptyStr
+	passed: bool
+	detail: NonEmptyStr
+
+	def __bool__(self) -> bool:
+		return self.passed
+
+
+class Decomposition(View):
+	"""P3's artefact: modules, their dependency DAG, and the order to build them (FR-092).
+
+	A *proposal* until the operator approves it. Nothing here is a gate result — the gate
+	is :class:`DecompositionGate`, computed from this, because FR-087 separates what the
+	machine proposes from what the human validates and a single type would blur the two.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	contract_id: UUID7
+	created_at: datetime
+	modules: tuple[Module, ...]
+
+	@model_validator(mode="after")
+	def _well_formed(self) -> Self:
+		if not self.modules:
+			raise ValueError("a decomposition with no modules decomposes nothing")
+		names = [m.name for m in self.modules]
+		if len(set(names)) != len(names):
+			raise ValueError("two modules share a name, so no build order could name them")
+		known = {m.id for m in self.modules}
+		for module in self.modules:
+			unknown = [d for d in module.depends_on if d not in known]
+			if unknown:
+				raise ValueError(f"module {module.name!r} depends on unknown module(s): {unknown}")
+		return self
+
+	def module(self, module_id: str) -> Module | None:
+		"""Look up a module by id."""
+		return next((m for m in self.modules if m.id == module_id), None)
+
+	def module_by_name(self, name: str) -> Module | None:
+		"""Look up a module by name. Names are unique, so this is a real lookup."""
+		return next((m for m in self.modules if m.name == name), None)
+
+	@property
+	def interface_count(self) -> int:
+		"""How many module surfaces must integrate (FR-091).
+
+		A first-class metric rather than a derived nicety: integration risk grows with
+		it, possibly as ``n²`` (§1.4), so it is a gate input.
+		"""
+		return len(self.modules)
+
+	@property
+	def class_distribution(self) -> dict[ModuleClass, int]:
+		"""Modules per lane class, which FR-125 makes a decomposition-quality signal."""
+		distribution: dict[ModuleClass, int] = {}
+		for module in self.modules:
+			distribution[module.module_class] = distribution.get(module.module_class, 0) + 1
+		return distribution
+
+	@property
+	def target_class_share(self) -> float:
+		"""Fraction of modules in G1-G2, the invariant-rich classes FR-125 targets.
+
+		Not a pass/fail threshold, and deliberately not turned into one: the spec calls
+		it a signal. A decomposition of a UI is legitimately 0.0 and is not thereby
+		wrong.
+		"""
+		if not self.modules:
+			return 0.0
+		target = {ModuleClass.G1, ModuleClass.G2}
+		return sum(1 for m in self.modules if m.module_class in target) / len(self.modules)
+
+	def build_order(self) -> tuple[Module, ...]:
+		"""Modules in topological order, dependencies first (FR-092).
+
+		Kahn's algorithm over the declared DAG. Ties are broken by name so the order is
+		*deterministic*: an order that varies between runs would make the plan's step
+		ordinals — and therefore its branch names — unstable for an unchanged
+		decomposition, which would break FR-099's idempotence for no reason.
+		"""
+		remaining = {m.id: m for m in self.modules}
+		done: set[str] = set()
+		ordered: list[Module] = []
+		while remaining:
+			ready = sorted(
+				(m for m in remaining.values() if set(m.depends_on) <= done),
+				key=lambda m: m.name,
+			)
+			if not ready:
+				raise ValueError(
+					"decomposition has a dependency cycle; no module can be built first"
+				)
+			for module in ready:
+				ordered.append(module)
+				done.add(module.id)
+				del remaining[module.id]
+		return tuple(ordered)
+
+	def cycles(self) -> tuple[tuple[str, ...], ...]:
+		"""Cycles in the declared dependency graph (FR-089).
+
+		Reported rather than raised so the gate can name them: "this decomposition has a
+		cycle" is actionable only when it says which modules are in it.
+		"""
+		edges = {m.id: list(m.depends_on) for m in self.modules}
+		by_id = {m.id: m for m in self.modules}
+		found: list[tuple[str, ...]] = []
+		colour: dict[str, int] = {}
+
+		def visit(node: str, path: list[str]) -> None:
+			colour[node] = 1
+			path.append(node)
+			for neighbour in edges.get(node, []):
+				if colour.get(neighbour) == 1:
+					start = path.index(neighbour)
+					found.append(tuple(by_id[n].name for n in [*path[start:], neighbour]))
+				elif colour.get(neighbour, 0) == 0:
+					visit(neighbour, path)
+			path.pop()
+			colour[node] = 2
+
+		for module_id in sorted(edges, key=lambda i: by_id[i].name):
+			if colour.get(module_id, 0) == 0:
+				visit(module_id, [])
+		return tuple(found)
+
+
+class DecompositionGate(View):
+	"""P3's deterministic gate: what the machine can check, and what only the operator can.
+
+	Two halves, and conflating them is the mistake this type exists to prevent.
+
+	*The machine half* is computed here from the decomposition alone — traceability both
+	ways (FR-088), acyclicity (FR-089), a declared build order (FR-092), and that every
+	module maps to a requirement that exists in the contract. These are facts.
+
+	*The operator half* is FR-087's "human-validated": architecture has no oracle
+	(§7.1), so "this is the right decomposition" cannot be machine-checked, and
+	:attr:`is_satisfied` is false until a human says so. A gate whose machine half passed
+	and whose operator half did not is *not* passable, which is FR-061's hard stop.
+	"""
+
+	decomposition_id: UUID7
+	checks: tuple[GateCheck, ...]
+	approved_by: NonEmptyStr | None = None
+	approved_at: datetime | None = None
+
+	@model_validator(mode="after")
+	def _approval_is_whole(self) -> Self:
+		if (self.approved_by is None) != (self.approved_at is None):
+			raise ValueError("an approval names both who approved it and when")
+		return self
+
+	@property
+	def machine_checks(self) -> tuple[GateCheck, ...]:
+		"""The checks the factory computed, as opposed to the operator's decision."""
+		return self.checks
+
+	@property
+	def failed(self) -> tuple[GateCheck, ...]:
+		"""Machine checks that did not hold."""
+		return tuple(c for c in self.checks if not c.passed)
+
+	@property
+	def is_approved(self) -> bool:
+		"""Whether a human has approved this decomposition (FR-087)."""
+		return self.approved_by is not None
+
+	@property
+	def is_satisfied(self) -> bool:
+		"""Whether work may proceed past P3. The only way through (FR-061).
+
+		Both halves, and the machine half is not negotiable by approving: an operator can
+		approve a *sound* decomposition, but approval cannot make an unsound one sound.
+		"""
+		return not self.failed and self.is_approved
 
 
 # --------------------------------------------------------------------------- #
@@ -1347,6 +1617,8 @@ class LedgerKind(StrEnum):
 	VERDICT_REUSED = "verdict.reused"
 	RESEARCH_RUN = "research.run"
 	REPAIR_ATTEMPTED = "repair.attempted"
+	DECOMPOSITION_PROPOSED = "decomposition.proposed"
+	DECOMPOSITION_GATED = "decomposition.gated"
 
 
 class LedgerEntry(View):
@@ -1446,6 +1718,8 @@ class ProjectState(View):
 	evidence: tuple[Evidence, ...] = ()
 	reports: tuple[VerificationReport, ...] = ()
 	plans: tuple[GoalPlan, ...] = ()
+	decompositions: tuple[Decomposition, ...] = ()
+	gates: tuple[DecompositionGate, ...] = ()
 	dispatches: tuple[DispatchRecord, ...] = ()
 	profiles: tuple[HarnessProfile, ...] = ()
 	integrity: tuple[IntegrityCheck, ...] = ()
@@ -1482,6 +1756,24 @@ class ProjectState(View):
 	def latest_report(self, contract_id: str) -> VerificationReport | None:
 		"""Most recent verdict rendered for a contract, if any."""
 		matching = [r for r in self.reports if r.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def decomposition(self, decomposition_id: str) -> Decomposition | None:
+		"""Look up a proposed decomposition by id."""
+		return next((d for d in self.decompositions if d.id == decomposition_id), None)
+
+	def latest_decomposition(self, contract_id: str) -> Decomposition | None:
+		"""Most recent proposal for a contract, if any.
+
+		FR-094 makes revision normal, so "the decomposition" is always the latest one and
+		never a unique artefact — a gate approval has to name which revision it approved.
+		"""
+		matching = [d for d in self.decompositions if d.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def latest_gate(self, decomposition_id: str) -> DecompositionGate | None:
+		"""Most recent gate result for a decomposition, if it has been gated."""
+		matching = [g for g in self.gates if g.decomposition_id == decomposition_id]
 		return matching[-1] if matching else None
 
 	def plan(self, plan_id: str) -> GoalPlan | None:

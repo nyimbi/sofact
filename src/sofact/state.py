@@ -22,6 +22,8 @@ from collections.abc import Iterable
 from sofact.views import (
 	CompletionClaim,
 	Contract,
+	Decomposition,
+	DecompositionGate,
 	DispatchRecord,
 	ElicitationAnswer,
 	Evidence,
@@ -52,6 +54,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	claims: list[CompletionClaim] = []
 	notes: list[str] = []
 	plans: list[GoalPlan] = []
+	decompositions: list[Decomposition] = []
+	gates: list[DecompositionGate] = []
 	dispatches: list[DispatchRecord] = []
 	profiles: list[HarnessProfile] = []
 	integrity: list[IntegrityCheck] = []
@@ -89,6 +93,10 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				notes.append(str(payload["text"]))
 			case LedgerKind.PLAN_COMPILED:
 				plans.append(GoalPlan.model_validate(payload["plan"]))
+			case LedgerKind.DECOMPOSITION_PROPOSED:
+				decompositions.append(Decomposition.model_validate(payload["decomposition"]))
+			case LedgerKind.DECOMPOSITION_GATED:
+				gates.append(DecompositionGate.model_validate(payload["gate"]))
 			case LedgerKind.CAPABILITY_PROBED:
 				profiles.append(HarnessProfile.model_validate(payload["profile"]))
 			case LedgerKind.STEP_DISPATCHED:
@@ -106,6 +114,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		claims=tuple(claims),
 		notes=tuple(notes),
 		plans=tuple(plans),
+		decompositions=tuple(decompositions),
+		gates=tuple(gates),
 		dispatches=tuple(dispatches),
 		profiles=tuple(profiles),
 		integrity=tuple(integrity),

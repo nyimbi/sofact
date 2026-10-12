@@ -29,7 +29,9 @@ __all__ = [
 	"SCRIPT",
 	"SCRIPT_NAME",
 	"base_spec",
+	"decompose_and_approve",
 	"elicitation_to_contract",
+	"gated_contract",
 	"kinds",
 	"plan_and_service",
 	"reset_calls",
@@ -316,6 +318,42 @@ async def elicitation_to_contract(
 	return goal.id, contract.id
 
 
+async def gated_contract(
+	service: FactoryService,
+	*,
+	commands: str | None = None,
+	by: str = "operator",
+) -> tuple[str, str]:
+	"""P0 through P3: a contract, decomposed and approved. Returns ``(goal_id, contract_id)``.
+
+	The default entry point for any test that wants to *build* something, because
+	planning requires an approved decomposition (FR-061) and a test that skipped the gate
+	would exercise a path production does not have. Tests about the gate itself use
+	:func:`elicitation_to_contract` and assert on the refusal.
+	"""
+	goal_id, contract_id = await elicitation_to_contract(service, commands=commands)
+	await decompose_and_approve(service, contract_id, by=by)
+	return goal_id, contract_id
+
+
+async def decompose_and_approve(
+	service: FactoryService,
+	contract_id: str,
+	*,
+	by: str = "operator",
+) -> str:
+	"""Take a contract through the P3 gate honestly. Returns the decomposition id.
+
+	Every test that wants a plan has to come through here, because FR-061 forbids
+	planning downstream of an unapproved gate and ``compile_plan`` enforces it. The
+	alternative — a test-only bypass — would leave the whole suite exercising a path
+	production does not have, which is how a gate ends up green and unused.
+	"""
+	proposal = await service.decompose(contract_id)
+	await service.approve_decomposition(proposal.id, by=by)
+	return proposal.id
+
+
 async def plan_and_service(
 	home: Path,
 	tmp_path: Path,
@@ -326,7 +364,7 @@ async def plan_and_service(
 	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
 	registered = synthetic_service(home, tmp_path, mode)
 	await registered.probe_harness(None)
-	_, contract_id = await elicitation_to_contract(registered, commands=commands)
+	_, contract_id = await gated_contract(registered, commands=commands)
 	return registered, await registered.compile_plan(contract_id)
 
 
