@@ -556,6 +556,11 @@ class TestBudgetAndStyle:
 			assert "do not switch branches" in joined, (
 				"a producer that switches away defeats FR-100 silently"
 			)
+			assert "sofact commits it" in joined, (
+				"sealing is SoFact's job (FR-140); a producer that believes it must commit "
+				"its own work will invent commits, and one that believes an uncommitted "
+				"change is lost will not leave the work in the tree where it is sealed"
+			)
 
 
 # --------------------------------------------------------------------------- #

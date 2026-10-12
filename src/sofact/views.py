@@ -1109,6 +1109,11 @@ class ModuleCheckout(View):
 
 	``base_branch`` is ``None`` when the workspace had no branch to leave — a fresh
 	repository with an unborn HEAD — which is a real state and not an error.
+
+	``sealed_commit`` is what makes the branch a *boundary* rather than a name. A branch
+	with no commit is not a ref at all, so a step that never commits leaves the next step
+	branching from nothing: the two become unrelated histories sharing one working tree,
+	and the first step's files stage cleanly on the second step's branch.
 	"""
 
 	branch: NonEmptyStr
@@ -1116,6 +1121,21 @@ class ModuleCheckout(View):
 	created_repository: bool = False
 	created_branch: bool = False
 	base_branch: str | None = None
+	sealed_commit: str | None = None
+	"""The commit SoFact created to seal this step's work, or ``None`` if there was none.
+
+	``None`` is not a failure. A session that changed nothing, and a session whose
+	producer committed its own work, both leave SoFact with nothing to seal; the two are
+	told apart by ``head_commit``.
+	"""
+	sealed_paths: int = 0
+	head_commit: str | None = None
+	"""The branch tip after the session, whoever created it.
+
+	Separate from ``sealed_commit`` on purpose: a producer that commits its own work
+	leaves ``sealed_commit`` null with a real ``head_commit``, which is a different fact
+	from a step that did nothing at all.
+	"""
 
 	@model_validator(mode="after")
 	def _consistent(self) -> Self:
@@ -1123,6 +1143,13 @@ class ModuleCheckout(View):
 			raise ValueError(f"step_ordinal must be non-negative, got {self.step_ordinal}")
 		if self.created_branch and self.base_branch == self.branch:
 			raise ValueError("a branch cannot be created on top of itself")
+		if self.sealed_paths < 0:
+			raise ValueError(f"sealed_paths must be non-negative, got {self.sealed_paths}")
+		if (self.sealed_commit is None) != (self.sealed_paths == 0):
+			raise ValueError(
+				"a seal names a commit exactly when it names paths: "
+				f"commit={self.sealed_commit!r} paths={self.sealed_paths}"
+			)
 		return self
 
 

@@ -114,6 +114,12 @@ if "-nap-" in mode:
 	# sequential one. Timing is the only observable that separates the two.
 	time.sleep(float(mode.split("-nap-", 1)[1]))
 
+if "writes-work" in mode:
+	# A producer that leaves real work in the working tree and never commits it, which
+	# is the ordinary case: FR-100's branch is only a boundary if something commits what
+	# the session left, and a mode that writes nothing cannot tell sealing from no-op.
+	pathlib.Path("produced.py").write_text("VALUE = 1\\n", encoding="utf-8")
+
 if "inside-marker.txt" in goal:
 	# The sandbox goal: work inside the directory, then *attempt* an escape. Whether the
 	# escape happens is decided by the tool set this child was handed, which is exactly how

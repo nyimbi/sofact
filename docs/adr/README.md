@@ -36,7 +36,7 @@ than argued. Numbering is sequential and never reused.
 | [0021](0021-research-is-dispatched-not-performed.md) | Research is dispatched, not performed: SoFact authors the goal deterministically, records the artefacts, and never rounds a sourceless report into a conclusion | Accepted |
 | [0022](0022-a-refutation-is-a-work-order.md) | A refutation is a work order: the verifier's diagnosis becomes another session's goal, the loop is bounded per clause, and running out is a row rather than a silence | Accepted |
 | [0023](0023-a-record-is-addressed-by-a-path.md) | A session record is addressed by a filesystem path: `claude` joins the producer set as a measured row, and `opencode` is dropped because its record is a database row and no glob names it | Accepted |
-| [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Branch-per-step (FR-100) is built and recorded on the dispatch; worktree isolation (FR-141) is deferred until a wave runs concurrently or a plan spans more than one module, and worktrees are containment rather than confinement | Accepted |
+| [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Branch-per-step (FR-100) is built, sealed and recorded on the dispatch; worktree isolation (FR-141) is deferred until a wave runs concurrently or a plan spans more than one module, and worktrees are containment rather than confinement | Accepted |
 
 ## Mapping to the specification's open decisions
 

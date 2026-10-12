@@ -114,7 +114,9 @@ _SHARED_CONSTRAINTS: tuple[str, ...] = (
 	"Work idempotently: re-running this goal must be safe and must not compound changes (FR-099).",
 	"You are already on the branch SoFact created for this step. Work on it and do "
 	"not switch branches, create one, or commit to another: the branch is what keeps "
-	"this step's work from being built in place (FR-100).",
+	"this step's work from being built in place (FR-100). Leave your work in the "
+	"working tree; SoFact commits it when the session ends, so an uncommitted change "
+	"is not a lost one.",
 	"Context-file loading is disabled and stays disabled: do not create or rely on "
 	"AGENTS.md or CLAUDE.md (FR-150).",
 )

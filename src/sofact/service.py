@@ -30,7 +30,7 @@ from sofact.elicitation import (
 )
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner, digest_tree
-from sofact.git import ensure_module_branch
+from sofact.git import ensure_module_branch, seal_branch
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -771,6 +771,22 @@ class FactoryService:
 
 	# --------------------------------------------------- FR-058/FR-140: dispatch
 
+	def _unowned_paths(self, workspace: Path) -> tuple[str, ...]:
+		"""SoFact's own files inside ``workspace``, as pathspecs git must not commit.
+
+		The default workspace is ``<home>/workspace`` and the ledger and sessions live
+		beside it, so nothing nests. An operator who points ``--workspace`` at the SoFact
+		home does nest them, and a ``git add --all`` would then commit the factory's
+		ledger into the module being built. Sealing excludes them instead, because
+		SoFact's account of the run is not the run's product.
+		"""
+		home = self.home.resolve()
+		resolved = workspace.resolve()
+		if resolved != home and home not in resolved.parents:
+			return ()
+		unowned = (LEDGER_FILENAME, "sessions")
+		return tuple(name for name in unowned if (resolved / name).exists())
+
 	async def dispatch_step(
 		self,
 		plan_id: str,
@@ -810,6 +826,16 @@ class FactoryService:
 			session_id=session_id,
 			checkout=checkout,
 		)
+		# FR-100: the branch becomes a boundary only once it has a commit, and sealing is
+		# SoFact's job (FR-140) -- a producer asked to commit can decline, and the next
+		# step would then branch from an unborn HEAD onto a shared working tree.
+		sealed = await seal_branch(
+			checkout,
+			adapter.workspace,
+			note=f"{step.kind.value} step {step.ordinal}: {record.outcome.value}",
+			exclude=self._unowned_paths(adapter.workspace),
+		)
+		record = record.model_copy(update={"checkout": sealed})
 		self._commit(
 			LedgerKind.STEP_DISPATCHED,
 			{"dispatch": record.model_dump(mode="json")},

@@ -540,14 +540,23 @@ class TestDispatchStep:
 		record, so "build never occurs in place" can be checked after the run rather
 		than believed from a prompt. The workspace is a real repository afterwards,
 		which is the half a log entry alone would not prove.
+
+		The seal is the other half, and it is asserted here because a branch name alone
+		proves nothing: a branch with no commit is not a ref, so the *next* step branches
+		from an unborn HEAD and both steps share one uncommitted working tree. This test
+		fails against the pre-seal code with ``sealed_commit is None``.
 		"""
-		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")
+		service, plan_id, step_id = await dispatched_service(home, tmp_path, "writes-work-complete")
 		record = await service.dispatch_step(plan_id, step_id)
 
 		assert record.checkout is not None, "a dispatched step must name its branch"
 		assert record.checkout.branch.startswith("sofact/")
 		assert record.checkout.branch != "main", "building on main is building in place"
 		assert (Path(record.workspace) / ".git").is_dir()
+		assert record.checkout.sealed_commit is not None, (
+			"the step's work was never committed, so the branch is not a boundary"
+		)
+		assert record.checkout.sealed_paths >= 1, "the producer wrote a file and nothing sealed it"
 
 	async def test_without_a_probe_nothing_is_dispatched(self, home: Path, tmp_path: Path) -> None:
 		"""FR-148: no capability may be assumed because it was declared."""

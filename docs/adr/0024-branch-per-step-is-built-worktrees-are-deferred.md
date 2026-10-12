@@ -3,6 +3,9 @@
 * Status: Accepted
 * Date: 2026-10-12
 * Deciders: operator
+* Supersedes: the first version of this record, which claimed a branch was "a *record*
+  of separation" while nothing committed to it — a claim refuted by measurement the same
+  day (§ Consequences, "the seal")
 * Related: [ADR-0005](0005-no-container-runtime.md),
   [ADR-0006](0006-the-verifier-cannot-reach-the-executor.md),
   [ADR-0023](0023-a-record-is-addressed-by-a-path.md)
@@ -41,6 +44,16 @@ as one was the mistake that let both go unimplemented while looking done.**
    It needs no module identity: a step is the unit, and a step already has an ordinal.
    The worktree requirement needs a `module` field that `GoalStep` does not have, which is
    a decomposition question rather than a git one.
+2b. **SoFact commits each step's work onto its branch when the session ends.** Creating a
+   branch is not enough to make it a boundary, and the first version of this record
+   assumed it was. Measured: with no commit, `sofact/000-bootstrap` is not a ref at all
+   (`git show-ref` is empty), the next step's `switch -c` branches from an **unborn HEAD**
+   so every step reports `base_branch=None`, and the first step's files stage cleanly on
+   the second step's branch — two unrelated histories over one working tree. `seal_branch`
+   commits whatever the session left, and the checkout now carries `sealed_commit`,
+   `sealed_paths` and `head_commit`. Sealing is the factory's job because FR-140 reserves
+   session lifecycle to it: a producer asked to commit can decline, and the boundary would
+   then be fictional while the goal text asserted it.
 3. **FR-141 stays deferred.** Nothing depends on it while dispatch is single-module and
    sequential: with `concurrent` off there is no second writer, and a branch already keeps
    this step's work off the default line. FR-141 becomes necessary at the moment a wave
@@ -49,9 +62,11 @@ as one was the mistake that let both go unimplemented while looking done.**
    Measured twice (ADR-0023): neither `pi` nor `claude` confines its child to its working
    directory, so a wandering producer escapes a worktree exactly as easily as a shared
    tree. A filesystem boundary is what contains a process, and ADR-0005 refuses
-   containers. A branch is weaker still — it is a *record* of separation, not a boundary,
-   and a producer that ignores its branch is not stopped by anything here. What stops it
-   being invisible is that the checkout is on the dispatch record.
+   containers. A branch is weaker still: it is a *record* of separation rather than a
+   boundary, and a producer that ignores its branch is not stopped by anything here. What
+   a sealed branch does buy is that the separation is **real once the session ends** — the
+   step's work is a commit on a ref, not a pile of files the next step inherits. What
+   stops a violation being invisible is that the checkout is on the dispatch record.
 5. **The reason to keep worktrees in the design is verdict attribution, not git hygiene.**
    An oracle runs against a workspace. Two sessions sharing one means clause A's verdict
    is polluted by session B's edits, and the factory loses the ability to say *whose work*
@@ -79,10 +94,17 @@ as one was the mistake that let both go unimplemented while looking done.**
 
 ## Consequences
 
-* **A dispatched step's work sits on its own branch, recorded.** `DispatchRecord.checkout`
-  is the branch, its ordinal, and what it was branched from; `base_branch` is `None` for a
-  fresh repository with an unborn HEAD, because a base branch is a place work came *from*
-  and there was none.
+* **A dispatched step's work sits on its own branch, recorded and sealed.**
+  `DispatchRecord.checkout` is the branch, its ordinal, what it was branched from, the
+  commit SoFact sealed it with, and how many paths that commit holds. `base_branch` is
+  `None` for a fresh repository with an unborn HEAD, because a base branch is a place work
+  came *from* and there was none; from the second step on it names the previous step's
+  branch, and `git merge-base --is-ancestor` confirms the chain rather than assuming it.
+* **The seal distinguishes three states that a boolean would have merged.** A session that
+  changed nothing, a session whose producer committed its own work, and a session SoFact
+  sealed all leave different records: `sealed_commit`/`head_commit` are both `None`,
+  `head_commit` alone, and both. Only the third is SoFact's doing, and a record that could
+  not tell them apart would report the factory as having sealed work it never touched.
 * **The service now writes a second kind of file, and the invariant that says otherwise
   was narrowed deliberately.** `test_the_service_writes_exactly_one_file` excluded
   `sessions` and now also excludes `.git`, each with a stated reason: git's metadata is
@@ -103,14 +125,22 @@ as one was the mistake that let both go unimplemented while looking done.**
 
 ## Evidence
 
-* `src/sofact/git.py` — `ensure_module_branch`, idempotent across re-dispatch.
-* `tests/ci/test_git.py` — nine tests against real git: a bare directory becomes a
+* `src/sofact/git.py` — `ensure_module_branch`, idempotent across re-dispatch; and
+  `seal_branch`, which commits what the session left.
+* `tests/ci/test_git.py` — sixteen tests against real git: a bare directory becomes a
   repository on a named branch, the branch is not `main`, two steps get different
   branches, a re-run creates neither repository nor branch, an existing repository keeps
-  its history, an unborn HEAD reports no base branch, a missing workspace is refused, and
-  two concurrent checkouts do not corrupt each other.
+  its history, an unborn HEAD reports no base branch, a missing workspace is refused, two
+  concurrent checkouts do not corrupt each other, and — for the seal — an unsealed branch
+  is not a ref, sealing creates the ref, a later step branches from the sealed one, the
+  earlier step's file is no longer stageable on the later branch, a no-op session seals
+  nothing, a producer's own commit is reported as such, and excluded paths are not
+  committed.
 * `tests/ci/test_service.py::test_a_dispatched_step_records_the_branch_it_ran_on` — the
-  branch reaches the dispatch record and the workspace is a real repository afterwards.
+  branch reaches the dispatch record, the workspace is a real repository, and the step's
+  work is sealed. **Canaried**: with the `seal_branch` call replaced by a comment the test
+  fails on `sealed_commit is None`, which is the defect the first version of this record
+  shipped.
 * `tests/ci/test_planner.py::test_no_goal_claims_a_worktree_or_branch_nothing_assigns` —
   requires the branch instruction and still forbids the worktree claim.
 * `rg -n "git worktree|worktree add" src/` — no match outside docstrings.

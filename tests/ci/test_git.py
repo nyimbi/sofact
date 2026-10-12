@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from sofact.git import BRANCH_PREFIX, GitUnavailableError, ensure_module_branch, git_available
+from sofact.git import (
+	BRANCH_PREFIX,
+	GitUnavailableError,
+	ensure_module_branch,
+	git_available,
+	seal_branch,
+)
 
 pytestmark = pytest.mark.skipif(not git_available(), reason="git is not installed")
 
@@ -41,6 +47,27 @@ async def run_git(workspace: Path, *args: str) -> str:
 async def branch_of(workspace: Path) -> str:
 	"""The workspace's current branch, read the way git itself would report it."""
 	return (await run_git(workspace, "symbolic-ref", "--quiet", "--short", "HEAD")).strip()
+
+
+async def refs_of(workspace: Path) -> str:
+	"""Every ref, or the empty string when there are none.
+
+	``git show-ref`` exits 1 on a repository with no refs — which is the *normal* state
+	of an unsealed branch, and the exact thing one of these tests asserts. ``run_git``
+	would turn that expected answer into a test error, so the expected-non-zero case
+	gets its own helper rather than a weakened assertion in the shared one.
+	"""
+	process = await asyncio.create_subprocess_exec(
+		"git",
+		"show-ref",
+		cwd=workspace,
+		stdin=asyncio.subprocess.DEVNULL,
+		stdout=asyncio.subprocess.PIPE,
+		stderr=asyncio.subprocess.PIPE,
+	)
+	stdout, stderr = await process.communicate()
+	assert process.returncode in (0, 1), f"git show-ref failed: {stderr.decode()}"
+	return stdout.decode("utf-8", errors="replace")
 
 
 async def test_a_bare_directory_becomes_a_repository_on_a_named_branch(tmp_path: Path) -> None:
@@ -151,3 +178,121 @@ async def test_two_concurrent_checkouts_do_not_corrupt_each_other(tmp_path: Path
 async def test_git_unavailable_error_is_a_runtime_error() -> None:
 	"""The failure type is catchable as a plain RuntimeError, not a bespoke base."""
 	assert issubclass(GitUnavailableError, RuntimeError)
+
+
+# --------------------------------------------------------------------------- #
+# sealing: a branch is a boundary only once it has a commit
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_unsealed_step_leaves_no_branch_behind(tmp_path: Path) -> None:
+	"""The defect this fixes, asserted directly rather than described.
+
+	A step that never commits produces no ref, so ``show-ref`` is empty and the branch
+	exists only as HEAD's target. That is what let the *next* step branch from an unborn
+	HEAD and the two steps become unrelated histories over one working tree.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	await ensure_module_branch(workspace, 0, "bootstrap")
+
+	assert (await refs_of(workspace)).strip() == "", (
+		"an unsealed branch must not be a ref -- this is the defect being pinned"
+	)
+
+
+async def test_sealing_creates_the_ref_and_names_the_commit(tmp_path: Path) -> None:
+	"""The seal is what turns a branch name into a branch."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+	(workspace / "module.py").write_text("x = 1\n", encoding="utf-8")
+
+	sealed = await seal_branch(checkout, workspace, note="bootstrap")
+
+	assert sealed.sealed_commit is not None, "nothing was committed"
+	assert sealed.sealed_paths == 1
+	assert sealed.head_commit == sealed.sealed_commit
+	refs = await refs_of(workspace)
+	assert f"refs/heads/{checkout.branch}" in refs, "the branch is still not a ref"
+
+
+async def test_a_later_step_branches_from_the_sealed_one(tmp_path: Path) -> None:
+	"""The whole point of sealing: the second step's history contains the first's.
+
+	Without the seal this test fails with ``base_branch is None`` and an orphan branch,
+	which is exactly what the pre-fix code did.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	first = await ensure_module_branch(workspace, 0, "bootstrap")
+	(workspace / "module.py").write_text("x = 1\n", encoding="utf-8")
+	first = await seal_branch(first, workspace, note="bootstrap")
+
+	second = await ensure_module_branch(workspace, 1, "interfaces")
+
+	assert second.base_branch == first.branch, "the second step did not branch from the first"
+	# `merge-base --is-ancestor` says it with its exit code and prints nothing, so the
+	# call itself is the assertion: run_git raises unless git exited 0.
+	await run_git(workspace, "merge-base", "--is-ancestor", first.branch, second.branch)
+
+
+async def test_the_earlier_steps_file_is_not_stageable_on_the_later_branch(tmp_path: Path) -> None:
+	"""The concrete harm: unsealed work is adopted by whichever branch comes next."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	first = await ensure_module_branch(workspace, 0, "bootstrap")
+	(workspace / "module.py").write_text("x = 1\n", encoding="utf-8")
+	await seal_branch(first, workspace, note="bootstrap")
+
+	await ensure_module_branch(workspace, 1, "interfaces")
+
+	assert (await run_git(workspace, "status", "--porcelain")).strip() == "", (
+		"the first step's file is still pending on the second step's branch"
+	)
+
+
+async def test_a_step_that_changed_nothing_seals_nothing(tmp_path: Path) -> None:
+	"""A no-op session is not a failure, and must not invent an empty commit."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+
+	sealed = await seal_branch(checkout, workspace, note="nothing happened")
+
+	assert sealed.sealed_commit is None
+	assert sealed.sealed_paths == 0
+	assert sealed.head_commit is None, "an unborn HEAD reports no commit, not a fabricated one"
+
+
+async def test_a_producer_that_committed_its_own_work_is_reported_as_such(tmp_path: Path) -> None:
+	"""``head_commit`` without ``sealed_commit`` is a different fact from doing nothing."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+	(workspace / "module.py").write_text("x = 1\n", encoding="utf-8")
+	await run_git(workspace, "add", "module.py")
+	await run_git(workspace, "commit", "-qm", "producer committed this itself")
+
+	sealed = await seal_branch(checkout, workspace, note="bootstrap")
+
+	assert sealed.sealed_commit is None, "there was nothing left for SoFact to seal"
+	assert sealed.head_commit is not None, "the producer's own commit must still be reported"
+
+
+async def test_excluded_paths_are_not_committed(tmp_path: Path) -> None:
+	"""SoFact's own bookkeeping is not the module being built."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+	(workspace / "module.py").write_text("x = 1\n", encoding="utf-8")
+	sessions = workspace / "sessions"
+	sessions.mkdir()
+	(sessions / "transcript.json").write_text("{}\n", encoding="utf-8")
+
+	sealed = await seal_branch(checkout, workspace, note="bootstrap", exclude=("sessions",))
+
+	assert sealed.sealed_paths == 1, "the session directory was swept into the commit"
+	tracked = await run_git(workspace, "ls-files")
+	assert "module.py" in tracked
+	assert "sessions/transcript.json" not in tracked, "the factory committed its own bookkeeping"

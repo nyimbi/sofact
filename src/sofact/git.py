@@ -30,6 +30,7 @@ __all__ = [
 	"GitUnavailableError",
 	"ensure_module_branch",
 	"git_available",
+	"seal_branch",
 ]
 
 BRANCH_PREFIX: Final = "sofact/"
@@ -205,4 +206,91 @@ async def ensure_module_branch(
 		created_repository=created_repository,
 		created_branch=created_branch,
 		base_branch=base_branch,
+	)
+
+
+async def _head_commit(workspace: Path) -> str | None:
+	code, stdout, _ = await _git(("rev-parse", "--verify", "--quiet", "HEAD"), cwd=workspace)
+	if code != 0:
+		return None
+	return stdout.strip() or None
+
+
+async def _changed_paths(workspace: Path) -> tuple[str, ...]:
+	"""Paths the working tree has that HEAD does not, or has changed since HEAD.
+
+	``--others --exclude-standard`` includes files the producer created and left
+	untracked, which is the common case: a session that writes code and never runs
+	``git add`` has still done work, and work that no commit names is work the next
+	step's branch would silently adopt.
+	"""
+	code, stdout, stderr = await _git(
+		("status", "--porcelain", "--untracked-files=all"), cwd=workspace
+	)
+	if code != 0:
+		raise GitUnavailableError(f"git status failed in {workspace}: {stderr.strip()}")
+	paths: list[str] = []
+	for line in stdout.splitlines():
+		if not line.strip():
+			continue
+		# Porcelain is `XY <path>`, and a rename is `XY <old> -> <new>`. The path is what
+		# matters for counting; the status letters are not used.
+		entry = line[3:].strip()
+		paths.append(entry.split(" -> ")[-1].strip().strip('"'))
+	return tuple(p for p in paths if p)
+
+
+async def seal_branch(
+	checkout: ModuleCheckout,
+	workspace: Path,
+	*,
+	note: str,
+	exclude: tuple[str, ...] = (),
+) -> ModuleCheckout:
+	"""Commit whatever the session left on ``checkout``'s branch, and report the tip.
+
+	FR-100 says build happens on a branch per module. A branch is only a boundary once
+	it has a commit: with no commit it is not a ref, so the next step's ``switch -c``
+	branches from an unborn HEAD and the two steps become unrelated histories over one
+	working tree — the earlier step's files then stage cleanly on the later step's
+	branch. Measured, not assumed: two sequential checkouts on a fresh repository both
+	reported ``base_branch=None`` and ``git show-ref`` was empty.
+
+	Sealing is SoFact's job rather than the producer's. FR-140 reserves session
+	lifecycle to the factory, and a producer that must remember to commit is a producer
+	that can silently decline to, leaving the boundary fictional while the goal text
+	asserts it.
+
+	``exclude`` names pathspecs the producer does not own — the factory's own session
+	directory, when it happens to sit inside the workspace. They are not committed,
+	because SoFact's bookkeeping is not the module being built.
+	"""
+	assert workspace.is_dir(), f"workspace does not exist: {workspace}"
+	head = await _head_commit(workspace)
+
+	changed = await _changed_paths(workspace)
+	owned = tuple(p for p in changed if not any(p == e or p.startswith(f"{e}/") for e in exclude))
+	if not owned:
+		# Nothing to seal. This is the honest answer for a session that changed nothing and
+		# for one whose producer committed its own work -- ``head_commit`` tells them apart.
+		return checkout.model_copy(update={"head_commit": head})
+
+	code, _, stderr = await _git(("add", "--all", "--", *owned), cwd=workspace)
+	if code != 0:
+		raise GitUnavailableError(f"git add failed in {workspace}: {stderr.strip()}")
+	code, _, stderr = await _git(
+		("commit", "--quiet", "--no-verify", "-m", note),
+		cwd=workspace,
+	)
+	if code != 0:
+		raise GitUnavailableError(f"git commit failed in {workspace}: {stderr.strip()}")
+
+	sealed = await _head_commit(workspace)
+	assert sealed is not None, "a commit that succeeded must leave a resolvable HEAD"
+	return checkout.model_copy(
+		update={
+			"sealed_commit": sealed,
+			"sealed_paths": len(owned),
+			"head_commit": sealed,
+		},
 	)
