@@ -1,7 +1,7 @@
 """P7 — integration: what can be checked about the assembled system, and what cannot.
 
-§10 states six requirements and they are not equally reachable. Three are facts about
-artefacts SoFact holds, and this module computes them:
+§10 states six requirements and this module computes five of them. Four are facts about
+artefacts SoFact holds:
 
 * **FR-111** — the build order. A module built before a module it depends on has no
   sealed work is a dependency violated by sequencing, which is visible in the dispatch
@@ -14,19 +14,30 @@ artefacts SoFact holds, and this module computes them:
   violating_modules` is the union of those sets. A platform-wide rebuild in response to
   a local failure is refused by construction: nothing here can produce a scope wider
   than the findings name.
+* **FR-115** — the assembled system against §6.3's model. An entity names the clauses
+  that introduced it and a module names the clauses it exists to satisfy, so *present* is
+  a set comparison over declarations — never a search for the entity's name in a
+  producer's source, which passes on an entity called ``id``. Relationships and
+  invariants are declared and **not** conformed, and the check says so: a relationship is
+  a claim about two entities' interaction, which no declaration in the log describes.
 
-Three are not reachable yet, and this module says so rather than reporting green:
+**FR-116** and **FR-112** are the two that are only as reachable as other phases make
+them, and the difference is reported rather than smoothed over:
 
-* **FR-112** needs an interface a machine can diff against. ``Module.interface`` is
-  prose by design — SoFact does not know the operator's language (ADR-0025) — so
-  "public-API diff is empty" has no left-hand side. Stated as uncovered on the check.
-* **FR-115** needs the system model of §6.3 as a type. There is none, so structural
-  conformance is not checkable.
-* **FR-116** needs system-level acceptance criteria from P2. The contract carries
-  per-clause oracles and nothing that no single module can satisfy.
+* **FR-116** checks P2's system-level criteria, which span more than one clause. It
+  verifies that every clause a criterion spans carries a satisfied verdict; it does not
+  *run* the criterion, because a system-level criterion is not in the contract's oracle
+  set and there is no command to run. That is stated as uncovered on the check.
+* **FR-112** needs an interface a machine can diff against. ``Module.interface`` is prose
+  by design — SoFact does not know the operator's language (ADR-0025) — so "the public-API
+  diff is empty" has no left-hand side until a module declares a machine-readable surface,
+  and a proposal derives none.
 
-Each of the three is reported as an unimplemented requirement on the report itself, so a
-green line cannot be read as "P7 is done". That distinction is the whole reason
+A specification that declared no model and no criteria leaves FR-115 and FR-116 in
+:attr:`~sofact.views.IntegrationReport.not_implemented` — the honest state of a project
+that has not described its system as a whole, not a green line. Every such gap is
+reported as an unimplemented requirement on the report itself, so a green line cannot be
+read as "P7 is done". That distinction is the whole reason
 :class:`~sofact.views.IntegrationCheck` requires ``requirements``.
 
 The import analysis is deliberately shallow: it reads ``import x`` and ``from x import
@@ -40,7 +51,7 @@ from __future__ import annotations
 
 import ast
 import posixpath
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -55,6 +66,9 @@ from sofact.views import (
 	IntegrationReport,
 	InterfaceMember,
 	InterfaceMemberKind,
+	SystemCriterion,
+	SystemModel,
+	VerdictOutcome,
 	now,
 )
 
@@ -64,6 +78,8 @@ __all__ = [
 	"check_build_order",
 	"check_imports",
 	"check_interface_conformance",
+	"check_model_conformance",
+	"check_system_criteria",
 	"integrate",
 	"public_surface",
 ]
@@ -72,6 +88,8 @@ INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
 	"build_order",
 	"import_discipline",
 	"interface_conformance",
+	"model_conformance",
+	"system_criteria",
 )
 """The checks that run, named so a report can be read without parsing prose."""
 
@@ -283,6 +301,141 @@ def _read(root: Path, ownership: dict[str, tuple[str, ...]]) -> dict[str, str]:
 	return sources
 
 
+def check_model_conformance(
+	decomposition: Decomposition,
+	model: SystemModel,
+	*,
+	module_for_clause: Mapping[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""FR-115: is every declared entity present in the assembled system?
+
+	§6.3 makes the model "the input to decomposition and the substrate for structural
+	oracles", and FR-115 is "the point at which the model earns its maintenance cost".
+	What makes it checkable without reading code is the link :class:`SystemEntity`
+	already carries: an entity names the clauses that introduced it, a module names the
+	clauses it exists to satisfy, so *an entity is present* means some built module owns
+	one of its clauses. That is a set comparison over declarations, not a search for the
+	entity's name in the producer's source — an entity called ``id`` or ``job`` occurs in
+	unrelated lines, so a text search would report conformance for a system that
+	implements nothing (the failure :class:`SystemEntity` was written to avoid).
+
+	``module_for_clause`` maps a clause id to the name of the module that owns it, and is
+	built by the caller from the *decomposition* rather than from the dispatches: a
+	module that was never built is still a module the system is missing, and deriving
+	ownership from what happened to be dispatched would make a plan that skipped half its
+	modules report a conforming system.
+
+	Two directions, because one alone is satisfiable by a system that does nothing. An
+	entity no module owns is a declared capability nobody built; an entity whose clause
+	no module claims at all is a model that drifted from the decomposition, which is the
+	drift FR-084 exists to make expensive.
+	"""
+	assert module_for_clause or not model.entities, (
+		"a model with entities needs the clause-to-module map to be conformed against"
+	)
+	findings: list[IntegrationFinding] = []
+	known = {module.name for module in decomposition.modules}
+	for entity in model.entities:
+		owners = sorted(
+			{
+				module_for_clause[clause_id]
+				for clause_id in entity.clause_ids
+				if clause_id in module_for_clause
+			}
+		)
+		if not owners:
+			# No module claims the clause, so this is a decomposition defect rather than a
+			# build defect -- and the finding says which, because FR-114's repair scope is
+			# the difference between re-running a step and revising the decomposition.
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.UNOWNED_ENTITY,
+					detail=(
+						f"entity {entity.name!r} is declared and no module owns the "
+						f"{len(entity.clause_ids)} clause(s) that introduce it, so the "
+						"decomposition and the model disagree about what the system "
+						"contains (FR-084, FR-115)"
+					),
+					modules=(),
+					evidence=tuple(f"{entity.name} -> clause {cid}" for cid in entity.clause_ids),
+				)
+			)
+			continue
+		absent = tuple(name for name in owners if name not in known)
+		if absent:
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.MISSING_ENTITY,
+					detail=(
+						f"entity {entity.name!r} is owned by module(s) the decomposition "
+						f"does not declare: {', '.join(absent)} (FR-115)"
+					),
+					modules=(),
+					evidence=tuple(f"{entity.name} -> {name}" for name in absent),
+				)
+			)
+	return tuple(findings)
+
+
+def check_system_criteria(
+	criteria: Sequence[SystemCriterion],
+	*,
+	verdicts: Mapping[str, VerdictOutcome],
+	module_for_clause: Mapping[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""FR-116: does the assembled system satisfy the criteria no module can?
+
+	FR-116's criteria "validate the decomposition, not the modules", and the check is the
+	one that makes that literal: a criterion spanning clauses is satisfied when **every**
+	clause it spans carries a satisfied verdict. A criterion over clauses owned by two
+	different modules is exactly a claim that those modules compose, which is the claim
+	the decomposition made and can get wrong — and no single module's own verification
+	could have caught it, which is what FR-116 asks integration to add.
+
+	``verdicts`` is the latest verdict per clause across every module's report, and the
+	caller passes the *worst* outcome a clause received. Reading only the latest report
+	for one contract would let a criterion pass on the strength of a module that happened
+	to be verified last, which is the same stale-evidence mistake FR-006 refuses one
+	phase earlier.
+
+	An ``INSUFFICIENT`` clause fails the criterion and is reported as insufficient rather
+	than as violated: the two are different findings and collapsing them would report a
+	clause nobody could check as a clause that was checked and failed.
+	"""
+	findings: list[IntegrationFinding] = []
+	for criterion in criteria:
+		unsatisfied = tuple(
+			(clause_id, verdicts.get(clause_id, VerdictOutcome.INSUFFICIENT))
+			for clause_id in criterion.clause_ids
+			if verdicts.get(clause_id) is not VerdictOutcome.SATISFIED
+		)
+		if not unsatisfied:
+			continue
+		modules = tuple(
+			sorted(
+				{
+					module_for_clause[clause_id]
+					for clause_id, _ in unsatisfied
+					if clause_id in module_for_clause
+				}
+			)
+		)
+		findings.append(
+			IntegrationFinding(
+				kind=IntegrationFindingKind.UNSATISFIED_SYSTEM_CRITERION,
+				detail=(
+					f"system criterion {criterion.statement[:60]!r} spans "
+					f"{len(criterion.clause_ids)} clause(s) and {len(unsatisfied)} of them "
+					"are not satisfied: "
+					+ ", ".join(f"{cid} ({v.value})" for cid, v in unsatisfied)
+				),
+				modules=modules,
+				evidence=(f"{criterion.criterion[:80]}",),
+			)
+		)
+	return tuple(findings)
+
+
 def check_build_order(
 	decomposition: Decomposition,
 	dispatches: Sequence[DispatchRecord],
@@ -469,6 +622,9 @@ def integrate(
 	*,
 	root: Path | None = None,
 	sources: dict[str, str] | None = None,
+	model: SystemModel | None = None,
+	criteria: Sequence[SystemCriterion] = (),
+	verdicts: Mapping[str, VerdictOutcome] | None = None,
 ) -> IntegrationReport:
 	"""Run P7's checks over a plan's dispatched work and report what passed and what did not.
 
@@ -476,6 +632,13 @@ def integrate(
 	plan, the approved decomposition, the dispatches with their checkouts. Nothing is
 	re-run and nothing is asked of a producer, so a report is reproducible from the log —
 	which is what makes it evidence rather than an assertion about a run.
+
+	``model``, ``criteria`` and ``verdicts`` are P2's and P6's artefacts, and they are
+	parameters rather than something this module reads because the service holds the log
+	and this function holds none. Absent ``model`` or ``criteria`` is the *honest* state
+	of a project whose specification declared neither, and FR-115/FR-116 are then reported
+	as unimplemented rather than as passing — the same distinction FR-112 already draws
+	between an empty diff and no diff.
 	"""
 	assert plan.steps, "cannot integrate a plan with no steps"
 	ownership, orphans = attribute_files(dispatches)
@@ -484,6 +647,15 @@ def integrate(
 		for module in decomposition.modules
 	}
 	surfaces = {module.name: module.surface for module in decomposition.modules}
+	# The clause-to-module map is built from the decomposition rather than from the
+	# dispatches: FR-115 asks whether the assembled system matches the model, and a module
+	# that was never dispatched is a module the system is missing. Reading ownership off
+	# the dispatches would make a plan that skipped half its modules look conforming.
+	module_for_clause: dict[str, str] = {
+		clause_id: module.name
+		for module in decomposition.modules
+		for clause_id in module.clause_ids
+	}
 	build_findings = check_build_order(decomposition, dispatches)
 	import_findings = (
 		check_imports(ownership, declared=declared, root=root, sources=sources) if ownership else ()
@@ -498,7 +670,26 @@ def integrate(
 		if ownership and declared_surfaces and text
 		else ()
 	)
-	findings = (*build_findings, *import_findings, *conformance_findings)
+	model_findings = (
+		check_model_conformance(decomposition, model, module_for_clause=module_for_clause)
+		if model is not None and not model.is_empty
+		else ()
+	)
+	criterion_findings = check_system_criteria(
+		criteria,
+		verdicts=verdicts or {},
+		module_for_clause=module_for_clause,
+	)
+	findings = (
+		*build_findings,
+		*import_findings,
+		*conformance_findings,
+		*model_findings,
+		*criterion_findings,
+	)
+	conformed = tuple(sorted(e.name for e in (model.entities if model is not None else ())))
+	criterion_clauses = tuple(sorted({cid for c in criteria for cid in c.clause_ids}))
+	verdict_source = "the log's latest verdict per clause" if verdicts else "no verdicts"
 
 	built = tuple(sorted(name for name, paths in ownership.items() if paths))
 	analysed = tuple(
@@ -567,6 +758,63 @@ def integrate(
 				"arity because SoFact does not know the operator's language (ADR-0025)",
 				"a name's kind is not compared; a declared constant built as a function "
 				"reports only if its arity differs",
+			),
+		),
+		IntegrationCheck(
+			name="model_conformance",
+			passed=not model_findings,
+			detail=(
+				f"{len(conformed)} declared entity(ies) owned by a module the decomposition "
+				"names, so the assembled system matches the model"
+				if conformed and not model_findings
+				else f"{len(model_findings)} entity(ies) the assembled system does not match"
+				if model_findings
+				else "the specification declared no system model, so nothing was conformed"
+			),
+			requirements=("FR-115",),
+			covered=tuple(
+				f"{name}: an entity whose introducing clause a module owns" for name in conformed
+			),
+			uncovered=(
+				"relationships and invariants are declared and not conformed: an entity's "
+				"presence is decidable from the clause-to-module map, while a relationship "
+				"between two entities is a claim about their *interaction*, which no "
+				"declaration in the log describes (FR-115, FR-078)",
+				"the model is conformed against the decomposition, not against the built "
+				"code: FR-115 asks whether the assembled system satisfies the model, and "
+				"what this measures is whether the modules that were planned to satisfy it "
+				"exist and are named",
+			)
+			if model is not None and not model.is_empty
+			else ("no system model was declared, so no entity was conformed",),
+		),
+		IntegrationCheck(
+			name="system_criteria",
+			passed=not criterion_findings,
+			detail=(
+				f"{len(criteria)} system criterion(s) over {len(criterion_clauses)} "
+				"clause(s); every one satisfied"
+				if criteria and not criterion_findings
+				else f"{len(criterion_findings)} system criterion(s) not satisfied"
+				if criterion_findings
+				else "P2 declared no system-level criteria, so nothing spanned modules"
+			),
+			requirements=("FR-116",),
+			covered=tuple(
+				f"{c.statement[:50]}: every clause it spans carries a satisfied verdict"
+				for c in criteria
+			),
+			uncovered=(
+				(
+					f"verdicts come from {verdict_source}; a clause with no verdict at all "
+					"counts as insufficient rather than as satisfied",
+					"a criterion is satisfied when its clauses are, which is a claim about "
+					"the modules composing -- it does not run the criterion, because a "
+					"system-level criterion is not in the contract's oracle set and there "
+					"is no command to run (FR-116)",
+				)
+				if criteria
+				else ("no system-level criteria were declared at P2",)
 			),
 		),
 	)

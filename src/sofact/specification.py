@@ -40,6 +40,7 @@ from sofact.views import (
 	Requirement,
 	Specification,
 	SpecificationGate,
+	SystemCriterion,
 	SystemModel,
 	ValueHypothesis,
 	VerificationMethod,
@@ -80,6 +81,7 @@ def specify(
 	non_goals: tuple[NonGoal, ...] = (),
 	assumptions: tuple[Assumption, ...] = (),
 	value_hypothesis: ValueHypothesis | None = None,
+	system_criteria: tuple[SystemCriterion, ...] = (),
 ) -> Specification:
 	"""Derive a specification from ``contract``, deterministically (FR-076).
 
@@ -89,10 +91,14 @@ def specify(
 	would be a judgement about which obligations belong together, and a machine that made
 	that judgement would be inventing the structure P3 is supposed to decompose.
 
-	``system_model``, ``non_goals``, ``assumptions`` and ``value_hypothesis`` are the
-	operator's and default to empty. Nothing is invented for them; :func:`gate` reports
-	their absence as a failed check, which is the difference between an incomplete
-	specification and a plausible-looking wrong one.
+	``system_model``, ``non_goals``, ``assumptions``, ``value_hypothesis`` and
+	``system_criteria`` are the operator's and default to empty. Nothing is invented for
+	them; :func:`gate` reports their absence as a failed check, which is the difference
+	between an incomplete specification and a plausible-looking wrong one. Criteria are
+	the one of the five whose absence is *measured* rather than failed: a system whose
+	every obligation is a module's own has no system-level criterion, and inventing one
+	by joining two clauses would be the machine writing the claim that its own
+	decomposition composes (FR-116).
 	"""
 	assert contract.clauses, "cannot specify a contract with no clauses"
 
@@ -129,6 +135,7 @@ def specify(
 		non_goals=tuple(derived_non_goals),
 		assumptions=assumptions,
 		value_hypothesis=value_hypothesis,
+		system_criteria=system_criteria,
 	)
 	assert specification.clause_ids <= {c.id for c in contract.clauses}, (
 		"a requirement cites a clause outside the contract"
@@ -374,6 +381,31 @@ def gate(specification: Specification, contract: Contract) -> SpecificationGate:
 				else "no value hypothesis declared (FR-085). Note that SoFact never "
 				"certifies it (FR-086): declaring one is the requirement, proving it is "
 				"not this factory's claim"
+			),
+		)
+	)
+
+	# FR-116: system-level criteria, reported rather than failed. A system whose every
+	# obligation is a module's own has no criterion that spans modules, and that is a
+	# *measurement* about the decomposition, not a defect in the specification — the same
+	# treatment FR-082 gives a human-verified requirement. Failing here would make an
+	# honestly-modular specification red for being modular, which is how a gate teaches
+	# its operator to bypass it.
+	criteria = specification.system_criteria
+	spanning = sum(len(c.clause_ids) for c in criteria)
+	checks.append(
+		GateCheck(
+			name="system_criteria_reported",
+			passed=True,
+			detail=(
+				f"{len(criteria)} system-level criterion(s) spanning {spanning} clause(s), "
+				"which no single module can satisfy (FR-116)"
+				if criteria
+				else "no system-level criteria declared; every obligation in this "
+				"specification is a module's own, so P7's FR-116 check has nothing to "
+				"span. That is a fact about the decomposition, not a defect — but it is "
+				"also the state in which a decomposition cannot be validated as a whole "
+				"(FR-116)"
 			),
 		)
 	)

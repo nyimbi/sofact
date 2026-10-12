@@ -59,6 +59,7 @@ from sofact.views import (
 	SpecificationDraft,
 	SpecificationGate,
 	StepOutcome,
+	SystemCriterion,
 	SystemEntity,
 	SystemModel,
 	ValueHypothesis,
@@ -90,6 +91,14 @@ _VALUE_OPTION = typer.Option(
 	None,
 	"--value",
 	help="The value hypothesis, as EFFECT | BENEFICIARY | REFUTING-INSTRUMENT (FR-085).",
+)
+_CRITERION_OPTION = typer.Option(
+	None,
+	"--criterion",
+	help=(
+		"A system-level criterion, as STATEMENT | CRITERION | CLAUSE-INDEX,CLAUSE-INDEX. "
+		"Repeatable; at least two clauses (FR-116)."
+	),
 )
 
 # Hoisted rather than written inline: ruff's B008 rejects a call in an argument
@@ -141,6 +150,13 @@ _FRESH_OPTION = typer.Option(
 	False,
 	"--fresh",
 	help="Re-run the oracles even when the artefact and oracle set are unchanged (FR-006).",
+)
+_NOT_IMPLEMENTED_WHY = (
+	"A green line above is not a claim about these. FR-112 needs a module to declare a "
+	"machine-readable surface before its public-API diff has two sides; FR-115 and "
+	"FR-116 need an approved specification that declares a system model and criteria "
+	"spanning more than one clause, so a project that described no system reports them "
+	"here rather than passing them."
 )
 _MAX_ATTEMPTS_OPTION = typer.Option(
 	2,
@@ -665,6 +681,7 @@ def specify(
 	entity: list[str] | None = _ENTITY_OPTION,
 	assumption: list[str] | None = _ASSUMPTION_OPTION,
 	value: str | None = _VALUE_OPTION,
+	criterion: list[str] | None = _CRITERION_OPTION,
 	approve: bool = typer.Option(
 		False,
 		"--approve",
@@ -680,11 +697,11 @@ def specify(
 	other half is the operator's, and it is a separate act rather than something a
 	passing check implies.
 
-	``--entity``, ``--assumption`` and ``--value`` carry the parts of the specification
-	that are the *operator's own statements* rather than derivations. FR-078, FR-079 and
-	FR-085 make them requirements, and a verb that could not accept them would be a verb
-	whose gate could never pass — which is a gate that has been disabled while still
-	reporting itself as one.
+	``--entity``, ``--assumption``, ``--value`` and ``--criterion`` carry the parts of the
+	specification that are the *operator's own statements* rather than derivations.
+	FR-078, FR-079, FR-085 and FR-116 make them requirements, and a verb that could not
+	accept them would be a verb whose gate could never pass — which is a gate that has
+	been disabled while still reporting itself as one.
 	"""
 	asyncio.run(
 		_specify(
@@ -692,6 +709,7 @@ def specify(
 			entities=tuple(entity or ()),
 			assumptions=tuple(assumption or ()),
 			value=value,
+			criteria=tuple(criterion or ()),
 			approve=approve,
 			by=by,
 		)
@@ -742,12 +760,55 @@ def _value_option(raw: str) -> ValueHypothesis:
 	return ValueHypothesis(effect=parts[0], beneficiary=parts[1], refuting_instrument=parts[2])
 
 
+def _criterion_option(raw: str, contract: Contract) -> SystemCriterion:
+	"""Parse ``STATEMENT | CRITERION | INDEX,INDEX`` into a system-level criterion (FR-116).
+
+	By clause *index* for the same reason ``--entity`` is: the operator reads a numbered
+	clause list, and pasting UUIDs into a criterion would make declaring one an exercise
+	in copying identifiers.
+
+	Two indexes are the minimum and the type enforces it. A criterion over one clause is
+	that clause's module's job, and FR-116 asks for the criteria *no single module can
+	satisfy* — so a one-clause criterion is not a weaker system criterion, it is a
+	different thing wearing the name.
+	"""
+	statement, sep, rest = raw.partition("|")
+	criterion, sep2, indexes = rest.partition("|")
+	if not sep or not sep2 or not statement.strip() or not criterion.strip():
+		raise ValueError(
+			f"--criterion wants STATEMENT | CRITERION | CLAUSE-INDEX,CLAUSE-INDEX, got {raw!r}"
+		)
+	clause_ids: list[str] = []
+	for piece in indexes.split(","):
+		text = piece.strip()
+		try:
+			index = int(text)
+		except ValueError as exc:
+			raise ValueError(
+				f"--criterion clause index must be a number, got {text!r}. It takes the "
+				"1-based indexes `sofact contract` prints"
+			) from exc
+		if not 1 <= index <= len(contract.clauses):
+			raise ValueError(
+				f"--criterion names clause {index}, but the contract has "
+				f"{len(contract.clauses)} clause(s)"
+			)
+		clause_ids.append(contract.clauses[index - 1].id)
+	return SystemCriterion(
+		id=uuid7str(),
+		statement=statement.strip(),
+		criterion=criterion.strip(),
+		clause_ids=tuple(clause_ids),
+	)
+
+
 async def _specify(
 	svc: FactoryService,
 	*,
 	entities: tuple[str, ...],
 	assumptions: tuple[str, ...],
 	value: str | None,
+	criteria: tuple[str, ...],
 	approve: bool,
 	by: str,
 ) -> None:
@@ -763,6 +824,7 @@ async def _specify(
 		model = SystemModel(entities=tuple(_entity_option(e, built) for e in entities))
 		declared = tuple(_assumption_option(a) for a in assumptions)
 		hypothesis = _value_option(value) if value is not None else None
+		system_criteria = tuple(_criterion_option(c, built) for c in criteria)
 	except ValueError as exc:
 		typer.secho(f"bad option: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
@@ -771,6 +833,7 @@ async def _specify(
 		system_model=model,
 		assumptions=declared,
 		value_hypothesis=hypothesis,
+		system_criteria=system_criteria,
 	)
 	_print_specification(proposal, await svc.specification_gate(proposal.id))
 	if not approve:
@@ -813,6 +876,15 @@ def _print_specification(proposal: Specification, result: SpecificationGate) -> 
 		typer.secho("  non-goals", fg="cyan")
 		for non_goal in proposal.non_goals:
 			typer.echo(f"    - {non_goal.statement}")
+	if proposal.system_criteria:
+		typer.secho("  system-level criteria (FR-116)", fg="cyan")
+		for criterion in proposal.system_criteria:
+			typer.echo(f"    - {criterion.statement}")
+			typer.secho(
+				f"        checked by {criterion.criterion}, over "
+				f"{len(criterion.clause_ids)} clause(s)",
+				fg="bright_black",
+			)
 	if proposal.assumptions:
 		typer.secho("  assumptions", fg="cyan")
 		for assumption in proposal.assumptions:
@@ -1371,11 +1443,10 @@ async def _integrate(svc: FactoryService) -> None:
 			typer.secho(f"         {line}", fg="bright_black")
 	if report.not_implemented:
 		typer.secho(
-			"\n  not implemented: " + ", ".join(report.not_implemented) + ". "
-			"FR-112 needs a module to declare a machine-readable surface before its "
-			"public-API diff has two sides; FR-115 needs the system model of §6.3 as a "
-			"type; FR-116 needs P2 acceptance criteria. A green line above is not a claim "
-			"about these.",
+			"\n  not implemented: "
+			+ ", ".join(report.not_implemented)
+			+ ". "
+			+ _NOT_IMPLEMENTED_WHY,
 			fg="yellow",
 		)
 	if not report.passed:

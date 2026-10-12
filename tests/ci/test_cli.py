@@ -1463,3 +1463,165 @@ class TestTheRepairVerb:
 		result = RUNNER.invoke(app, ["--home", str(home), "repair", "--harness", "ghost"])
 		assert result.exit_code == 1
 		assert "has never been probed here" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# P7 from the CLI, including the two requirements the specification decides
+# --------------------------------------------------------------------------- #
+
+
+class TestTheIntegrateVerb:
+	"""``sofact integrate`` runs P7 and is honest about what the specification left open.
+
+	FR-115 and FR-116 are discharged by the *approved specification*, not by the check
+	alone: a project that declared no system model and no criteria still gets a report
+	that names both as not implemented. What is under test here is that the two states
+	are distinguishable from the CLI — a report that read the same either way would make
+	"P7 passed" a claim the operator cannot check.
+	"""
+
+	def _dispatched(
+		self,
+		home: Path,
+		tmp_path: Path,
+		monkeypatch: pytest.MonkeyPatch,
+		*extra_specify: str,
+	) -> None:
+		"""Drive the real CLI through both gates to a dispatched plan."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		# ``_contract`` already specified and approved; a test that wants criteria adds
+		# them in a second proposal rather than re-implementing the helper.
+		if extra_specify:
+			assert (
+				RUNNER.invoke(
+					app,
+					["--home", str(home), "specify", "--approve", *SPECIFY_ARGS, *extra_specify],
+				).exit_code
+				== 0
+			)
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "dispatch", "--all"])
+		assert dispatched.exit_code == 0, dispatched.output
+
+	def test_a_specification_with_no_criteria_says_fr_116_is_not_implemented(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The honest default: the check runs, discharges nothing, and says why.
+
+		``_contract`` supplies one entity, so FR-115 *is* discharged here and FR-116 is
+		not — which is the distinction under test. A report that named both, or neither,
+		would be reporting its own code rather than what the specification declared.
+		"""
+		self._dispatched(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "integrate"])
+
+		assert result.exit_code == 0, result.output
+		assert "model_conformance" in result.output
+		assert "system_criteria" in result.output
+		assert "not implemented:" in result.output
+		named = result.output.split("not implemented: ")[1].split(".")[0]
+		assert "FR-116" in named, f"no criteria were declared, so FR-116 is open: {named}"
+		assert "FR-115" not in named, f"an entity was declared, so FR-115 discharged: {named}"
+		assert "described no system" in result.output
+		assert "needs the system model of §6.3 as a type" not in result.output, (
+			"the old message said the type did not exist, which is no longer true"
+		)
+
+	def test_a_declared_criterion_moves_fr_116_from_open_to_checked(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Declaring a criterion changes which *report* FR-116 gets, not just the count.
+
+		Before the declaration the requirement is open — the check ran and discharged
+		nothing. After it, the check ran against real verdicts and reported the criterion
+		satisfied, so FR-116 leaves ``not_implemented``. The two states are told apart by
+		that tuple, which is derived from what the check discharged rather than from a
+		list, so nothing here can be made true by editing a constant.
+		"""
+		self._dispatched(
+			home,
+			tmp_path,
+			monkeypatch,
+			"--criterion",
+			"The store and the dashboard agree | both are checked against one fixture | 1,2",
+		)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "integrate"])
+
+		assert result.exit_code == 0, result.output
+		assert "1 system criterion(s) over 2 clause(s); every one satisfied" in result.output
+		assert "not implemented:" in result.output
+		named = result.output.split("not implemented: ")[1].split(".")[0]
+		assert "FR-116" not in named, (
+			f"the check ran against verdicts, so FR-116 is closed: {named}"
+		)
+
+	def test_a_criterion_over_one_clause_is_refused_with_a_message(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-116's floor reaches the operator as a sentence, not as a traceback."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"specify",
+				"--criterion",
+				"Only one clause | a criterion that is a module's job | 1",
+			],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "bad option" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_criterion_naming_a_clause_the_contract_does_not_have_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"specify",
+				"--criterion",
+				"A criterion | checked somehow | 1,99",
+			],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "the contract has" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_declared_criterion_is_printed_by_the_proposal(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The operator sees what they declared, with its span, before approving it."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"specify",
+				*SPECIFY_ARGS,
+				"--criterion",
+				"The store and the dashboard agree | both are checked against one fixture | 1,2",
+			],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "system-level criteria (FR-116)" in result.output
+		assert "over 2 clause(s)" in result.output

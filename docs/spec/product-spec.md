@@ -1643,6 +1643,32 @@ conforming. This is the point at which the model earns its maintenance cost.
 no single module can satisfy. These are the criteria that validate the
 decomposition, not the modules.
 
+**And P7 is now six checks over six requirements as of ADR-0038.** FR-115 and FR-116
+were the two P7 reported as unimplemented on every run — honestly, and in a way that let
+a green line read as "P7 passed" while a third of §10 was never attempted. Both now run,
+and both are only as reachable as P2's specification makes them, so the report says which
+state a project is in rather than smoothing the two together.
+
+FR-115's *present* is a set comparison over declarations, never a search for the entity's
+name in a producer's source: an entity names the clauses that introduced it and a module
+names the clauses it exists to satisfy, so presence is decidable without reading code —
+and a text search passes on an entity called `id`. The clause-to-module map is built from
+the **decomposition** rather than the dispatches, because a module nobody dispatched is a
+module the system is missing. The requirement's word is *structurally*, and relationships
+and invariants are reported as **not** conformed on every run, passing or failing: a
+relationship is a claim about two entities' interaction, and no declaration in the log
+describes one.
+
+FR-116's criterion spans **at least two clauses** — the floor is in the type, because a
+one-clause criterion is a module's own obligation that P6 already checks, and accepting
+it would let a decomposition validate itself against criteria it satisfies by
+construction. A criterion is satisfied exactly when every clause it spans carries a
+satisfied verdict, and the verdict taken per clause is the **worst across the log**, not
+the latest report: a criterion that failed on one module and passed on another would
+otherwise read as passing, which is the composition failure the criterion exists to
+catch. A clause with no verdict counts as insufficient rather than satisfied — the one
+default that fails open.
+
 ---
 
 ## 11. Delivery (P8) — the deploy gate
@@ -1851,7 +1877,18 @@ v0.1's lane and oracle definition formats are retained. New surface:
   clauses that return the pipeline to P0 are named in a block of their own. The command
   exits non-zero when a clause is unclassified, when a verdict cites a source the ledger
   does not hold, or when anything is invalidated (FR-068, FR-079; ADR-0037).
-- **`sofact specify`** / **`sofact decompose`** — produce the gate artifacts.
+- **`sofact specify`** — proposes the specification and gates it. `--entity`,
+  `--assumption`, `--value` and `--criterion` carry the parts that are the *operator's*
+  statements rather than derivations, and the criterion form is
+  `STATEMENT | CRITERION | CLAUSE-INDEX,CLAUSE-INDEX` with at least two clauses — a
+  one-clause criterion is a module's own obligation (FR-078, FR-079, FR-085, FR-116;
+  ADR-0038).
+- **`sofact decompose`** — proposes the module graph and gates it.
+- **`sofact integrate`** — P7 over the plan's dispatched work: build order (FR-111), the
+  interface diff (FR-112), import discipline (FR-113, FR-114), model conformance
+  (FR-115) and the system-level criteria (FR-116). Every check prints what it did *not*
+  cover, and the requirements the approved specification left nothing to check are named
+  as not implemented rather than passed (ADR-0027, ADR-0038).
 - **`sofact contract`** — P4; emits contracts + manufactured oracles.
 - **`sofact build`** — P5–P7; runs the platform build.
 - **`sofact report`** — the delivery report (§11).
@@ -1862,8 +1899,9 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
 `sources` (P1's ledger, read from the run's artefacts: FR-069–FR-075, ADR-0035),
 `classify` (P1's per-clause verdicts: FR-068, ADR-0037),
+`specify`, `decompose`, `integrate` (P2, P3 and P7: ADR-0031, ADR-0038),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
-`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `run`. The planned
+`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `repair`, `run`. The planned
 verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
 FR-142's wave scheduler (and FR-163's trigger: **a completed session** is checked against the
 contract,

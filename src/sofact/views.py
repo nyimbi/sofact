@@ -106,6 +106,7 @@ __all__ = [
 	"SpecificationGate",
 	"StepBudget",
 	"StepOutcome",
+	"SystemCriterion",
 	"SystemEntity",
 	"SystemInvariant",
 	"SystemModel",
@@ -1016,6 +1017,45 @@ class SystemModel(View):
 		return frozenset(e.name for e in self.entities)
 
 
+class SystemCriterion(View):
+	"""A P2 acceptance criterion that no single module can satisfy (FR-116).
+
+	FR-116 asks integration to run "system-level acceptance criteria from P2 that no
+	single module can satisfy. These are the criteria that validate the *decomposition*,
+	not the modules." The criterion is therefore declared as *spanning clauses*: a
+	criterion over one clause is a module's job and belongs in the contract, and one over
+	several is precisely the claim a decomposition makes and can get wrong.
+
+	``clause_ids`` is what makes it checkable rather than a second prose statement of the
+	same obligation: the criterion is satisfied exactly when every clause it spans carries
+	a satisfied verdict, which is a fact about the log and not about anyone's reading of
+	the sentence. It points at clauses rather than at requirement ids for the reason
+	:class:`SystemEntity` does — a clause is the stable thing an operator can name.
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	criterion: NonEmptyStr
+	"""How the criterion is known to hold, in the operator's words."""
+	clause_ids: tuple[UUID7, ...]
+
+	@model_validator(mode="after")
+	def _spans_more_than_one_module_can_own(self) -> Self:
+		if len(self.clause_ids) < 2:
+			raise ValueError(
+				f"system criterion {self.statement[:40]!r} spans {len(self.clause_ids)} "
+				"clause(s): FR-116 asks for criteria *no single module can satisfy*, and "
+				"one clause is one module's job — it belongs in the contract, where P6 "
+				"already checks it"
+			)
+		if len(set(self.clause_ids)) != len(self.clause_ids):
+			raise ValueError(
+				f"system criterion {self.statement[:40]!r} names a clause twice, so it "
+				"spans fewer clauses than it claims to"
+			)
+		return self
+
+
 class Specification(View):
 	"""P2's artefact: requirements, the system model, non-goals, assumptions, value (FR-076).
 
@@ -1037,6 +1077,29 @@ class Specification(View):
 	non_goals: tuple[NonGoal, ...] = ()
 	assumptions: tuple[Assumption, ...] = ()
 	value_hypothesis: ValueHypothesis | None = None
+	system_criteria: tuple[SystemCriterion, ...] = ()
+	"""FR-116's criteria, which no single module can satisfy.
+
+	Declared at P2 rather than derived, and empty is a real state: a system whose every
+	obligation is a module's own has no system-level criterion, and :func:`gate` reports
+	that as a *measurement* rather than as a failure — the same treatment FR-082 gives a
+	human-verified requirement. Inventing a criterion by joining two clauses would be the
+	machine writing the claim that its own decomposition composes, which is the claim P7
+	exists to test.
+	"""
+
+	@model_validator(mode="after")
+	def _system_criteria_span_declared_clauses(self) -> Self:
+		known = self.clause_ids
+		for criterion in self.system_criteria:
+			strangers = tuple(cid for cid in criterion.clause_ids if cid not in known)
+			if strangers:
+				raise ValueError(
+					f"system criterion {criterion.statement[:40]!r} spans clause(s) no "
+					f"requirement traces to: {list(strangers)} — a criterion over a clause "
+					"the specification dropped cannot be satisfied by anything (FR-116)"
+				)
+		return self
 
 	@model_validator(mode="after")
 	def _requires_requirements(self) -> Self:
@@ -1708,6 +1771,15 @@ class IntegrationFindingKind(StrEnum):
 	WRONG_ARITY = "wrong_arity"
 	"""A declared function's parameter count differs from the build (FR-112)."""
 
+	MISSING_ENTITY = "missing_entity"
+	"""An entity's clause maps to a module the decomposition does not declare (FR-115)."""
+
+	UNOWNED_ENTITY = "unowned_entity"
+	"""No module owns any clause that introduces the entity (FR-115)."""
+
+	UNSATISFIED_SYSTEM_CRITERION = "unsatisfied_system_criterion"
+	"""A system-level criterion has no satisfied verdict from any module (FR-116)."""
+
 
 class IntegrationFinding(View):
 	"""One violation, attributed to the modules it implicates (FR-114).
@@ -1716,6 +1788,13 @@ class IntegrationFinding(View):
 	finding to go away. FR-114 forbids a platform-wide rebuild in response to a local
 	failure, so the set is as small as the evidence allows and is what a repair is
 	scoped to.
+
+	``modules`` may be empty, and that is a real answer rather than a defect: FR-115's
+	structural findings are about the *model* and FR-116's about *criteria*, so a finding
+	whose cause is the absence of a module cannot name one. An empty set here means the
+	repair is not scoped to a module at all — it is a specification change — and
+	:attr:`IntegrationReport.violating_modules` excludes it rather than widening the
+	scope to the platform, which is what FR-114 refuses.
 	"""
 
 	kind: IntegrationFindingKind
@@ -1817,10 +1896,11 @@ class IntegrationReport(View):
 		distinction between claiming and discharging is what keeps FR-112 honest: the
 		conformance check always runs, but it diffs nothing until a module declares a
 		machine-readable surface, and a report that counted the claim would drop FR-112
-		from this tuple on the strength of a check that compared nothing. FR-115 needs a
-		system model, which does not exist as a type; FR-116 needs P2 acceptance criteria
-		no module satisfies, which the contract does not carry. Both are gaps no check
-		claims, and this is where all of them are reported.
+		from this tuple on the strength of a check that compared nothing. FR-115 and FR-116
+		are the same shape one level up: their checks run, but they discharge nothing until
+		the approved specification declares a system model and criteria spanning more than
+		one clause, so a project that described no system still reports them here. All of
+		those gaps land in this tuple, and none of them needs a list edited to get here.
 		"""
 		discharged = {name for check in self.checks for name in check.discharged}
 		return tuple(name for name in INTEGRATION_REQUIREMENTS if name not in discharged)

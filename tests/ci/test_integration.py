@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from synthetic import elicitation_to_contract, synthetic_service
 
 from sofact._uuid7 import uuid7str
@@ -26,10 +28,14 @@ from sofact.integration import (
 	check_build_order,
 	check_imports,
 	check_interface_conformance,
+	check_model_conformance,
+	check_system_criteria,
 	integrate,
 	public_surface,
 )
 from sofact.planner import DEFAULT_STEP_BUDGET, compile_plan
+from sofact.specification import gate as spec_gate
+from sofact.specification import specify
 from sofact.views import (
 	INTEGRATION_REQUIREMENTS,
 	ClauseKind,
@@ -48,6 +54,11 @@ from sofact.views import (
 	OracleDeclaration,
 	SpecificationDraft,
 	StepOutcome,
+	SystemCriterion,
+	SystemEntity,
+	SystemModel,
+	SystemRelationship,
+	VerdictOutcome,
 	now,
 )
 
@@ -486,7 +497,7 @@ class TestTheInterfaceDiff:
 
 
 # --------------------------------------------------------------------------- #
-# FR-115, FR-116: the requirements that are not implemented
+# what the report says it did not discharge
 # --------------------------------------------------------------------------- #
 
 
@@ -497,9 +508,10 @@ class TestWhatIsNotImplemented:
 		FR-112 is *not* in the tuple here even though the conformance check runs, because
 		the check diffs nothing when no module declared a surface -- the decomposition
 		states interfaces as prose and a proposal has no signature to derive one from.
-		FR-115 needs a system model, which is not a type; FR-116 needs P2 acceptance
-		criteria the contract does not carry. A report that omitted them would let a green
-		line read as "P7 is done".
+		FR-115 and FR-116 are, because this project's specification declared no system
+		model and no system-level criteria: the checks ran and had nothing to conform, so
+		they claim nothing. A report that omitted them would let a green line read as
+		"P7 is done".
 		"""
 		contract = two_clause_contract()
 		proposal = propose(contract)
@@ -531,6 +543,61 @@ class TestWhatIsNotImplemented:
 		report = integrate(plan, declared, dispatches, sources={"a.py": "def run():\n\tpass\n"})
 
 		assert report.not_implemented == ("FR-115", "FR-116")
+		assert report.passed
+
+	def test_a_declared_model_and_criteria_discharge_fr_115_and_fr_116(self) -> None:
+		"""The complement, and the reason the two are checks rather than a permanent gap.
+
+		With a model whose entities are owned by modules and a criterion whose clauses are
+		all satisfied, both requirements leave ``not_implemented`` and the checks carry
+		their evidence -- no list edited, because the tuple is derived from what the
+		checks discharged.
+		"""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		first, second = proposal.modules[0], proposal.modules[-1]
+		model = SystemModel(
+			entities=(
+				SystemEntity(
+					name="entry",
+					description="a ledger entry",
+					clause_ids=(first.clause_ids[0],),
+				),
+				SystemEntity(
+					name="report",
+					description="the summed report",
+					clause_ids=(second.clause_ids[0],),
+				),
+			),
+			relationships=(SystemRelationship(subject="report", predicate="sums", object="entry"),),
+		)
+		criterion = SystemCriterion(
+			id=uuid7str(),
+			statement="the report and the ledger agree",
+			criterion="both modules verified against the same fixture",
+			clause_ids=(first.clause_ids[0], second.clause_ids[0]),
+		)
+		dispatches = [
+			sealed(module=first.name, files=("a.py",), plan=plan),
+			sealed(module=second.name, files=("b.py",), ordinal=1, plan=plan),
+		]
+		verdicts = {
+			first.clause_ids[0]: VerdictOutcome.SATISFIED,
+			second.clause_ids[0]: VerdictOutcome.SATISFIED,
+		}
+
+		report = integrate(
+			plan,
+			proposal,
+			dispatches,
+			sources={"a.py": "VALUE = 1\n", "b.py": "TOTAL = 2\n"},
+			model=model,
+			criteria=(criterion,),
+			verdicts=verdicts,
+		)
+
+		assert report.not_implemented == ("FR-112",), "both new checks discharged their requirement"
 		assert report.passed
 
 	def test_a_surface_that_does_not_match_fails_the_report(self) -> None:
@@ -652,3 +719,257 @@ class TestThroughTheService:
 			assert "decomposition" in str(exc)
 		else:
 			raise AssertionError("integrating without an approved decomposition must be refused")
+
+
+# --------------------------------------------------------------------------- #
+# FR-115: the assembled system against the system model
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSystemModelConformance:
+	"""FR-115 makes the model earn its maintenance cost, which is a checkable claim.
+
+	What is checkable without reading the producer's code is the link ``SystemEntity``
+	already carries: an entity names the clauses that introduced it, a module names the
+	clauses it exists to satisfy, so *present* is a set comparison over declarations.
+	These tests exercise both directions and the two ways the comparison can be made
+	against the wrong thing.
+	"""
+
+	def _model_for(self, contract: Contract, *clause_ids: str) -> SystemModel:
+		return SystemModel(
+			entities=tuple(
+				SystemEntity(
+					name=f"entity-{index}",
+					description="a thing the system stores",
+					clause_ids=(clause_id,),
+				)
+				for index, clause_id in enumerate(clause_ids)
+			)
+		)
+
+	def test_an_entity_whose_clause_a_module_owns_is_present(self) -> None:
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		model = self._model_for(contract, contract.clauses[0].id)
+
+		findings = check_model_conformance(
+			proposal,
+			model,
+			module_for_clause={
+				c.id: proposal.modules[i].name for i, c in enumerate(contract.clauses)
+			},
+		)
+
+		assert findings == ()
+
+	def test_an_entity_no_module_owns_is_a_decomposition_defect(self) -> None:
+		"""The clause the entity names reaches no module, so the model and P3 disagree.
+
+		This is the drift FR-084 exists to make expensive, and the finding's repair scope
+		is *empty* rather than the platform: the fix is a specification change, and FR-114
+		forbids widening a local failure into a whole-system rebuild.
+		"""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		model = self._model_for(contract, uuid7str())
+
+		findings = check_model_conformance(
+			proposal,
+			model,
+			module_for_clause={contract.clauses[0].id: proposal.modules[0].name},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.UNOWNED_ENTITY]
+		assert findings[0].modules == (), "the repair is a specification change, not a module"
+
+	def test_an_entity_owned_by_an_undeclared_module_is_a_finding(self) -> None:
+		"""The map names a module the decomposition does not, which is a stale graph."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		model = self._model_for(contract, contract.clauses[0].id)
+
+		findings = check_model_conformance(
+			proposal, model, module_for_clause={contract.clauses[0].id: "a-module-that-is-gone"}
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.MISSING_ENTITY]
+		assert findings[0].modules == ()
+
+	def test_a_system_whose_entities_are_owned_conforms_and_the_check_says_so(self) -> None:
+		"""The complement, through ``integrate``: the check claims FR-115 only when it ran.
+
+		An empty model leaves FR-115 in ``not_implemented``; a model whose entities are
+		owned takes it out. No list is edited between the two, because the tuple is
+		derived from what each check *discharged*.
+		"""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		dispatches = [sealed(module=proposal.modules[0].name, files=("a.py",), plan=plan)]
+		model = self._model_for(contract, contract.clauses[0].id)
+
+		report = integrate(
+			plan,
+			proposal,
+			dispatches,
+			sources={"a.py": "VALUE = 1\n"},
+			model=model,
+		)
+
+		check = next(c for c in report.checks if c.name == "model_conformance")
+		assert check.passed
+		assert "FR-115" not in report.not_implemented
+		assert "FR-116" in report.not_implemented, "no criteria were declared"
+
+	def test_a_model_with_an_unowned_entity_fails_the_report(self) -> None:
+		"""FR-115 is a hard stop like every other integration check (FR-061)."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		dispatches = [sealed(module=proposal.modules[0].name, files=("a.py",), plan=plan)]
+		model = self._model_for(contract, uuid7str())
+
+		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"}, model=model)
+
+		assert not report.passed
+		assert report.violating_modules == (), "no module can be blamed for a missing module"
+
+	def test_the_check_names_what_it_does_not_conform(self) -> None:
+		"""Relationships and invariants are declared and not conformed, and it says so."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		dispatches = [sealed(module=proposal.modules[0].name, files=("a.py",), plan=plan)]
+		model = SystemModel(
+			entities=(
+				SystemEntity(
+					name="entry", description="a thing", clause_ids=(contract.clauses[0].id,)
+				),
+				SystemEntity(name="entry2", description="the other thing", clause_ids=()),
+			),
+			relationships=(SystemRelationship(subject="entry", predicate="has", object="entry2"),),
+		)
+
+		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"}, model=model)
+
+		check = next(c for c in report.checks if c.name == "model_conformance")
+		assert any("relationships and invariants" in line for line in check.uncovered)
+
+
+# --------------------------------------------------------------------------- #
+# FR-116: the criteria no single module can satisfy
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSystemCriteria:
+	"""FR-116 asks integration to validate the *decomposition*, and this is the check.
+
+	A criterion spans more than one clause, so it is satisfied exactly when every clause
+	it spans carries a satisfied verdict. The two ways to get this wrong are reading only
+	one module's report and treating an uncheckable clause as a passing one; both are
+	tested here.
+	"""
+
+	def _criterion(self, *clause_ids: str) -> SystemCriterion:
+		return SystemCriterion(
+			id=uuid7str(),
+			statement="the ledger and the report agree",
+			criterion="both are checked against the same fixture",
+			clause_ids=tuple(clause_ids),
+		)
+
+	def test_a_criterion_whose_clauses_are_all_satisfied_passes(self) -> None:
+		contract = two_clause_contract()
+		first, second = contract.clauses[0].id, contract.clauses[1].id
+		criterion = self._criterion(first, second)
+
+		findings = check_system_criteria(
+			(criterion,),
+			verdicts={
+				first: VerdictOutcome.SATISFIED,
+				second: VerdictOutcome.SATISFIED,
+			},
+			module_for_clause={},
+		)
+
+		assert findings == ()
+
+	def test_one_unsatisfied_clause_fails_the_whole_criterion(self) -> None:
+		"""The criterion is a claim about composition, so one side failing fails it."""
+		contract = two_clause_contract()
+		first, second = contract.clauses[0].id, contract.clauses[1].id
+		criterion = self._criterion(first, second)
+
+		findings = check_system_criteria(
+			(criterion,),
+			verdicts={first: VerdictOutcome.SATISFIED, second: VerdictOutcome.VIOLATED},
+			module_for_clause={second: "the-report"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.UNSATISFIED_SYSTEM_CRITERION]
+		assert findings[0].modules == ("the-report",), "the repair is scoped to the failing module"
+
+	def test_a_clause_with_no_verdict_is_insufficient_rather_than_satisfied(self) -> None:
+		"""A clause nobody verified is not a clause that passed.
+
+		This is FR-116's version of the mistake ``INSUFFICIENT`` exists to prevent: an
+		absent verdict read as a passing one would make a criterion over unchecked work
+		report green.
+		"""
+		contract = two_clause_contract()
+		first, second = contract.clauses[0].id, contract.clauses[1].id
+		criterion = self._criterion(first, second)
+
+		findings = check_system_criteria(
+			(criterion,),
+			verdicts={first: VerdictOutcome.SATISFIED},
+			module_for_clause={},
+		)
+
+		assert len(findings) == 1
+		assert "insufficient" in findings[0].detail
+
+	def test_a_criterion_over_one_clause_is_refused(self) -> None:
+		"""FR-116 says "no single module can satisfy"; one clause is one module's job."""
+		contract = two_clause_contract()
+		with pytest.raises(ValidationError, match="no single module can satisfy"):
+			self._criterion(contract.clauses[0].id)
+
+	def test_a_criterion_naming_one_clause_twice_is_refused(self) -> None:
+		"""Two references to one clause span one clause, which is not what it claims."""
+		contract = two_clause_contract()
+		clause_id = contract.clauses[0].id
+		with pytest.raises(ValidationError, match="names a clause twice"):
+			self._criterion(clause_id, clause_id)
+
+	def test_a_criterion_over_a_dropped_clause_is_refused_by_the_specification(self) -> None:
+		"""A criterion over a clause no requirement traces to can never be satisfied."""
+		contract = two_clause_contract()
+		criterion = self._criterion(contract.clauses[0].id, uuid7str())
+		with pytest.raises(ValidationError, match="no requirement traces to"):
+			specify(contract, system_criteria=(criterion,))
+
+	def test_the_p2_gate_reports_the_criteria_rather_than_failing_on_their_absence(self) -> None:
+		"""An honestly-modular system has no system-level criterion, and that is not a defect.
+
+		Failing here would make a specification red for being modular, which is how a gate
+		teaches its operator to bypass it. The line reports the measurement instead.
+		"""
+		contract = two_clause_contract()
+		specification = specify(contract)
+		result = spec_gate(specification, contract)
+
+		line = next(c for c in result.checks if c.name == "system_criteria_reported")
+		assert line.passed, "the absence of a criterion is a measurement, not a failure"
+		assert "no system-level criteria declared" in line.detail
+
+	def test_the_p2_gate_counts_a_declared_criterion(self) -> None:
+		contract = two_clause_contract()
+		criterion = self._criterion(contract.clauses[0].id, contract.clauses[1].id)
+		specification = specify(contract, system_criteria=(criterion,))
+		result = spec_gate(specification, contract)
+
+		line = next(c for c in result.checks if c.name == "system_criteria_reported")
+		assert line.passed
+		assert "1 system-level criterion(s) spanning 2 clause(s)" in line.detail

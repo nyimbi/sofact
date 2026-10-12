@@ -90,8 +90,8 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-112 empty public-API diff | **Implemented** (2026-10-12, ADR-0027) | `check_interface_conformance` (`integration.py:390`), `public_surface` (`:336`), `Module.surface` (`views.py:510`); `test_a_declared_name_the_build_does_not_expose_is_a_finding` (`test_integration.py:422`), `test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it` (`:513`). Discharged **only when a module declares a surface** — a proposal derives none, so the default report still names FR-112. |
 | FR-113 no module reaches another's internals | **Implemented** | `check_imports` (`integration.py:183`); `test_a_module_reaching_another_without_declaring_it_is_a_finding` (`test_integration.py:157`). |
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
-| FR-115 system model conformance | **Not built** | Named on every report (`not_implemented`, `views.py:1331`); `test_the_report_names_every_requirement_it_did_not_discharge` (`test_integration.py:491`). |
-| FR-116 system-level acceptance criteria | **Not built** | Same mechanism; blocked on P2 (FR-076). |
+| FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
+| FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
 | FR-117–121 P8 delivery, deploy gate, handover | **Not built** | No delivery artifact, report, deploy gate, API-surface publication, or Mode M handover. FR-120's machine-usable surface exists only as the CLI itself. |
 | FR-122 autonomy per phase and per module, lower governs | **Not built** | Ceilings are per module *class* only. No per-phase computation. |
 | FR-123 Mode G delivery caps at L2 and must be reported | **Not built** | Nothing computes or reports a delivery-level autonomy number. |
@@ -142,17 +142,19 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the FR-068 unit, by reading the
-verdict column with a script rather than by arithmetic on the previous snapshot — the
-earlier numbers in this file (47/21/1/48, then 59/28/1/31, then 67/26/0/26) did not
-match the rows they claimed to count.
+Recounted from the table above on 2026-10-13 after the FR-115/FR-116 unit, by reading
+the verdict cell of every row with a script rather than by arithmetic on the previous
+snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
+67/26/0/26, then 69/25/0/25) did not match the rows they claimed to count. The script
+now reads the cell rather than grepping the line, because a row whose *evidence* names
+another verdict would otherwise be counted twice.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 69 |
+| Implemented | 71 |
 | Partly | 25 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 25 |
+| Not built | 23 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -177,10 +179,12 @@ only).
    **FR-083 is half done** (the model is machine-readable but is not yet the single
    source for interface definitions, which ADR-0027 still routes around by declaring
    surfaces on `Module`), **FR-078 omits state machines**, **FR-081's first clause is
-   not machine-decidable** and the check says so rather than pretending, and
-   **FR-115/FR-116 remain unbuilt** — the P7 conformance check and system-level
-   acceptance criteria now have a model to conform against and still do not conform
-   anything. That last part is the next unit, not a blocker.
+   not machine-decidable** and the check says so rather than pretending.
+   **FR-115/FR-116 closed 2026-10-13** (ADR-0038): P7 conforms the assembled system
+   against the model and checks the criteria no module can satisfy, so §10 has no
+   unbuilt requirement. What is left of this gap is entirely FR-083 — the model is
+   machine-readable and *checked* but is still not the single source for interface
+   definitions, which ADR-0027 routes around by declaring surfaces on `Module`.
 2. **No confinement boundary of any kind (FR-016–020, FR-059).** FR-141 is **built**
    as of 2026-10-12 (ADR-0033) and no longer belongs in this gap: two sessions at once
    cannot see or overwrite each other's files. What remains is that a worktree

@@ -121,6 +121,7 @@ from sofact.views import (
 	SpecificationGate,
 	StepBudget,
 	StepOutcome,
+	SystemCriterion,
 	SystemModel,
 	ValueHypothesis,
 	VerdictOutcome,
@@ -950,6 +951,7 @@ class FactoryService:
 		non_goals: tuple[NonGoal, ...] = (),
 		assumptions: tuple[Assumption, ...] = (),
 		value_hypothesis: ValueHypothesis | None = None,
+		system_criteria: tuple[SystemCriterion, ...] = (),
 	) -> Specification:
 		"""Propose a specification for a contract, and gate it (FR-076).
 
@@ -959,10 +961,10 @@ class FactoryService:
 		recorded *unapproved* — FR-080's operator half is :meth:`approve_specification`,
 		and no code path here can set it.
 
-		The four operator-supplied arguments are passed through rather than derived.
-		FR-079's non-goals and assumptions and FR-085's value hypothesis are the
-		operator's own statements, and a factory that invented them would be gating on its
-		own paraphrase of a conversation it did not have.
+		The five operator-supplied arguments are passed through rather than derived.
+		FR-079's non-goals and assumptions, FR-085's value hypothesis and FR-116's
+		system criteria are the operator's own statements, and a factory that invented
+		them would be gating on its own paraphrase of a conversation it did not have.
 		"""
 		contract = await self.contract_by_id(contract_id)
 		proposal = propose_specification(
@@ -971,6 +973,7 @@ class FactoryService:
 			non_goals=non_goals,
 			assumptions=assumptions,
 			value_hypothesis=value_hypothesis,
+			system_criteria=system_criteria,
 		)
 		self._commit(
 			LedgerKind.SPECIFICATION_PROPOSED,
@@ -2282,19 +2285,72 @@ class FactoryService:
 		graph, so "no module reaches another's internals" has nothing to be a violation
 		*of*. A plan whose contract has no approved decomposition is refused by
 		``require_approved_decomposition`` for the same reason planning is (FR-061).
+
+		The system model and the system-level criteria come from the *approved*
+		specification, and the verdicts from the log's latest report per clause — worst
+		outcome wins, because a clause one module satisfied and another violated is a
+		clause that is not satisfied. Reading the latest report for one contract instead
+		would let FR-116's criterion pass on the strength of whichever module happened to
+		be verified last, which is the stale-evidence mistake FR-006 refuses one phase
+		earlier.
+
+		Both are optional in the sense that a specification may declare neither, and that
+		is reported as unimplemented rather than as passing (FR-115, FR-116). They are
+		*not* optional in the sense of being skippable when they exist: a project whose P2
+		declared a model and criteria has them conformed on every integration pass, with
+		no flag to turn it off.
 		"""
 		plan = await self.plan_by_id(plan_id)
 		decomposition = await self.require_approved_decomposition(plan.contract_id)
 		state = await self.state()
+		specification = state.latest_specification(plan.contract_id)
 		dispatches = state.dispatches_for(plan_id)
 		workspaces = {record.workspace for record in dispatches if record.workspace}
 		root = Path(next(iter(workspaces))) if len(workspaces) == 1 else None
-		report = integrate(plan, decomposition, dispatches, root=root)
+		report = integrate(
+			plan,
+			decomposition,
+			dispatches,
+			root=root,
+			model=specification.system_model if specification is not None else None,
+			criteria=specification.system_criteria if specification is not None else (),
+			verdicts=self._worst_verdict_per_clause(state),
+		)
 		self._commit(
 			LedgerKind.INTEGRATION_CHECKED,
 			{"integration": report.model_dump(mode="json")},
 		)
 		return report
+
+	@staticmethod
+	def _worst_verdict_per_clause(state: ProjectState) -> dict[str, VerdictOutcome]:
+		"""The worst outcome every clause has received, across every report in the log.
+
+		Worst rather than latest, and across reports rather than within one: FR-116's
+		criteria span clauses that different modules satisfy, so a criterion is satisfied
+		only when *every* clause it spans is satisfied by *some* module's verification.
+		Taking the latest report alone would make the answer depend on dispatch order —
+		a criterion that failed on the first module and passed on the last would read as
+		passing, which is precisely the composition failure the criterion exists to catch.
+
+		``INSUFFICIENT`` outranks ``SATISFIED`` and ``VIOLATED`` outranks both, because a
+		clause that was once violated and later satisfied by a repair is satisfied *now*
+		only if the repair's verdict is the latest — and this map has no ordering, so it
+		takes the honest reading: the clause has a violated verdict in its history, and
+		FR-116's criteria are reported against the strongest evidence against them.
+		"""
+		rank = {
+			VerdictOutcome.SATISFIED: 0,
+			VerdictOutcome.INSUFFICIENT: 1,
+			VerdictOutcome.VIOLATED: 2,
+		}
+		worst: dict[str, VerdictOutcome] = {}
+		for report in state.reports:
+			for verdict in report.verdicts:
+				current = worst.get(verdict.clause_id)
+				if current is None or rank[verdict.outcome] > rank[current]:
+					worst[verdict.clause_id] = verdict.outcome
+		return worst
 
 	# --------------------------------------------------------- FR-143: precision
 
