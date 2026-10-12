@@ -35,6 +35,7 @@ from sofact.service import (
 from sofact.views import (
 	PHASE_GATE,
 	PHASE_SEQUENCE,
+	UNPRODUCIBLE_KINDS,
 	Assumption,
 	ClaimKind,
 	ClauseKind,
@@ -161,6 +162,21 @@ _NOT_IMPLEMENTED_WHY = (
 	"spanning more than one clause, so a project that described no system reports them "
 	"here rather than passing them."
 )
+_DELIVERY_ROOT_OPTION = typer.Option(
+	None,
+	"--root",
+	help="The delivery root the FR-117 artefacts are looked for under.",
+)
+_SYSTEM_OPTION = typer.Option(
+	None, "--system", help="What was delivered, named for the Mode M handover."
+)
+_ENTRY_POINT_OPTION = typer.Option(
+	None, "--entry-point", help="Where a Mode M maintenance run begins (FR-121)."
+)
+_REPORT_ID_ARGUMENT = typer.Argument(None, help="The delivery report to gate.")
+_APPROVE_OPTION = typer.Option(None, "--approve", help="Pass the gate for this report, naming it.")
+_GATE_BY_OPTION = typer.Option("operator", "--by", help="Who is passing the gate (FR-119).")
+_GATE_NOTE_OPTION = typer.Option(None, "--note", help="Why, recorded with the decision.")
 _MAX_ATTEMPTS_OPTION = typer.Option(
 	2,
 	"--max-attempts",
@@ -2247,6 +2263,240 @@ async def _envelope(svc: FactoryService, *, defaults: bool) -> None:
 			fg="red",
 		)
 		raise typer.Exit(code=1)
+
+
+@app.command(name="deliver")
+def deliver_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	root: Path | None = _DELIVERY_ROOT_OPTION,
+	system: str | None = _SYSTEM_OPTION,
+	entry_point: str | None = _ENTRY_POINT_OPTION,
+) -> None:
+	"""Render P8's delivery report (FR-117, FR-118)."""
+	asyncio.run(
+		_deliver(
+			_service(_home_of(ctx, home)),
+			root=root,
+			system=system,
+			entry_point=entry_point,
+		)
+	)
+
+
+async def _deliver(
+	svc: FactoryService,
+	*,
+	root: Path | None,
+	system: str | None,
+	entry_point: str | None,
+) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	plan = await svc.latest_plan(built.id)
+	if plan is None:
+		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	report = await svc.render_delivery(
+		plan.id,
+		root=root,
+		system=system,
+		entry_point=entry_point,
+	)
+
+	typer.secho(f"\ndelivery report {report.id}", fg="cyan", bold=True)
+	typer.secho(
+		f"  autonomy: {report.autonomy.name} — the lowest ceiling anything in the "
+		"delivery carries (FR-122)",
+		fg="bright_black",
+	)
+	typer.secho("\n  artefacts (FR-117)", fg="cyan")
+	for artifact in report.artifacts:
+		if artifact.present:
+			typer.secho(f"    [ok  ] {artifact.kind.value}: {artifact.path}", fg="green")
+		elif artifact.kind in UNPRODUCIBLE_KINDS:
+			# Not a failure and not an oversight: a decision this gate is where to take.
+			# Printed apart from the missing ones because the two need different responses.
+			typer.secho(
+				f"    [you ] {artifact.kind.value}: {artifact.missing_because}", fg="yellow"
+			)
+		else:
+			typer.secho(f"    [MISS] {artifact.kind.value}: {artifact.missing_because}", fg="red")
+	if report.undecided_artifacts:
+		typer.secho(
+			f"    ({len(report.undecided_artifacts)} of FR-117's four are decisions SoFact "
+			"does not take: a packaging decision and a named target environment. They are "
+			"reported, not failed — a check that could never pass is one you would learn "
+			"to bypass.)",
+			fg="bright_black",
+		)
+
+	whole = len(report.chain) - len(report.broken_links)
+	typer.secho(
+		f"\n  traceability (FR-117): {whole} of {len(report.chain)} clause(s) trace to a "
+		"module and the step that built it",
+		fg="cyan",
+	)
+	for link in report.broken_links:
+		typer.secho(f"    gap: {link.rendered}", fg="yellow")
+
+	typer.secho(f"\n  verified (FR-118): {len(report.verified)} clause(s)", fg="cyan")
+	for clause in report.verified:
+		typer.secho(f"    {clause.rendered}", fg="green")
+	typer.secho(f"\n  unverified (FR-118): {len(report.unverified)} clause(s)", fg="cyan")
+	for clause in report.unverified:
+		typer.secho(f"    {clause.rendered}", fg="yellow")
+
+	typer.secho(
+		f"\n  unvalidated assumptions (FR-118): {len(report.unvalidated_assumptions)}",
+		fg="cyan",
+	)
+	for assumption in report.unvalidated_assumptions:
+		typer.secho(f"    {assumption.statement}", fg="yellow")
+		typer.secho(f"      refuted by: {assumption.refuted_by}", fg="bright_black")
+
+	typer.secho(f"\n  {report.value_statement}", fg="magenta", bold=True)
+
+	typer.secho("\n  envelope actuals (FR-118, NFR-025)", fg="cyan")
+	if report.envelope_actuals is None:
+		typer.secho(
+			"    no envelope is configured for this deployment, so nothing was measured "
+			"against one. This is not the same statement as every dimension being within "
+			"bounds.",
+			fg="yellow",
+		)
+	else:
+		for measurement in report.envelope_actuals.measurements:
+			colour = (
+				"bright_black"
+				if measurement.actual is None
+				else ("green" if measurement.within else "red")
+			)
+			typer.secho(f"    {measurement.statement}", fg=colour)
+
+	typer.secho("\n  checks", fg="cyan")
+	for check in report.checks:
+		mark = "ok  " if check.passed else "FAIL"
+		typer.secho(
+			f"  [{mark}] {check.name}: {check.detail}",
+			fg="green" if check.passed else "red",
+		)
+
+	handed = report.handover
+	typer.secho(
+		f"\n  maintenance handover (FR-121): {len(handed.lanes)} lane(s), "
+		f"{len(handed.inherited_oracles)} inherited oracle(s) "
+		f"({len(handed.unmaintainable)} without a command)",
+		fg="cyan",
+	)
+	for lane in handed.lanes:
+		typer.secho(
+			f"    {lane.lane} ({lane.ceiling.name}): {lane.description} — "
+			f"{len(lane.inherited_oracles)} oracle(s)",
+			fg="bright_black",
+		)
+	typer.secho(f"    entry point: {handed.entry_point}", fg="bright_black")
+
+	if not report.passed:
+		typer.secho(
+			"\n  the report has failed machine checks. FR-119 makes the deploy gate human; "
+			"it cannot be passed over a failed check.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	typer.secho(
+		f"\n  ready for the deploy gate. Run `sofact deploy --approve {report.id} --by <you>` "
+		"when you have decided (FR-119).",
+		fg="green",
+	)
+
+
+@app.command(name="deploy")
+def deploy_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	report_id: str | None = _REPORT_ID_ARGUMENT,
+	approve: str | None = _APPROVE_OPTION,
+	by: str = _GATE_BY_OPTION,
+	note: str | None = _GATE_NOTE_OPTION,
+) -> None:
+	"""Present or pass the deploy gate (FR-119). Deploy is never automatic."""
+	asyncio.run(
+		_deploy(_service(_home_of(ctx, home)), report_id, approve=approve, by=by, note=note)
+	)
+
+
+async def _deploy(
+	svc: FactoryService,
+	report_id: str | None,
+	*,
+	approve: str | None,
+	by: str,
+	note: str | None,
+) -> None:
+	target = approve or report_id
+	if target is None:
+		report = await svc.current_delivery()
+		if report is None:
+			typer.secho("no delivery report yet. Run `sofact deliver` first.", fg="yellow")
+			raise typer.Exit(code=1)
+		target = report.id
+	try:
+		gate = await svc.delivery_gate(target)
+	except KeyError as exc:
+		typer.secho(f"cannot find that report: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+	if approve is None:
+		typer.secho(f"\ndeploy gate for report {gate.report_id}", fg="cyan", bold=True)
+		for check in gate.checks:
+			mark = "ok  " if check.passed else "FAIL"
+			typer.secho(
+				f"  [{mark}] {check.name}: {check.detail}",
+				fg="green" if check.passed else "red",
+			)
+		typer.secho(f"\n  {gate.report.value_statement}", fg="magenta")
+		typer.secho(
+			f"\n  {len(gate.report.unverified)} clause(s) unverified and "
+			f"{len(gate.report.missing_artifacts)} artefact(s) missing — stated above, and "
+			"yours to weigh. FR-119 makes this a human decision, not a check.",
+			fg="yellow",
+		)
+		if gate.failed:
+			typer.secho(
+				"\n  the gate cannot be passed: a failed machine check is not waivable by "
+				"approval.",
+				fg="red",
+			)
+			raise typer.Exit(code=1)
+		typer.secho(
+			f"\n  run `sofact deploy --approve {gate.report_id} --by <you>` to record the "
+			"decision.",
+			fg="bright_black",
+		)
+		return
+
+	try:
+		record = await svc.approve_deploy(target, by=by, note=note)
+	except ValueError as exc:
+		typer.secho(f"cannot approve: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(
+		f"deploy gate for {record.report_id} passed by {record.deployed_by} at "
+		f"{record.deployed_at.isoformat()}",
+		fg="green",
+	)
+	typer.secho(
+		"  recorded, not performed: §1.5 makes deploy never automatic, so this is the "
+		"evidence of a human decision rather than a release SoFact carried out.",
+		fg="bright_black",
+	)
 
 
 def main() -> None:

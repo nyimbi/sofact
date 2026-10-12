@@ -61,7 +61,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-083 machine-readable system model as the single interface source | **Partly** | The model is machine-readable and carries entities/relationships/invariants. It is **not yet the single source for interface definitions**: ADR-0027 still declares surfaces on `Module`, and nothing derives a module's surface from the model. |
 | FR-084 model updated as part of any change | **Not built** | No model. |
 | FR-085 falsifiable value hypothesis | **Implemented** | `ValueHypothesis` (`views.py`) names effect, beneficiary and refuting instrument; `value_hypothesis_is_falsifiable` is a gate check. |
-| FR-086 factory must not certify value | **Partly** (2026-10-12) | The type carries no verdict field and nothing in `specification.py` can mark a hypothesis satisfied — the factory's only permitted statement about one is that it was *declared*, and `sofact specify` prints it under "declared, never certified". **The delivery-report half is unbuilt**: FR-118 has nowhere to make the statement. |
+| FR-086 factory must not certify value | **Implemented** (2026-10-13, ADR-0040) | The type carries no verdict field and nothing in `specification.py` can mark a hypothesis satisfied — the factory's only permitted statement about one is that it was *declared*, and `sofact specify` prints it under "declared, never certified". **The delivery half is now discharged**: `DeliveryReport.VERIFIED_NOT_VALUE` is a `ClassVar`, so no code path can produce a report that omits the sentence or claims otherwise, and the deploy gate prints it. `test_the_sentence_is_a_class_constant` (`test_delivery.py`), `test_the_report_states_that_value_was_not_certified` (`test_cli.py`). |
 | FR-087 decomposition machine-proposed, human-validated | **Implemented** | `propose` (`decomposition.py:282`), `approve` (`:493`); `test_the_proposal_is_deterministic` (`test_decomposition.py:93`), `test_approval_names_who_and_when` (`:340`). |
 | FR-088 traceability both directions | **Implemented** | `gate` checks `every_module_traces_to_a_requirement` and `every_requirement_traces_to_a_module` (`decomposition.py:423,438`); `test_an_unowned_clause_fails_the_gate` (`test_decomposition.py:260`). |
 | FR-089 DAG, no cycles | **Implemented** | `test_the_proposal_never_contains_a_cycle` (`test_decomposition.py:109`), `test_a_cycle_fails_the_gate` (`:239`). |
@@ -92,9 +92,9 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
 | FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
 | FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
-| FR-117–121 P8 delivery, deploy gate, handover | **Not built** | No delivery artifact, report, deploy gate, API-surface publication, or Mode M handover. FR-120's machine-usable surface exists only as the CLI itself. |
-| FR-122 autonomy per phase and per module, lower governs | **Not built** | Ceilings are per module *class* only. No per-phase computation. |
-| FR-123 Mode G delivery caps at L2 and must be reported | **Not built** | Nothing computes or reports a delivery-level autonomy number. |
+| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (61 tests). **FR-120 is not built**: there is no machine-usable API surface beyond the CLI, and `DELIVERY_REQUIREMENTS` names it rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes. |
+| FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040) | `delivery.ceiling` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
+| FR-123 Mode G delivery caps at L2 and must be reported | **Partly** (2026-10-13, ADR-0040) | `DeliveryReport.autonomy` is now a delivery-level number and `sofact deliver` prints it with the sentence that it is the lowest ceiling anything in the delivery carries. **The L2 cap for a Mode G delivery is not enforced** — nothing distinguishes a Mode G delivery from any other at the point the number is computed. |
 | FR-124 per-deployment topology ceilings | **Not built** | No deployment topology type. |
 | FR-125 G1–G2 target classes, class distribution reported | **Implemented** | `class_distribution` (`views.py:650`) reported in the gate (`decomposition.py:484`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-126 G7 human-authored | **Implemented** | `MODULE_CLASS_CEILING` (`views.py:478`); `test_g7_is_the_only_l1_class` (`test_decomposition.py:217`), `test_every_g7_marker_classifies_as_g7` (`:204`). |
@@ -142,19 +142,25 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the §1.3 envelope unit, by reading
+Recounted from the table above on 2026-10-13 after the P8 delivery unit, by reading
 the verdict cell of every row with a script rather than by arithmetic on the previous
 snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
-67/26/0/26, then 69/25/0/25, then 71/25/0/23) did not match the rows they claimed to
-count. The script now reads the cell rather than grepping the line, because a row whose
-*evidence* names another verdict would otherwise be counted twice.
+67/26/0/26, then 69/25/0/25, then 71/25/0/23, then 72/25/0/22) did not match the rows
+they claimed to count. The script now reads the cell rather than grepping the line,
+because a row whose *evidence* names another verdict would otherwise be counted twice.
+
+The `Implemented` count includes FR-152's row, whose cell reads
+`**Implemented (as a documented refusal)**` — the one verdict spelled with a
+qualification rather than as the bare word, and so the one a prefix match would silently
+drop. That is why the script's total is asserted against the row count rather than
+trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 72 |
-| Partly | 25 |
+| Implemented | 73 |
+| Partly | 27 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 22 |
+| Not built | 19 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -209,17 +215,19 @@ bound) is **partly** (per-step only).
    exist as a class. This is the requirement the product's own thesis rests on
    (§1.1 capability 3). **Blocker: manufacturing needs a target language, which
    D5 leaves open and ADR-0025 records as out of scope.**
-4. **No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).** There is no
-   delivery artifact, no report, no handover, and nowhere for FR-086's
-   "verified requirements, not value" statement to be made. Every delivery-facing
-   requirement is unbuilt. **Narrowed 2026-10-13 (ADR-0039):** FR-118's fifth required
-   statement — "the actuals against the §1.3 envelope" — now has an artefact to report
-   from, because FR-057 and NFR-025 are implemented and `measure` derives the actuals
-   from the log. That removes one of the two dependencies the gap was blocked on and
-   leaves the packaging decision (T2), which no ADR makes: FR-117 asks for a
-   *deployable* artifact, and what "deployable" means depends on the runtime
-   ADR-0005 refuses to assume. The report, the deploy gate, the handover and
-   FR-120's machine-usable surface are unblocked and unbuilt.
+4. ~~**No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).**~~
+   **Closed 2026-10-13 (ADR-0040), except FR-120.** The report, the deploy gate and the
+   Mode M handover are built: `DeliveryReport`'s five FR-118 statements are five required
+   fields, FR-086's sentence is a `ClassVar` no code path can omit, the traceability
+   chain draws its gaps rather than shortening, the deploy gate names the report it
+   approved and is passed only by a person, and the handover hands §13's lanes the whole
+   contract's oracles. Two things are deliberately not closed and are *reported* rather
+   than hidden: **FR-117's image and IaC** are decisions ADR-0005 and FR-124 leave to
+   the operator — the artefact check is scoped to the two the factory owes, because a
+   check that can never pass is one an operator learns to bypass — and **FR-120's
+   machine-usable API surface** is unbuilt, which `DELIVERY_REQUIREMENTS` names rather
+   than drops from the list. FR-122/123 are partly closed by `delivery.ceiling`; FR-123's
+   Mode G L2 cap is not enforced.
 5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
    2026-10-13 (ADR-0030, ADR-0031, ADR-0035, ADR-0037).** Phases are a state machine in
    the ledger, a transition is its own row, `sofact phase` exits non-zero while a gate

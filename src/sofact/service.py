@@ -21,6 +21,7 @@ from typing import Any, Final, cast
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
+from sofact.delivery import report as delivery_report
 from sofact.elicitation import (
 	DimensionSpec,
 	advise_prompt,
@@ -29,6 +30,7 @@ from sofact.elicitation import (
 	next_open,
 	spec_for,
 )
+from sofact.envelope import measure
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner, digest_tree
 from sofact.git import (
@@ -89,6 +91,9 @@ from sofact.views import (
 	Decomposition,
 	DecompositionGate,
 	DeliveryEnvelope,
+	DeliveryGate,
+	DeliveryReport,
+	DeployRecord,
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
@@ -2392,6 +2397,128 @@ class FactoryService:
 				if current is None or rank[verdict.outcome] > rank[current]:
 					worst[verdict.clause_id] = verdict.outcome
 		return worst
+
+	# ------------------------------------------------- FR-117..121: P8 delivery
+
+	async def render_delivery(
+		self,
+		plan_id: str,
+		*,
+		root: Path | None = None,
+		system: str | None = None,
+		entry_point: str | None = None,
+	) -> DeliveryReport:
+		"""Render FR-118's delivery report for a plan's work, and record it (FR-117).
+
+		Reads the contract, the approved decomposition, the specification and the verdicts
+		from the log rather than taking any of them from the caller, for the reason
+		:meth:`check_integration` gives: the report is a statement about what was built, and
+		a caller that could supply the clause-to-module map could supply one that makes the
+		traceability chain look whole.
+
+		The decomposition and the specification are **not** required here, unlike in
+		:meth:`check_integration`. That method checks a system against its model, so
+		without a decomposition there is nothing to be a violation *of*; this one reports
+		what is true, and "no decomposition exists" is one of the things it must be able
+		to say. A missing hop is a gap in the chain, counted by
+		:attr:`~sofact.views.DeliveryReport.broken_links`.
+
+		The envelope is the deployment's, and ``None`` means none was configured — which
+		the report states rather than reporting every dimension as within bounds.
+		"""
+		plan = await self.plan_by_id(plan_id)
+		contract = await self.contract_by_id(plan.contract_id)
+		state = await self.state()
+		decomposition = state.latest_decomposition(plan.contract_id)
+		specification = state.latest_specification(plan.contract_id)
+		goal = state.goal(plan.goal_id)
+		actuals = (
+			None
+			if self._envelope is None
+			else measure(
+				self._envelope,
+				decomposition,
+				value_hypothesis_declared=(
+					None if specification is None else specification.value_hypothesis is not None
+				),
+			)
+		)
+		# The dispatches are read from the log rather than passed, because "was this
+		# module built" is not a fact the plan records and a caller that could supply the
+		# set could supply one that makes an unbuilt module look delivered.
+		delivered = delivery_report(
+			contract,
+			goal_id=plan.goal_id,
+			plan=plan,
+			decomposition=decomposition,
+			specification=specification,
+			verdicts=self._worst_verdict_per_clause(state),
+			envelope_actuals=actuals,
+			root=root,
+			system=system or (goal.statement[:80] if goal is not None else contract.id),
+			entry_point=entry_point or str(root or self.home),
+		)
+		self._commit(
+			LedgerKind.DELIVERY_RENDERED,
+			{"delivery": delivered.model_dump(mode="json")},
+		)
+		return delivered
+
+	async def current_delivery(self) -> DeliveryReport | None:
+		"""The latest delivery report this project holds, or ``None`` (FR-117)."""
+		return (await self.state()).delivery
+
+	async def delivery_gate(self, report_id: str) -> DeliveryGate:
+		"""The deploy gate for a report: its checks, and whether a human has passed it.
+
+		FR-119 makes the gate *permanent*, so the gate is built from the report the caller
+		names rather than from the latest one. A gate that re-read the latest report would
+		let a deploy be approved against checks the approver never saw — the stale-evidence
+		mistake FR-006 refuses one phase earlier, in the one place it authorises a release.
+		"""
+		state = await self.state()
+		found = next((d for d in state.deliveries if d.id == report_id), None)
+		if found is None:
+			raise KeyError(f"no delivery report {report_id} in this project's log")
+		return DeliveryGate(report_id=found.id, checks=found.checks, report=found)
+
+	async def approve_deploy(
+		self, report_id: str, *, by: str, note: str | None = None
+	) -> DeployRecord:
+		"""Pass the deploy gate for a report, naming who did (FR-119, §1.5).
+
+		The only path that records a deploy. It refuses when a machine check failed, for
+		the reason the other three gates do: approval cannot make an unsound artefact
+		sound. It does **not** refuse a report with unverified clauses or missing
+		artefacts — those are stated on the report and are the operator's to weigh, which
+		is what makes the gate a decision rather than a rubber stamp.
+
+		It deploys nothing. §1.5 makes deploy never automatic and ADR-0004 delegates the
+		coding loop, so what SoFact can do is record that a named person passed the gate
+		having been shown the report. A record that claimed a deployment happened would be
+		claiming an act SoFact cannot perform.
+		"""
+		assert by.strip(), "a deploy gate approval names who approved it"
+		gate = await self.delivery_gate(report_id)
+		failed = gate.failed
+		if failed:
+			names = ", ".join(check.name for check in failed)
+			raise ValueError(
+				f"the delivery report has failed machine checks ({names}); approval cannot "
+				"make an unsound artefact sound (FR-119)"
+			)
+		approved = gate.model_copy(update={"approved_by": by, "approved_at": now()})
+		record = DeployRecord(
+			id=uuid7str(),
+			goal_id=gate.report.goal_id,
+			report_id=report_id,
+			gate=approved,
+			deployed_by=by,
+			deployed_at=now(),
+			note=note,
+		)
+		self._commit(LedgerKind.DEPLOY_RECORDED, {"deploy": record.model_dump(mode="json")})
+		return record
 
 	# --------------------------------------------------------- FR-143: precision
 

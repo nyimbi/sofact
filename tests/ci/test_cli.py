@@ -1748,3 +1748,194 @@ class TestTheEnvelopeVerb:
 		assert result.exit_code == 1, result.output
 		assert "within_delivery_envelope" in result.output
 		assert "FR-057" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# P8 from the CLI — the report, and the gate a human passes (FR-117 to FR-121)
+# --------------------------------------------------------------------------- #
+
+
+def _a_delivery_root(tmp_path: Path) -> Path:
+	"""A delivery root holding the two artefacts FR-117 names that the factory owes.
+
+	Written before the report is rendered, because a report over a root with nothing in
+	it *correctly* fails its own artefact check — and a helper that let that through
+	would make every test below a test of the refusal rather than of the report.
+	"""
+	root = tmp_path / "delivery"
+	root.mkdir()
+	(root / "RUNBOOK.md").write_text("# runbook\n", encoding="utf-8")
+	(root / "DELIVERY.md").write_text("# delivery\n", encoding="utf-8")
+	return root
+
+
+def _delivered(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str) -> Result:
+	"""Drive the real CLI to a rendered delivery report, through every gate before it."""
+	root = _a_delivery_root(tmp_path)
+	configure(tmp_path, monkeypatch)
+	conversation(home)
+	assert _contract(home).exit_code == 0
+	assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+	assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+	return RUNNER.invoke(app, ["--home", str(home), "deliver", "--root", str(root), *extra])
+
+
+class TestTheDeliverVerb:
+	"""``sofact deliver`` renders FR-118's report; ``sofact deploy`` presents FR-119's gate.
+
+	What is under test is that the report's *awkward* statements survive the trip to the
+	terminal — the unverified clauses, the artefacts the factory does not produce, the
+	sentence that value was not certified — because a presentation adapter is the last
+	place a qualification can go missing, and the deploy gate is the last moment anyone
+	can refuse.
+	"""
+
+	def test_no_contract_yet_is_a_message_not_a_traceback(self, home: Path) -> None:
+		"""Every precondition has a sentence. A thin CLI's characteristic failure is a
+		traceback where a message belonged."""
+		conversation(home)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "deliver"])
+
+		assert result.exit_code == 1, result.output
+		assert "no contract yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_empty_delivery_root_fails_the_artefact_check(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The other arm of the scoping: the check is scoped, not disabled. A root with
+		nothing in it fails, and the verb exits non-zero rather than offering a gate over
+		a failed report."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+		empty = tmp_path / "empty"
+		empty.mkdir()
+
+		result = RUNNER.invoke(app, ["--home", str(home), "deliver", "--root", str(empty)])
+
+		assert result.exit_code == 1, result.output
+		assert "failed machine checks" in result.output
+		assert "cannot be passed over a failed check" in result.output
+
+	def test_the_report_states_that_value_was_not_certified(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-086's sentence is the one an operator is most tempted to drop, because it
+		is the one that makes the report read as less than a guarantee."""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "verified, not value" in result.output
+		assert "value hypothesis is declared and untested" in result.output
+
+	def test_the_report_names_the_artefacts_the_factory_does_not_produce(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-117's image and IaC are decisions rather than omissions, and the CLI has to
+		print them apart from the missing ones — a single "missing" list would make work
+		the factory owes and an open decision one indistinguishable set."""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert "decisions SoFact does not take" in result.output
+		assert "[you ]" in result.output, "the undecided kinds get their own marker"
+		assert "packaging decision" in result.output
+
+	def test_the_artefact_check_is_scoped_to_what_the_factory_owes(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A check over all four FR-117 kinds could never pass, because two of them are
+		decisions ADR-0005 and FR-124 leave to the operator. A gate that cannot pass is
+		one an operator learns to bypass, and the bypass turns off the part that matters.
+		"""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert "delivery_artifacts" in result.output
+		assert "undecided_artifacts_stated" in result.output
+		scoped = result.output.split("delivery_artifacts: ")[1].split("\n")[0]
+		assert "artefact(s) FR-117 names that the factory owes exist" in scoped, scoped
+		assert "image" not in scoped, "the unproducible kinds are not this check's business"
+
+	def test_the_handover_is_printed_with_what_cannot_be_run(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-121's composition claim is only checkable if the handover reaches the
+		operator, and the count of oracles with no command is the part that says whether
+		Mode M has anything to run."""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert "maintenance handover (FR-121)" in result.output
+		assert "inherited oracle(s)" in result.output
+		assert "without a command" in result.output
+		assert "entry point:" in result.output
+
+	def test_the_debt_is_stated_rather_than_failed(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-118 asks the report to *state* the unverified clauses. Refusing here would
+		pay a producer for hiding one, so the check reports and the report still renders.
+		"""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert "unverified (FR-118)" in result.output
+		assert "no verdict was ever rendered" in result.output
+
+
+class TestTheDeployVerb:
+	def test_no_report_yet_is_a_message_not_a_traceback(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "deploy"])
+
+		assert result.exit_code == 1, result.output
+		assert "no delivery report yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_presenting_the_gate_shows_the_checks_and_the_value_statement(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-119 makes this a human decision, and a decision needs the evidence in front
+		of it. A gate that printed only "pass or fail" would be theatre."""
+		delivered = _delivered(home, tmp_path, monkeypatch)
+		assert delivered.exit_code == 0, delivered.output
+		report_id = delivered.output.split("delivery report ")[1].split("\n")[0].strip()
+
+		result = RUNNER.invoke(app, ["--home", str(home), "deploy", report_id])
+
+		assert result.exit_code == 0, result.output
+		assert f"deploy gate for report {report_id}" in result.output
+		assert "verified, not value" in result.output
+		assert "human decision, not a check" in result.output
+
+	def test_approving_records_the_decision_and_performs_no_deploy(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""§1.5 makes deploy never automatic, so what this verb produces is the evidence
+		of a human act — and it has to say so rather than implying a release."""
+		delivered = _delivered(home, tmp_path, monkeypatch)
+		assert delivered.exit_code == 0, delivered.output
+		report_id = delivered.output.split("delivery report ")[1].split("\n")[0].strip()
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "deploy", "--approve", report_id, "--by", "operator"],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "passed by operator" in result.output
+		assert "recorded, not performed" in result.output
+
+	def test_an_unknown_report_is_refused_with_a_message(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		_delivered(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "deploy", "01a00000-0000-7000-8000-000000000000"],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "cannot find that report" in result.output
+		assert "Traceback" not in result.output

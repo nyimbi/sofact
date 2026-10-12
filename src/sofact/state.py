@@ -25,6 +25,8 @@ from sofact.views import (
 	Cut,
 	Decomposition,
 	DecompositionGate,
+	DeliveryReport,
+	DeployRecord,
 	DispatchRecord,
 	ElicitationAnswer,
 	Evidence,
@@ -136,6 +138,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	# in the log; the fold reports the settled value.
 	repairs: dict[str, RepairAttempt] = {}
 	cuts: list[Cut] = []
+	deliveries: list[DeliveryReport] = []
+	deploys: list[DeployRecord] = []
 
 	for entry in ordered:
 		if entry.index in hidden:
@@ -209,6 +213,16 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# the log's own record of every cut; `ProjectState.cut` derives the operative
 				# one from it, so the two cannot disagree.
 				cuts.append(Cut.model_validate(payload["cut"]))
+			case LedgerKind.DELIVERY_RENDERED:
+				# Appended for the same reason the ledger is (FR-070): a deploy gate
+				# approved against a report must stay readable, so re-rendering supersedes
+				# without erasing. `ProjectState.delivery` derives the operative one.
+				deliveries.append(DeliveryReport.model_validate(payload["delivery"]))
+			case LedgerKind.DEPLOY_RECORDED:
+				# Appended and never keyed: §1.5 makes deploy a permanent human act, so a
+				# second deploy is a second act rather than an amendment of the first, and
+				# the history of who deployed what is the point of recording it.
+				deploys.append(DeployRecord.model_validate(payload["deploy"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -234,6 +248,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		repairs=tuple(repairs.values()),
 		phases=tuple(phases),
 		cuts=tuple(cuts),
+		deliveries=tuple(deliveries),
+		deploys=tuple(deploys),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

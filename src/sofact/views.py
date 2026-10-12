@@ -21,7 +21,7 @@ import json
 import uuid
 from datetime import UTC, date, datetime
 from enum import IntEnum, StrEnum
-from typing import Annotated, Any, Final, Self
+from typing import Annotated, Any, ClassVar, Final, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 
@@ -48,7 +48,12 @@ __all__ = [
 	"DeclarationPrecision",
 	"Decomposition",
 	"DecompositionGate",
+	"DeliveryArtifact",
+	"DeliveryArtifactKind",
 	"DeliveryEnvelope",
+	"DeliveryGate",
+	"DeliveryReport",
+	"DeployRecord",
 	"DimensionBound",
 	"DimensionStatus",
 	"DispatchMode",
@@ -67,6 +72,7 @@ __all__ = [
 	"GoalSpec",
 	"GoalStep",
 	"GoalStyle",
+	"Handover",
 	"HarnessCapability",
 	"HarnessProfile",
 	"IntegrationCheck",
@@ -80,6 +86,7 @@ __all__ = [
 	"InterfaceMemberKind",
 	"LedgerEntry",
 	"LedgerKind",
+	"MaintenanceLane",
 	"Module",
 	"ModuleCheckout",
 	"ModuleClass",
@@ -116,11 +123,14 @@ __all__ = [
 	"SystemInvariant",
 	"SystemModel",
 	"SystemRelationship",
+	"TraceLink",
+	"UnverifiedClause",
 	"ValueHypothesis",
 	"VerdictOutcome",
 	"VerificationMethod",
 	"VerificationReport",
 	"VerificationStatus",
+	"VerifiedClause",
 	"canonical_json",
 	"ceiling_for_rank",
 	"content_hash",
@@ -2130,6 +2140,598 @@ class IntegrationReport(View):
 		return tuple(sorted({name for finding in self.findings for name in finding.modules}))
 
 
+# --------------------------------------------------------------------------- #
+# §11 — delivery (P8): the report, the deploy gate, and the handover
+# --------------------------------------------------------------------------- #
+
+DELIVERY_REQUIREMENTS: Final[tuple[str, ...]] = (
+	"FR-117",
+	"FR-118",
+	"FR-119",
+	"FR-120",
+	"FR-121",
+)
+"""Every requirement §11 states. The whole of P8, not the part that is implemented.
+
+The same rule :data:`INTEGRATION_REQUIREMENTS` states one phase earlier: a report that
+named only what it produced could not distinguish a delivered platform from a directory
+of files, and the difference is what a green line hides.
+"""
+
+
+class DeliveryArtifactKind(StrEnum):
+	"""What FR-117 requires a delivery to contain.
+
+	Four kinds and no fifth. FR-117 names them, and a kind the code cannot spell is an
+	artefact nothing can be recorded as missing — so the report would read as complete
+	because it never mentioned the thing it did not build.
+	"""
+
+	IMAGE = "image"
+	"""The deployable artifact: a container image "or equivalent" (FR-117)."""
+
+	INFRASTRUCTURE = "infrastructure"
+	"""Infrastructure-as-code for the target environment (FR-117)."""
+
+	RUNBOOK = "runbook"
+	"""The operational runbook (FR-117)."""
+
+	REPORT = "report"
+	"""The delivery report itself, which carries the traceability chain (FR-117)."""
+
+
+DELIVERY_ARTIFACTS: Final[tuple[DeliveryArtifactKind, ...]] = tuple(DeliveryArtifactKind)
+
+
+UNPRODUCIBLE: Final[dict[DeliveryArtifactKind, str]] = {
+	DeliveryArtifactKind.IMAGE: (
+		"no packaging decision exists. FR-117 says a container image 'or equivalent', and "
+		"ADR-0005 refuses to assume a container runtime, so what a deployable artifact is "
+		"for this platform is the operator's call at deploy time (T2, open)"
+	),
+	DeliveryArtifactKind.INFRASTRUCTURE: (
+		"infrastructure-as-code is written for a named target environment, and the "
+		"operator names one at the deploy gate rather than at P3. Producing it here would "
+		"be the factory choosing a topology, which FR-124 makes a per-deployment decision"
+	),
+}
+"""The FR-117 artefacts SoFact does not produce, and what would have to exist.
+
+A reason per kind rather than one shared string, because the two need different actions:
+the image needs a packaging decision and the IaC needs a named environment.
+
+This table is why the delivery-artefact check is scoped rather than whole. A check over
+all four kinds can never pass, because two of them are decisions SoFact has deliberately
+not made — and a gate that cannot pass is one an operator learns to bypass, which turns
+off the part of it that does matter. The check therefore fails on the artefacts the
+factory owes and reports these two as decisions the gate is where to take.
+"""
+
+UNPRODUCIBLE_KINDS: Final[frozenset[DeliveryArtifactKind]] = frozenset(UNPRODUCIBLE)
+"""The same fact as a membership test, so a caller does not rebuild the set."""
+
+
+class DeliveryArtifact(View):
+	"""One artefact FR-117 requires, and whether this delivery has it.
+
+	``path`` is relative to the delivery root and is required when ``present`` is true,
+	because "we have a runbook" is not a statement a deploy gate can act on: the operator
+	has to be able to open it. An absent artefact carries ``missing_because`` instead, and
+	that field is required in the other direction for the reason
+	:class:`~sofact.views.IntegrationCheck` requires ``uncovered`` — an absence with no
+	reason is indistinguishable from an oversight, and the two need different responses.
+	"""
+
+	kind: DeliveryArtifactKind
+	present: bool
+	path: NonEmptyStr | None = None
+	missing_because: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _presence_is_whole(self) -> Self:
+		if self.present and self.path is None:
+			raise ValueError(
+				f"the {self.kind.value} artefact is recorded present with no path, so a "
+				"deploy gate could not show it to anyone (FR-117)"
+			)
+		if not self.present and self.path is not None:
+			raise ValueError(f"the {self.kind.value} artefact is absent and names a path")
+		if not self.present and self.missing_because is None:
+			raise ValueError(
+				f"the {self.kind.value} artefact is absent with no reason, which is "
+				"indistinguishable from an oversight (FR-117)"
+			)
+		if self.present and self.missing_because is not None:
+			raise ValueError(f"the {self.kind.value} artefact is present and says why it is not")
+		return self
+
+
+class TraceLink(View):
+	"""One intent clause and the deployed component that satisfies it (FR-117).
+
+	FR-117 asks the delivery report to contain "the traceability chain from intent clause
+	to deployed component", and this is one hop of it. The chain has three hops in
+	SoFact's log — clause to requirement (P2), requirement to module (P3), module to the
+	step that built it (P5) — and a report that printed only the endpoints would leave the
+	middle unverifiable, which is where a fabricated link would live.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	"""The clause's own words, so a reader of the report does not have to open the log."""
+
+	requirement_id: UUID7 | None = None
+	module: NonEmptyStr | None = None
+	step_ordinal: int | None = None
+
+	@property
+	def is_whole(self) -> bool:
+		"""Whether every hop of the chain is present.
+
+		A link missing a hop is the honest state of a project whose decomposition dropped
+		the clause or whose plan never dispatched the module, and the report counts them
+		rather than printing a chain that stops halfway as though it were complete.
+		"""
+		return (
+			self.requirement_id is not None
+			and self.module is not None
+			and self.step_ordinal is not None
+		)
+
+	@property
+	def rendered(self) -> str:
+		"""The chain, with a gap drawn where a hop is missing rather than elided."""
+		requirement = self.requirement_id if self.requirement_id is not None else "(no requirement)"
+		module = self.module if self.module is not None else "(no module)"
+		step = (
+			f"step {self.step_ordinal}" if self.step_ordinal is not None else "(never dispatched)"
+		)
+		return f"{self.clause_id} -> {requirement} -> {module} -> {step}"
+
+
+class VerifiedClause(View):
+	"""A clause that is verified, and by which oracle at which measured strength (FR-118).
+
+	FR-118's first bullet asks for the oracle **and its measured strength**. SoFact
+	measures neither today: ``OracleDeclaration.rank`` is a declaration the operator made
+	(FR-105 records the same gap one phase earlier), and nothing runs a mutation score. So
+	this type carries ``rank`` as declared and ``measured_strength`` as ``None``, and
+	:attr:`measured` says which it is — a report that printed the declared rank under the
+	word "measured" would be the exact euphemism FR-118 forbids.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	oracle_class: OracleClass
+	rank: int
+	"""The declared rank, 1 (strongest) to 7. Read from the clause's own oracle."""
+
+	measured_strength: float | None = None
+	"""A measured mutation score, when one exists. Nothing produces one yet."""
+
+	@property
+	def measured(self) -> bool:
+		"""Whether the strength above is a measurement or a declaration."""
+		return self.measured_strength is not None
+
+	@property
+	def rendered(self) -> str:
+		"""The clause in its own words, with the strength and how it was arrived at.
+
+		The clause's *statement* rather than its id, because FR-118 asks the report to
+		state which clauses are verified and an operator reading a list of UUIDs has to
+		open the log to learn what was verified — which is the report failing to be one.
+		The id stays on the type for the traceability chain to join on.
+		"""
+		strength = (
+			f"measured {self.measured_strength:.2f}"
+			if self.measured_strength is not None
+			else f"declared rank {self.rank}, not measured"
+		)
+		return f"{self.statement} [{self.oracle_class.value}, {strength}]"
+
+
+class UnverifiedClause(View):
+	"""A clause nothing verified, and why (FR-118's second bullet, FR-108).
+
+	FR-118 requires the report to state which clauses are **unverified** — "ground-truth
+	debt" — and the reason is the load-bearing part: a clause whose oracle names no
+	command is debt the operator can retire by writing one, while a clause whose oracle
+	ran and returned insufficient is debt that needs a stronger oracle. Collapsing both
+	into one count would make the report's most important number unactionable.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	outcome: VerdictOutcome | None
+	"""The worst verdict the clause received, or ``None`` if its oracle never ran."""
+
+	because: NonEmptyStr
+	"""What would have to change for this clause to be verified."""
+
+	@property
+	def is_ground_truth_debt(self) -> bool:
+		"""Whether no machine can check this clause at all (FR-108).
+
+		Distinct from a clause that *was* checked and came back insufficient: the first is
+		a contract defect, the second is a build defect, and FR-108's debt fraction counts
+		only the first.
+		"""
+		return self.outcome is None
+
+	@property
+	def rendered(self) -> str:
+		"""The clause in its own words, and what would change its state (FR-118).
+
+		The statement rather than the id, for the reason
+		:attr:`VerifiedClause.rendered` gives: a list of UUIDs is not a report.
+		"""
+		verdict = self.outcome.value if self.outcome is not None else "never run"
+		return f"{self.statement} [{verdict}]: {self.because}"
+
+
+class InheritedOracle(View):
+	"""One oracle a Mode M lane inherits from the Mode G contract (FR-121).
+
+	FR-121's composition claim — "the output of Mode G is a valid input to Mode M" — is
+	the claim that a maintenance lane has something to run. This is that something, and
+	it is a *reference to a clause* rather than a copy of its oracle, so the handover
+	cannot drift from the contract it came from: editing the oracle here would make the
+	delivered system's maintenance criteria differ from the ones its build was verified
+	against.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	command_hint: NonEmptyStr | None = None
+	"""The command the clause's oracle names, or ``None`` for an intention (FR-082).
+
+	``None`` is the honest state of a clause whose oracle is prose: a lane inheriting it
+	inherits a criterion a human has to check, and the handover says so rather than
+	counting it as coverage.
+	"""
+
+	rank: int
+
+	@property
+	def is_executable(self) -> bool:
+		"""Whether a maintenance run could execute this unattended."""
+		return self.command_hint is not None
+
+
+class MaintenanceLane(View):
+	"""One Mode M lane the delivered system is handed over under (FR-121).
+
+	§13's lanes are retained from v0.1 and are the *maintenance* entry point: L01-L12,
+	with L11 the adversarial audit service and L12 self-maintenance. A handover names the
+	lanes the delivered system can be maintained under, so that "the output of Mode G is
+	a valid input to Mode M" is a claim the artefact carries rather than one the operator
+	has to reconstruct.
+
+	The lane classes are §13's and are *not* §14's module classes: Mode M's lanes are
+	typed by what kind of maintenance work they are (dependency bump, test repair,
+	adversarial audit), and a G-class says what a module *is*. A handover that named G
+	classes would be handing the next mode a taxonomy for building rather than for
+	maintaining.
+	"""
+
+	lane: NonEmptyStr
+	"""The lane's §13 identifier, e.g. ``L01``."""
+
+	description: NonEmptyStr
+	inherited_oracles: tuple[InheritedOracle, ...]
+	"""The contract clauses whose oracles this lane runs (FR-121).
+
+	Empty is a real state and not an error: a lane whose work no contract clause covers
+	is a lane the delivered system cannot be maintained under with an oracle, and naming
+	that is more useful than inventing a clause to fill the row.
+	"""
+
+	ceiling: AutonomyLevel
+	"""The lane's §13 autonomy, a property of the lane and not of the delivery."""
+
+	@model_validator(mode="after")
+	def _a_lane_names_itself(self) -> Self:
+		if not self.lane.strip():
+			raise ValueError("a maintenance lane with no name cannot be selected")
+		clauses = [oracle.clause_id for oracle in self.inherited_oracles]
+		if len(set(clauses)) != len(clauses):
+			raise ValueError(
+				f"lane {self.lane!r} inherits two oracles for one clause, so one of them "
+				"is not what the contract says (FR-121)"
+			)
+		return self
+
+	@property
+	def executable_oracles(self) -> tuple[InheritedOracle, ...]:
+		"""The inherited oracles a maintenance run could execute unattended (FR-082)."""
+		return tuple(oracle for oracle in self.inherited_oracles if oracle.is_executable)
+
+
+class Handover(View):
+	"""FR-121's maintenance handover: how the delivered system is maintained next.
+
+	Genesis and maintenance must compose — "the output of Mode G is a valid input to Mode
+	M" — and the composition is only checkable if the handover is an artefact. This is
+	that artefact: the lanes, the oracles they inherit, and the entry point a maintenance
+	run starts from.
+
+	``unmaintainable`` is derived rather than stored, and it is the property that makes
+	the composition claim honest: a delivered system whose every clause is prose has lanes
+	with nothing to run, and a handover that reported only its lanes would read as a
+	system ready for maintenance when it is a system waiting for someone to write the
+	first test.
+	"""
+
+	system: NonEmptyStr
+	"""What was delivered, named so a maintenance run can address it."""
+
+	entry_point: NonEmptyStr
+	"""Where a Mode M run begins: the repository and the lane configuration (FR-121)."""
+
+	lanes: tuple[MaintenanceLane, ...]
+
+	@model_validator(mode="after")
+	def _the_handover_carries_something(self) -> Self:
+		if not self.lanes:
+			raise ValueError(
+				"a handover with no lane is not a valid Mode M input: a maintenance run "
+				"would have no lane to select (FR-121)"
+			)
+		named = {lane.lane for lane in self.lanes}
+		if len(named) != len(self.lanes):
+			raise ValueError("two maintenance lanes share a name, so a run could not select one")
+		return self
+
+	@property
+	def inherited_oracles(self) -> tuple[InheritedOracle, ...]:
+		"""Every oracle the handover passes on, deduplicated across lanes.
+
+		Derived from the lanes rather than stored beside them: two statements of one fact
+		is how a handover comes to disagree with itself about what the delivered system
+		can check.
+		"""
+		seen: dict[str, InheritedOracle] = {}
+		for lane in self.lanes:
+			for oracle in lane.inherited_oracles:
+				seen.setdefault(oracle.clause_id, oracle)
+		return tuple(seen.values())
+
+	@property
+	def unmaintainable(self) -> tuple[InheritedOracle, ...]:
+		"""Inherited oracles that name no command, so no lane can run them (FR-082).
+
+		The delivered system's ground-truth debt, one phase later: FR-108 counts it in the
+		contract, and this counts what actually reaches the maintenance mode.
+		"""
+		return tuple(oracle for oracle in self.inherited_oracles if not oracle.is_executable)
+
+
+class DeliveryReport(View):
+	"""P8's artefact: what was delivered, and what is true about it (FR-117, FR-118).
+
+	FR-118's five statements are five *fields* rather than five paragraphs of prose,
+	because a report is the one artefact an operator reads under time pressure and a
+	sentence is the easiest place for a qualification to go missing. Each field is
+	required, so a report cannot be constructed that omits the awkward one — which is
+	FR-118's own word, "explicitly and without euphemism".
+
+	The fifth statement, FR-086's, is a *constant*: :attr:`VERIFIED_NOT_VALUE` is the only
+	string this type will accept for it. That is the difference between a report that
+	says the factory did not certify value and one that was written by a factory which
+	could not have certified it — FR-086 makes the claim unavailable to every code path,
+	and a free-text field would put it back.
+	"""
+
+	VERIFIED_NOT_VALUE: ClassVar[str] = (
+		"Requirements were verified, not value. Every clause below is a claim that an "
+		"oracle decided; the value hypothesis is declared and untested (FR-086)."
+	)
+
+	id: UUID7
+	goal_id: UUID7
+	contract_id: UUID7
+	plan_id: UUID7
+	rendered_at: datetime
+
+	artifacts: tuple[DeliveryArtifact, ...]
+	"""FR-117's four required artefacts, one entry each, present or absent with a reason."""
+
+	chain: tuple[TraceLink, ...]
+	"""FR-117's traceability chain, one link per intent clause."""
+
+	verified: tuple[VerifiedClause, ...]
+	"""FR-118's first statement: which clauses are verified, and at what strength."""
+
+	unverified: tuple[UnverifiedClause, ...]
+	"""FR-118's second statement: which clauses are not, and what would change that."""
+
+	unvalidated_assumptions: tuple[Assumption, ...]
+	"""FR-118's third statement: every P2 assumption that remains unvalidated.
+
+	Every declared assumption, not a filtered subset. FR-118 says "every assumption from
+	P2 that remains unvalidated", and nothing in SoFact validates one — FR-079 makes an
+	assumption falsifiable by naming its refuting observation, and nothing runs that
+	observation. So the honest report is all of them, and a filter here would be the
+	factory asserting a validation it never performed.
+	"""
+
+	envelope_actuals: EnvelopeActuals | None
+	"""FR-118's fifth statement: the actuals against the §1.3 envelope (NFR-025).
+
+	``None`` when the deployment configured no envelope, which is a different statement
+	from "every dimension is within bounds" — the report says which it is rather than
+	printing an empty table that reads as compliance.
+	"""
+
+	autonomy: AutonomyLevel
+	"""The lowest ceiling anything in the delivery carries (FR-122, FR-123).
+
+	The *lower* of the contract's measured ceiling and every module class's ceiling,
+	because FR-122 makes the lower number govern and a delivery that reported the
+	contract's ceiling alone would claim an autonomy a G7 module forbids.
+	"""
+
+	handover: Handover
+	"""FR-121's Mode M handover, carried by the report rather than computed beside it.
+
+	A field and not a separate artefact because FR-121's claim is a claim about *this*
+	delivery — that its output is a valid Mode M input — and a handover rendered from the
+	contract at some other time could be rendered from a contract this delivery was not
+	verified against. The deploy gate shows it for the same reason: whoever passes the
+	gate is the last person who can refuse a delivery whose maintenance story is empty.
+	"""
+
+	checks: tuple[GateCheck, ...]
+
+	@model_validator(mode="after")
+	def _the_five_statements_are_whole(self) -> Self:
+		if not self.chain:
+			raise ValueError("a delivery report over no intent clause traces nothing (FR-117)")
+		if not self.artifacts:
+			raise ValueError("a delivery report with no artefacts reports nothing (FR-117)")
+		kinds = [a.kind for a in self.artifacts]
+		if len(set(kinds)) != len(kinds):
+			raise ValueError("two artefacts share a kind, so one of FR-117's four is missing")
+		if not self.checks:
+			raise ValueError("a delivery report with no checks is not a report")
+		if not self.handover.lanes:
+			raise ValueError(
+				"a delivery report whose handover has no lane is not an FR-121 Mode M "
+				"input, so the delivery would leave nothing to maintain it with"
+			)
+		return self
+
+	@property
+	def missing_artifacts(self) -> tuple[DeliveryArtifact, ...]:
+		"""FR-117's artefacts this delivery does not have, each with its reason."""
+		return tuple(a for a in self.artifacts if not a.present)
+
+	@property
+	def undecided_artifacts(self) -> tuple[DeliveryArtifact, ...]:
+		"""FR-117's artefacts SoFact does not produce, as decisions the gate must take.
+
+		Separated from :attr:`missing_artifacts` because the two need different
+		responses: a missing runbook is work the factory owes, and a missing image is a
+		packaging decision no factory can make on the operator's behalf (ADR-0005). A
+		single "missing" list would make the report's actionable items and its
+		open decisions one indistinguishable set.
+		"""
+		return tuple(a for a in self.artifacts if a.kind in UNPRODUCIBLE_KINDS)
+
+	@property
+	def missing_artifacts_factory_owes(self) -> tuple[DeliveryArtifact, ...]:
+		"""The missing artefacts that are not one of :attr:`undecided_artifacts`.
+
+		This is the set the delivery-artefact check is scoped to. A check over all four
+		kinds could never pass, and a gate that cannot pass is one an operator learns to
+		bypass — which would turn off the part of the check that does matter.
+		"""
+		return tuple(a for a in self.missing_artifacts if a.kind not in UNPRODUCIBLE_KINDS)
+
+	@property
+	def complete(self) -> bool:
+		"""Whether every artefact FR-117 names exists. Not whether the delivery is sound."""
+		return not self.missing_artifacts
+
+	@property
+	def broken_links(self) -> tuple[TraceLink, ...]:
+		"""Chain entries missing a hop, so the traceability claim is not whole (FR-117)."""
+		return tuple(link for link in self.chain if not link.is_whole)
+
+	@property
+	def value_statement(self) -> str:
+		"""FR-086's statement, which is the same sentence on every report ever rendered."""
+		return self.VERIFIED_NOT_VALUE
+
+	@property
+	def passed(self) -> bool:
+		"""Whether the machine half holds. The deploy gate's human half is separate (FR-119)."""
+		return all(check.passed for check in self.checks)
+
+	@property
+	def failed(self) -> tuple[GateCheck, ...]:
+		"""Machine checks that did not hold."""
+		return tuple(check for check in self.checks if not check.passed)
+
+
+class DeliveryGate(View):
+	"""P8's gate: FR-119's deploy gate, human and permanent.
+
+	The same two-half shape as :class:`DecompositionGate` and :class:`SpecificationGate`,
+	and FR-119 adds two properties the others do not have. It is **human** — the type
+	refuses to be satisfied without a named approver, so no code path can deploy. And it
+	is **permanent**: the report it presented is named by id, so a later delivery cannot
+	be approved against an earlier report's checks, which is the stale-evidence mistake
+	FR-006 refuses one phase earlier and the one a deploy gate can least afford.
+	"""
+
+	report_id: UUID7
+	checks: tuple[GateCheck, ...]
+	report: DeliveryReport
+	approved_by: NonEmptyStr | None = None
+	approved_at: datetime | None = None
+
+	@model_validator(mode="after")
+	def _the_gate_presents_the_report_it_approved(self) -> Self:
+		if self.report.id != self.report_id:
+			raise ValueError(
+				f"the deploy gate names report {self.report_id} and carries {self.report.id}: "
+				"a gate that approved one report and shows another is not a gate (FR-119)"
+			)
+		if (self.approved_by is None) != (self.approved_at is None):
+			raise ValueError("an approval names both who approved it and when")
+		return self
+
+	@property
+	def failed(self) -> tuple[GateCheck, ...]:
+		"""Machine checks that did not hold."""
+		return tuple(check for check in self.checks if not check.passed)
+
+	@property
+	def is_approved(self) -> bool:
+		"""Whether a human has passed this deploy gate (FR-119)."""
+		return self.approved_by is not None
+
+	@property
+	def is_satisfied(self) -> bool:
+		"""Whether the system may be deployed. Both halves, and never automatically (§1.5).
+
+		The machine half is not negotiable by approving, for the reason
+		:class:`DecompositionGate` gives: approval cannot make an unsound artefact sound.
+		"""
+		return not self.failed and self.is_approved
+
+
+class DeployRecord(View):
+	"""One deploy decision, recorded (FR-119, §1.5).
+
+	Deploy is never automatic, so this row exists to be the *evidence* of a human act
+	rather than the act itself. It carries the report it approved and the gate's own
+	checks, so a reader can see what the approver was shown — a record that named only
+	who approved would make "the gate presented the report" an assertion.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	report_id: UUID7
+	gate: DeliveryGate
+	deployed_by: NonEmptyStr
+	deployed_at: datetime
+	note: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _a_deploy_is_approved(self) -> Self:
+		if not self.gate.is_satisfied:
+			raise ValueError(
+				"a deploy record over an unsatisfied gate: FR-119 makes deploy a human, "
+				"permanent decision and §1.5 makes it never automatic"
+			)
+		if self.gate.report_id != self.report_id:
+			raise ValueError("the deploy record and its gate name different reports")
+		return self
+
+
 class IntegritySubject(StrEnum):
 	"""The three things FR-139 requires to be unmodified at completion."""
 
@@ -3343,6 +3945,8 @@ class LedgerKind(StrEnum):
 	SPECIFICATION_GATED = "specification.gated"
 	PHASE_ADVANCED = "phase.advanced"
 	CUT_RECORDED = "cut.recorded"
+	DELIVERY_RENDERED = "delivery.rendered"
+	DEPLOY_RECORDED = "deploy.recorded"
 
 
 class LedgerEntry(View):
@@ -3494,6 +4098,34 @@ class ProjectState(View):
 	notes: tuple[str, ...] = ()
 	phases: tuple[PhaseAdvance, ...] = ()
 	cuts: tuple[Cut, ...] = ()
+	deliveries: tuple[DeliveryReport, ...] = ()
+	"""Every delivery report the log records, oldest first (FR-117).
+
+	Versioned like the ledger and the classification, and for a stronger reason: a
+	delivery report is what a deploy gate presented, so superseding one must not erase
+	what an approver was shown. The operative one is :attr:`delivery`.
+	"""
+
+	deploys: tuple[DeployRecord, ...] = ()
+	"""Every deploy decision, oldest first (FR-119). Appended, never superseded: §1.5
+	makes deploy a permanent human act, and a second deploy is a second act rather than
+	an amendment of the first."""
+
+	@property
+	def delivery(self) -> DeliveryReport | None:
+		"""The latest delivery report, or ``None`` (FR-117).
+
+		The **latest**, for the reason :attr:`ledger` is: a re-rendered report supersedes
+		the one before it, and the older one stays in ``deliveries`` because a deploy gate
+		approved against it has to remain readable.
+		"""
+		return self.deliveries[-1] if self.deliveries else None
+
+	@property
+	def deploy(self) -> DeployRecord | None:
+		"""The most recent deploy decision, or ``None`` (§1.5, FR-119)."""
+		return self.deploys[-1] if self.deploys else None
+
 	"""Every cut the log records, oldest first (FR-094).
 
 	A collection like every other field, because that is what the log holds: rows. The
@@ -3687,6 +4319,14 @@ class ProjectState(View):
 	def dispatches_for(self, plan_id: str) -> tuple[DispatchRecord, ...]:
 		"""Every dispatch attempt made for a plan, in log order."""
 		return tuple(d for d in self.dispatches if d.plan_id == plan_id)
+
+	def deliveries_for(self, contract_id: str) -> tuple[DeliveryReport, ...]:
+		"""Every delivery report rendered for a contract, in log order (FR-117)."""
+		return tuple(d for d in self.deliveries if d.contract_id == contract_id)
+
+	def deploys_for(self, report_id: str) -> tuple[DeployRecord, ...]:
+		"""Every deploy decision recorded against one report (FR-119)."""
+		return tuple(d for d in self.deploys if d.report_id == report_id)
 
 	def dispatches_for_step(self, step_id: str) -> tuple[DispatchRecord, ...]:
 		"""Every attempt at one step, in log order. Retries appear as separate rows."""
