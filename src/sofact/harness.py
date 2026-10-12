@@ -492,7 +492,13 @@ PI_RESEARCH_SPEC: Final = HarnessSpec(
 	goal_entry=PI_SPEC.goal_entry,
 	supports_context_file_flag=PI_SPEC.supports_context_file_flag,
 	model_error_pattern=PI_SPEC.model_error_pattern,
-	env=(("RESEARCH_MODEL", "{model}"),),
+	env=(
+		("RESEARCH_MODEL", "{model}"),
+		("npm_config_loglevel", "error"),
+		("npm_config_audit", "false"),
+		("npm_config_fund", "false"),
+		("npm_config_progress", "false"),
+	),
 	research_tools=("deep_research", "super_deep_research"),
 	notes=(
 		"The research dispatch (FR-167): the same measured pi mechanics as PI_SPEC, with "
@@ -506,7 +512,10 @@ PI_RESEARCH_SPEC: Final = HarnessSpec(
 		"extension's tools in the producer's --tools allowlist: measured, an allowlist "
 		"that omits them leaves the producer no way to call the loop at all -- it spent "
 		"its wall clock hand-rolling a recursive pi instead (2026-09-12). The "
-		"artefact protocol the goal "
+		"npm_config_* entries silence npm's audit/funding/warning noise in the "
+		"recursion's stderr: the tool reports only the first 500 characters of it, and "
+		"without this the real error of a failed research child is cut off behind the "
+		"audit text -- measured, not assumed. The artefact protocol the goal "
 		"imposes is research-report.md plus research-meta.json in the workspace; the "
 		"extension's own timeout (240 s deep, 360 s super) binds before its advertised "
 		"search floor on a local model, which was measured, not assumed."

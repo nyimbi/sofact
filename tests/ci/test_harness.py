@@ -117,7 +117,16 @@ class TestMeasuredSpecs:
 			"the loop IS an installed extension, so this spec names it by omission"
 		)
 		assert "--no-extensions" in PI_SPEC.argv, "and the build spec still freezes them"
-		assert PI_RESEARCH_SPEC.env == (("RESEARCH_MODEL", "{model}"),)
+		assert PI_RESEARCH_SPEC.env == (
+			("RESEARCH_MODEL", "{model}"),
+			("npm_config_loglevel", "error"),
+			("npm_config_audit", "false"),
+			("npm_config_fund", "false"),
+			("npm_config_progress", "false"),
+		), (
+			"the npm noise is silenced so a child failure's own error reaches the tool's "
+			"500-character report window instead of being cut off behind the audit text"
+		)
 		assert PI_RESEARCH_SPEC.research_tools == ("deep_research", "super_deep_research")
 		assert PI_SPEC.research_tools == (), "a build spec delegates no research tool"
 		assert PI_RESEARCH_SPEC.session_glob == PI_SPEC.session_glob
