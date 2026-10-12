@@ -67,6 +67,7 @@ __all__ = [
 	"CLAUDE_SPEC",
 	"DEFAULT_TOOLS",
 	"DSH_SPEC",
+	"OPENCODE_SPEC",
 	"PI_RESEARCH_SPEC",
 	"PI_SPEC",
 	"PROBE_BUDGET_GOAL",
@@ -90,8 +91,26 @@ DEFAULT_PROBE_TIMEOUT_SECONDS: Final = 180.0
 DEFAULT_DISPATCH_TIMEOUT_SECONDS: Final = 3600.0
 DEFAULT_STDERR_TAIL_BYTES: Final = 2_048
 _USAGE_REDUCERS: Final = frozenset({"sum", "max"})
+_MATERIALISED_PREFIX: Final = "sofact-record-"
+"""Filename prefix for a record a ``session_command`` printed rather than wrote.
+
+A dispatch can call :meth:`session_files` more than once for the same session -- the
+probe reads the record, then the sandbox probe reads it again -- so the file must be
+recognisable and stable rather than minted afresh. The prefix also keeps it from
+colliding with anything the harness itself writes into the session directory.
+"""
 
 _SESSION_ID_STYLES: Final = frozenset({"token", "uuid"})
+_RECORD_FORMATS: Final = frozenset({"jsonl", "json"})
+"""How the bytes at a record path are shaped.
+
+``jsonl`` is one JSON object per line, which every line-oriented harness writes.
+``json`` is a single document covering the whole session, which is what a
+``session_command`` that exports a session prints. It is the *shape*, not the
+harness: two harnesses can print the same shape, and one harness can change shape
+between versions, which is why the spec states it rather than the reader guessing
+from the first byte.
+"""
 """How a harness wants its session identifier shaped.
 
 ``token`` is any non-empty string, which is what ``pi`` and ``dsh`` accept. ``uuid``
@@ -113,6 +132,7 @@ _TUPLE_FIELDS: Final = (
 	"goal_event_types",
 	"usage_path",
 	"version_argv",
+	"session_command",
 )
 _STRING_FIELDS: Final = (
 	"compaction_event",
@@ -120,7 +140,9 @@ _STRING_FIELDS: Final = (
 	"confinement_tools",
 	"model_error_pattern",
 	"notes",
+	"record_format",
 	"session_glob",
+	"session_id_prefix",
 	"session_id_style",
 	"usage_reduce",
 )
@@ -191,6 +213,18 @@ class HarnessSpec:
 		``message``. One rule, no implicit stripping -- a fixed envelope cannot describe
 		both shapes, and a path that meant "relative to ``data``" would silently read
 		nothing on a harness that has no such block.
+
+		``record_format`` says how the bytes at the record path are shaped. ``jsonl`` is
+		one JSON object per line; ``json`` is one document for the whole session, which is
+		what ``opencode session export`` prints. It is a *shape* declaration, not a
+		harness name, because the same command output shape can come from any harness.
+
+		``session_command`` names a command whose stdout is the record, for a harness
+		whose history is not a file -- ``opencode`` keeps sessions in SQLite and exports
+		one on demand. The command's stdout is materialised into a file inside the
+		session directory and the *file* is what every reader sees, so the seam stays
+		singular and ``session_path`` stays a path a caller can open (FR-058). A harness
+		with no such command leaves it empty and its records are files it wrote itself.
 	"""
 
 	name: str
@@ -198,7 +232,10 @@ class HarnessSpec:
 	env: tuple[tuple[str, str], ...] = ()
 	session_glob: str = "**/*{session_id}*.jsonl"
 	session_is_zstd: bool = False
+	record_format: str = "jsonl"
+	session_command: tuple[str, ...] = ()
 	session_id_style: str = "token"
+	session_id_prefix: str = ""
 	version_argv: tuple[str, ...] = ()
 	completion_event: str | None = None
 	completion_reason_path: tuple[str, ...] = ()
@@ -227,6 +264,13 @@ class HarnessSpec:
 			assert self.completion_reason_path, (
 				f"{self.name!r} declares a completion event but no path to read from it"
 			)
+		assert self.record_format in _RECORD_FORMATS, (
+			f"bad record_format {self.record_format!r}; expected one of {sorted(_RECORD_FORMATS)}"
+		)
+		assert not (self.session_is_zstd and self.record_format == "json"), (
+			f"{self.name!r} declares a zstd record and a whole-document format; a session "
+			"command's stdout is already decoded, so the two cannot both describe it"
+		)
 		assert self.session_id_style in _SESSION_ID_STYLES, (
 			f"bad session_id_style {self.session_id_style!r}; "
 			f"expected one of {sorted(_SESSION_ID_STYLES)}"
@@ -285,6 +329,12 @@ class HarnessSpec:
 			raise ValueError(
 				f"harness {name!r}: a completion_event needs a completion_reason_path to read "
 				"the reason from"
+			)
+		format_ = changes.get("record_format")
+		if isinstance(format_, str) and format_ not in _RECORD_FORMATS:
+			raise ValueError(
+				f"harness {name!r}: record_format must be one of {sorted(_RECORD_FORMATS)}, "
+				f"got {format_!r}"
 			)
 
 		base = cls(name=name, argv=_strings(payload["argv"], "argv", name))
@@ -702,10 +752,95 @@ file, and a refusal that named the model.
 """
 
 
+OPENCODE_SPEC: Final = HarnessSpec(
+	name="opencode",
+	argv=(
+		"opencode",
+		"run",
+		# A private server, so the run writes to OPENCODE_DB rather than to the
+		# operator's background service. Measured: without --standalone the variable is
+		# ignored and the store stays empty, so the pair is the isolation unit.
+		"--standalone",
+		"-s",
+		"{session_id}",
+		"--format",
+		"json",
+		"--model",
+		"{model}",
+	),
+	env=(
+		("OPENCODE_DB", "{session_dir}/opencode.db"),
+		("OPENCODE_TEST_HOME", "{session_dir}/home"),
+	),
+	# No glob: the history is a SQLite row, and session_command is what turns it back
+	# into a file. session_glob is left at its default and is never consulted.
+	record_format="json",
+	session_command=(
+		"opencode",
+		"session",
+		"export",
+		"--standalone",
+		"{session_id}",
+	),
+	session_id_style="token",
+	session_id_prefix="ses_",
+	version_argv=("opencode", "--version"),
+	# No completion_event: one exported document *is* the session, so there is no
+	# per-event envelope to name. Measured on 2.0.25: info.outcome is "succeeded" on a
+	# real completed session and "failed" on one whose provider refused the request.
+	completion_event=None,
+	completion_reason_path=("info", "outcome"),
+	completion_reason_value="succeeded",
+	usage_path=("info", "tokens", "output"),
+	usage_reduce="sum",
+	goal_event_types=(),
+	goal_entry=GoalEntry.PROMPT,
+	supports_context_file_flag=False,
+	model_error_pattern="",
+	confinement_tools="",
+	notes=(
+		"Measured 2026-10-12 against opencode 2.0.25. THIS SPEC WAS NOT WITNESSED "
+		"END TO END: every run on this machine failed after the argv was accepted, "
+		"because the configured OpenRouter account is out of credit (HTTP 402), so "
+		"generation is unwitnessed. What IS measured: "
+		"the session id must be a string starting with 'ses' (a bare 'probe-0123abcd' "
+		"is refused with 'Expected a string starting with \"ses\"'), and 'ses_probe-"
+		"0123abcd' is accepted, so session_id_prefix carries the requirement. "
+		"'opencode session export --standalone <id>' prints one JSON document with "
+		"info.{id,outcome,tokens,cost,time,location} and messages[], and it honours "
+		"OPENCODE_DB -- measured by exporting from a private store. "
+		"THE EXIT CODE IS NOT A COMPLETION SIGNAL: a session whose provider returned "
+		"402 still exported with info.outcome 'failed' and exit 0, and a malformed id "
+		"exits 1. Reading completion from the exit code would report a failed session "
+		"as completed, which is why parse_completion reads the document. "
+		"THE OPERATOR'S TOOL ALLOWLIST HAS NO SLOT: 'opencode run' exposes no --tools "
+		"and no --confinement flag; tool policy is chosen by --agent, which names a "
+		"configured agent rather than a list. A dispatch therefore cannot narrow this "
+		"harness's tools the way it narrows claude's or pi's, and the sandbox probe's "
+		"instrument -- an allowlist that varies and nothing else -- cannot be built "
+		"here. confinement_tools is empty for that reason, not by oversight. "
+		"NOT MEASURED: model resolution (model_error_pattern is empty because no bad "
+		"model was tried against a live provider), goal mode (none), compaction, "
+		"budget control, and concurrency (unwitnessed, though the id is caller-minted "
+		"and the store is private, which is the shape that makes it work). Telemetry "
+		"egress is NOT mitigated (FR-152)."
+	),
+)
+"""``opencode``: a database-backed record behind a command, and a real outcome field.
+
+The first harness whose record is not a file it wrote. It is wired to prove the
+``session_command`` seam -- the record arrives as a command's stdout, is written to a
+file, and every reader below is unchanged. Its completion declaration is the strongest
+of the four: ``info.outcome`` is a structured statement about the session, witnessed as
+``failed`` on a real refusal.
+"""
+
+
 SPECS: Final[dict[str, HarnessSpec]] = {
 	PI_SPEC.name: PI_SPEC,
 	DSH_SPEC.name: DSH_SPEC,
 	CLAUDE_SPEC.name: CLAUDE_SPEC,
+	OPENCODE_SPEC.name: OPENCODE_SPEC,
 	"pi-research": PI_RESEARCH_SPEC,
 }
 
@@ -751,11 +886,17 @@ def parse_completion(records: Iterable[Mapping[str, object]], spec: HarnessSpec)
 	A harness with no completion signal returns ``False`` for every session, which is
 	the honest answer: absence of a declaration is not a declaration of failure, and
 	this flag is never consulted by the verifier either way.
+
+	``completion_event`` names the envelope an event-shaped record carries it in. A
+	whole-document record (``record_format="json"``) has no per-event ``type`` -- one
+	document *is* the session -- so its declaration is read straight off the document,
+	and the spec declares no event. Requiring an event there would make the field
+	unusable rather than honest, so the event is consulted only when one is declared.
 	"""
-	if spec.completion_event is None:
+	if not spec.completion_reason_path:
 		return False
 	for record in records:
-		if record.get("type") != spec.completion_event:
+		if spec.completion_event is not None and record.get("type") != spec.completion_event:
 			continue
 		if _walk(record, spec.completion_reason_path) == spec.completion_reason_value:
 			return True
@@ -896,7 +1037,7 @@ class ConfiguredHarnessAdapter:
 		"""
 		if self.spec.session_id_style == "uuid":
 			return uuid7str()
-		return f"{label}-{uuid7str()[:8]}"
+		return f"{self.spec.session_id_prefix}{label}-{uuid7str()[:8]}"
 
 	def render_tools(self, tools: str | None = None) -> str:
 		"""The operator's allowlist in the harness's own spelling.
@@ -956,23 +1097,81 @@ class ConfiguredHarnessAdapter:
 		merged.update(self.env)
 		return merged
 
-	def session_files(self, session_id: str) -> tuple[Path, ...]:
-		"""Session records matching this dispatch, newest first."""
+	async def session_files(self, session_id: str) -> tuple[Path, ...]:
+		"""Session records matching this dispatch, newest first.
+
+		Two sources, one interface. A harness that writes its own files needs only the
+		glob; a harness whose history lives in a database names a ``session_command``
+		whose stdout *is* the record, and that stdout is written to a file in the session
+		directory before anything reads it. The seam therefore stays file-shaped: every
+		reader below opens a path, ``session_path`` stays a path a caller can open, and a
+		harness that moves to a database changes one spec field rather than every reader
+		(FR-058).
+		"""
+		if self.spec.session_command:
+			return await self._materialise(session_id)
 		pattern = self.spec.session_glob.format(session_id=session_id)
 		found = [p for p in self.session_dir.glob(pattern) if p.is_file()]
 		return tuple(sorted(found, key=lambda p: p.stat().st_mtime, reverse=True))
 
-	async def _read_records(self, path: Path) -> tuple[dict[str, object], ...]:
-		"""Parse a session record, decompressing when the spec says so.
+	async def _materialise(self, session_id: str) -> tuple[Path, ...]:
+		"""Run ``session_command`` and write its stdout to a file, returning that file.
+
+		A command that exits non-zero or prints nothing yields *no* record rather than an
+		empty one: "the harness would not hand over the record" and "the session left no
+		record" are different facts, and an empty file would read as the second.
+
+		The exit code is deliberately not the completion signal. Measured on opencode
+		2.0.25: a session whose provider refused the request still exports, with
+		``info.outcome = "failed"``, and exits 0; a malformed session id exits 1 and
+		prints its complaint to stderr. The declaration lives in the document, so the
+		document is what decides ``declared_complete`` -- an exit code here would report
+		"completed" for a session that failed and "no signal" for one that succeeded.
+		"""
+		argv = tuple(part.format(**self._slots(session_id)) for part in self.spec.session_command)
+		process = await asyncio.create_subprocess_exec(
+			*argv,
+			cwd=self.workspace,
+			stdin=asyncio.subprocess.DEVNULL,
+			stdout=asyncio.subprocess.PIPE,
+			stderr=asyncio.subprocess.PIPE,
+			env=self._child_env(session_id),
+		)
+		stdout, _stderr = await process.communicate()
+		if process.returncode != 0 or not stdout.strip():
+			return ()
+		self.session_dir.mkdir(parents=True, exist_ok=True)
+		target = self.session_dir / (
+			f"{_MATERIALISED_PREFIX}{session_id}.{self.spec.record_format}"
+		)
+		target.write_bytes(stdout)
+		return (target,)
+
+	async def read_records(self, path: Path) -> tuple[dict[str, object], ...]:
+		"""Parse a session record, decompressing or whole-document-reading when told to.
 
 		Decompression shells out to ``zstd -dc`` because Python 3.13 has neither
 		``compression.zstd`` nor a vendored binding, and adding a dependency to read one
 		log file would be a poor trade.
+
+		A ``json`` record is one document covering the whole session, so it yields one
+		record. That keeps every reader (``parse_usage``, ``parse_completion``, the
+		continuation counter) written against one shape -- a sequence of mappings --
+		instead of each growing a second branch for the document case.
 		"""
 		if self.spec.session_is_zstd:
 			raw = await self._decompress(path)
 		else:
 			raw = path.read_text(encoding="utf-8", errors="replace")
+
+		if self.spec.record_format == "json":
+			try:
+				document: object = json.loads(raw)
+			except ValueError as exc:
+				raise HarnessSessionUnreadable(f"{path} is not JSON: {exc}") from exc
+			if not _is_mapping(document):
+				raise HarnessSessionUnreadable(f"{path} is not a JSON object")
+			return (dict(document),)
 
 		records: list[dict[str, object]] = []
 		for lineno, line in enumerate(raw.splitlines(), start=1):
@@ -1107,10 +1306,10 @@ class ConfiguredHarnessAdapter:
 		)
 		child_output = f"{stdout}\n{stderr}"
 
-		files = self.session_files(session_id)
+		files = await self.session_files(session_id)
 		records: tuple[dict[str, object], ...] = ()
 		if files:
-			records = await self._read_records(files[0])
+			records = await self.read_records(files[0])
 
 		# The extra attempts are decided here, before the findings list is assembled, and
 		# gated as a group on the primary run having actually done work: if it did not,
@@ -1372,11 +1571,11 @@ class ConfiguredHarnessAdapter:
 		exit_code, stdout, stderr, timed_out = await self._invoke(
 			argv, timeout=timeout, session_id=session_id
 		)
-		files = self.session_files(session_id)
+		files = await self.session_files(session_id)
 		tokens: int | None = None
 		if files:
 			try:
-				records = await self._read_records(files[0])
+				records = await self.read_records(files[0])
 				tokens = parse_usage(records, self.spec)
 			except HarnessSessionUnreadable:
 				tokens = None
@@ -1522,7 +1721,7 @@ class ConfiguredHarnessAdapter:
 			self._invoke(self.build_argv(goal, second), timeout=budget, session_id=second),
 		)
 		(exit_a, _, _, timed_out_a), (exit_b, _, _, timed_out_b) = results
-		files_a, files_b = self.session_files(first), self.session_files(second)
+		files_a, files_b = await self.session_files(first), await self.session_files(second)
 		attempted = (
 			f"ran two children simultaneously with session ids {first} and {second} in the "
 			"same workspace and session directory, and compared the records each produced"
@@ -1858,11 +2057,11 @@ class ConfiguredHarnessAdapter:
 			argv, timeout=step.budget.max_wall_clock_seconds, session_id=session
 		)
 
-		files = self.session_files(session)
+		files = await self.session_files(session)
 		session_path = str(files[0]) if files else None
 		records: tuple[dict[str, object], ...] = ()
 		if files:
-			records = await self._read_records(files[0])
+			records = await self.read_records(files[0])
 
 		violations: list[str] = []
 		if timed_out:
@@ -1935,14 +2134,20 @@ class ConfiguredHarnessAdapter:
 			declared_complete=declared,
 			declaration_note=(
 				(
-					f"harness {self.spec.name!r} reported completion via {self.spec.completion_event}. "
-					"This is a claim, not a finding: it changes no verdict (FR-138)."
+					f"harness {self.spec.name!r} reported completion via "
+					f"{'.'.join(self.spec.completion_reason_path)}"
+					+ (
+						f" on a {self.spec.completion_event!r} event"
+						if self.spec.completion_event is not None
+						else " in the session document"
+					)
+					+ ". This is a claim, not a finding: it changes no verdict (FR-138)."
 				)
 				if declared
 				else (
 					f"harness {self.spec.name!r} has no structured completion signal, so "
 					"nothing was declared either way"
-					if self.spec.completion_event is None
+					if not self.spec.completion_reason_path
 					else f"harness {self.spec.name!r} did not report completion"
 				)
 			),

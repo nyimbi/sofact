@@ -35,6 +35,7 @@ from sofact.harness import (
 	CLAUDE_SPEC,
 	DEFAULT_TOOLS,
 	DSH_SPEC,
+	OPENCODE_SPEC,
 	PI_SPEC,
 	SPECS,
 	ConfiguredHarnessAdapter,
@@ -207,6 +208,7 @@ class TestConfiguration:
 			PI_SPEC.name,
 			DSH_SPEC.name,
 			CLAUDE_SPEC.name,
+			OPENCODE_SPEC.name,
 			"pi-research",
 		}
 

@@ -15,6 +15,7 @@ mapping from bytes on disk back to observations is what needs checking.
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -29,12 +30,14 @@ __all__ = [
 	"SCRIPT",
 	"SCRIPT_NAME",
 	"base_spec",
+	"db_spec",
 	"decompose_and_approve",
 	"elicitation_to_contract",
 	"gated_contract",
 	"kinds",
 	"plan_and_service",
 	"reset_calls",
+	"seed_store",
 	"spec_json",
 	"synthetic_service",
 	"write_script",
@@ -55,6 +58,54 @@ session_dir, session_id, mode = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv
 tools = sys.argv[4] if len(sys.argv) > 4 else ""
 goal = sys.argv[-1]
 target = session_dir / f"{session_id}.jsonl"
+
+if mode == "export" or mode.startswith("export-"):
+	# The record-source *command*: this is what a `session_command` spec names, and its
+	# stdout is the record. A harness that keeps its history in a database has no file
+	# for a glob to find, so the document is printed on demand instead. The three modes
+	# are the three ways a command can fail to hand one over -- it refuses, it prints
+	# nothing, or it prints a document that says the session failed.
+	private = session_dir / "private"
+	store = private / f"{session_id}.db"
+	if mode == "export-refuse":
+		print(f"no such session: {session_id}", file=sys.stderr)
+		sys.exit(1)
+	if mode == "export-silent":
+		sys.exit(0)
+	if not store.exists():
+		print(f"no such session: {session_id}", file=sys.stderr)
+		sys.exit(1)
+	document = json.loads(store.read_text(encoding="utf-8"))
+	if mode == "export-failed":
+		document["info"]["outcome"] = "failed"
+	# Indented, as `opencode session export` prints it. This is load-bearing for the
+	# test, not cosmetics: compact JSON is one line, which a line-oriented reader
+	# parses happily, so a fixture that printed it could not tell a whole-document
+	# reader from a JSONL one. Measured output is pretty-printed.
+	print(json.dumps(document, indent=2))
+	sys.exit(0)
+
+if mode.startswith("db"):
+	# A harness whose history is its own store rather than a file in the session
+	# directory: the record lands under private/, where no glob for a session record
+	# would look, and only the export command above can produce it.
+	private = session_dir / "private"
+	private.mkdir(parents=True, exist_ok=True)
+	(private / f"{session_id}.db").write_text(
+		json.dumps(
+			{
+				"info": {
+					"id": session_id,
+					"outcome": "failed" if "fail" in mode else "succeeded",
+					"tokens": {"input": 900, "output": 120, "reasoning": 0},
+				},
+				"messages": [{"role": "assistant", "content": "done"}],
+			}
+		),
+		encoding="utf-8",
+	)
+	sys.exit(7 if "fail" in mode else 0)
+
 if mode.startswith("shared"):
 	# One fixed record path for every session: a harness whose records collide when two
 	# steps run at once. It has to be a real file on disk for the probe to observe the
@@ -288,6 +339,77 @@ def base_spec(
 		compaction_event="compaction",
 		notes="a real subprocess, not a mock",
 	)
+
+
+def db_spec(
+	tmp_path: Path,
+	mode: str,
+	*,
+	name: str = "synthetic-db",
+	command: str | None = "export",
+) -> HarnessSpec:
+	"""A harness whose record is a *command's stdout*, not a file it wrote.
+
+	The glob is deliberately one that matches nothing: this spec proves the
+	``session_command`` seam by making the file-shaped source unavailable, so a test
+	that passes cannot be passing because a glob happened to find something.
+	"""
+	script = write_script(tmp_path)
+	return HarnessSpec(
+		name=name,
+		argv=(sys.executable, str(script), "{session_dir}", "{session_id}", mode, "{tools}"),
+		env=(("SYNTHETIC_HOME", "{session_dir}"),),
+		session_glob="**/nothing-matches-this.jsonl",
+		record_format="json",
+		session_command=(
+			(sys.executable, str(script), "{session_dir}", "{session_id}", command)
+			if command is not None
+			else ()
+		),
+		version_argv=(sys.executable, "-c", "print('synthetic-db 1.0.0')"),
+		# No completion_event: one exported document is the session, so there is no
+		# per-event envelope to name -- the same shape opencode's export has.
+		completion_event=None,
+		completion_reason_path=("info", "outcome"),
+		completion_reason_value="succeeded",
+		usage_path=("info", "tokens", "output"),
+		usage_reduce="sum",
+		goal_event_types=(),
+		goal_entry=GoalEntry.PROMPT,
+		notes="a record that arrives as a command's stdout",
+	)
+
+
+def seed_store(
+	session_dir: Path,
+	session_id: str,
+	*,
+	outcome: str = "succeeded",
+	output_tokens: int = 120,
+) -> Path:
+	"""Arrange the synthetic harness's *private* store, as a real run would leave it.
+
+	The store is the harness's own state, not SoFact's, and it lives where no record
+	glob would look -- so a test of the export seam has to put it there rather than
+	expecting a file. Returns the path it wrote.
+	"""
+	private = session_dir / "private"
+	private.mkdir(parents=True, exist_ok=True)
+	store = private / f"{session_id}.db"
+	store.write_text(
+		json.dumps(
+			{
+				"info": {
+					"id": session_id,
+					"outcome": outcome,
+					"tokens": {"input": 900, "output": output_tokens, "reasoning": 0},
+				},
+				"messages": [{"role": "assistant", "content": "done"}],
+			}
+		),
+		encoding="utf-8",
+	)
+	return store
 
 
 def synthetic_service(

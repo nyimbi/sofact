@@ -19,11 +19,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from synthetic import base_spec
+from synthetic import base_spec, db_spec, seed_store
 
 from sofact.harness import (
 	CLAUDE_SPEC,
 	DSH_SPEC,
+	OPENCODE_SPEC,
 	PI_RESEARCH_SPEC,
 	PI_SPEC,
 	SPECS,
@@ -100,14 +101,15 @@ def _records(*rows: dict[str, object]) -> tuple[dict[str, object], ...]:
 
 class TestMeasuredSpecs:
 	def test_every_shipped_harness_has_a_spec(self) -> None:
-		assert set(SPECS) == {"pi", "dsh", "claude", "pi-research"}
+		assert set(SPECS) == {"pi", "dsh", "claude", "opencode", "pi-research"}
 		assert spec_for("pi") is PI_SPEC
 		assert spec_for("dsh") is DSH_SPEC
 		assert spec_for("claude") is CLAUDE_SPEC
+		assert spec_for("opencode") is OPENCODE_SPEC
 		assert spec_for("pi-research") is PI_RESEARCH_SPEC
 
 	def test_unknown_harness_names_the_configured_set(self) -> None:
-		with pytest.raises(KeyError, match="configured harnesses: claude, dsh, pi"):
+		with pytest.raises(KeyError, match="configured harnesses: claude, dsh, opencode, pi"):
 			spec_for("omp")
 
 	def test_the_research_spec_is_a_deliberate_variant_of_the_build_spec(self) -> None:
@@ -220,6 +222,65 @@ class TestMeasuredSpecs:
 	def test_a_spec_naming_no_argv_is_refused(self) -> None:
 		with pytest.raises(ValueError, match="declares no argv"):
 			HarnessSpec(name="empty", argv=())
+
+	def test_opencode_takes_its_record_from_a_command_not_a_glob(self) -> None:
+		"""The seam that makes a database-backed harness wireable at all (FR-058).
+
+		opencode keeps sessions in SQLite, so there is no file for a glob to find and
+		the record arrives as `session export`'s stdout instead.
+		"""
+		assert OPENCODE_SPEC.session_command, "without this the harness has no readable record"
+		assert OPENCODE_SPEC.session_command[0] == "opencode"
+		assert OPENCODE_SPEC.record_format == "json", (
+			"one exported document is the whole session, not one event per line"
+		)
+		assert "**/projects/*" not in OPENCODE_SPEC.session_glob, (
+			"the glob is never consulted for this spec; leaving a claude-shaped one here "
+			"would be a lie about where the record comes from"
+		)
+
+	def test_opencode_session_ids_must_carry_the_ses_prefix(self) -> None:
+		"""Measured: a bare token is refused with `Expected a string starting with "ses"`.
+
+		The prefix is data on the spec rather than a rule in the caller, because the
+		probe mints its own ids and would otherwise fail on the identifier rather than
+		on the harness -- which reads as a harness failure.
+		"""
+		assert OPENCODE_SPEC.session_id_prefix == "ses_"
+		adapter = make_adapter(Path("/tmp"), OPENCODE_SPEC)
+		assert adapter.session_id("probe").startswith("ses_probe-")
+
+	def test_opencode_completion_is_the_document_outcome_not_the_exit_code(self) -> None:
+		"""Measured: a 402-refused session exports outcome `failed` and still exits 0."""
+		assert OPENCODE_SPEC.completion_event is None, (
+			"one exported document is the session; there is no per-event envelope to name"
+		)
+		assert OPENCODE_SPEC.completion_reason_path == ("info", "outcome")
+		assert OPENCODE_SPEC.completion_reason_value == "succeeded"
+		assert OPENCODE_SPEC.usage_path == ("info", "tokens", "output")
+
+	def test_opencode_notes_record_the_unwitnessed_run_and_the_missing_tool_slot(self) -> None:
+		"""Two facts a reader would most like rounded off, so they are pinned here.
+
+		The spec was never witnessed end to end (the account is out of credit), and
+		`opencode run` has no flag that narrows the tool set, so the sandbox probe's
+		instrument cannot be built for it.
+		"""
+		low = OPENCODE_SPEC.notes.lower()
+		assert "not witnessed end to end" in low
+		assert "tool allowlist has no slot" in low
+		assert OPENCODE_SPEC.confinement_tools == "", (
+			"empty because the harness has no such flag, not by oversight"
+		)
+
+	def test_a_record_format_outside_the_known_shapes_is_refused(self) -> None:
+		with pytest.raises(AssertionError, match="bad record_format"):
+			HarnessSpec(name="x", argv=("true",), record_format="xml")
+
+	def test_a_zstd_record_cannot_also_be_a_whole_document(self) -> None:
+		"""A session command's stdout is already decoded, so the pair is incoherent."""
+		with pytest.raises(AssertionError, match="zstd record and a whole-document format"):
+			HarnessSpec(name="x", argv=("true",), session_is_zstd=True, record_format="json")
 
 	def test_a_completion_event_without_a_path_to_read_it_is_refused(self) -> None:
 		with pytest.raises(AssertionError, match="no path to read from it"):
@@ -352,6 +413,22 @@ class TestParseCompletion:
 	def test_a_record_without_a_data_block_is_skipped(self) -> None:
 		assert parse_completion(_records({"type": "turn/end"}), DSH_SPEC) is False
 
+	def test_a_whole_document_declares_without_an_event_envelope(self) -> None:
+		"""An exported session has no per-event `type`, so the path is read directly.
+
+		opencode's `info.outcome` is the declaration, and requiring an event name for a
+		spec whose record *is* the document would make the field unusable rather than
+		honest.
+		"""
+		rows = _records({"info": {"outcome": "succeeded"}, "messages": []})
+		assert parse_completion(rows, OPENCODE_SPEC) is True
+		assert parse_completion(_records({"info": {"outcome": "failed"}}), OPENCODE_SPEC) is False
+
+	def test_a_spec_with_a_path_but_no_event_still_reads_the_path(self) -> None:
+		"""The event is a filter when declared, not a precondition for reading."""
+		assert OPENCODE_SPEC.completion_event is None
+		assert parse_completion(_records({"info": {"outcome": "succeeded"}}), OPENCODE_SPEC) is True
+
 
 class TestParseUsage:
 	def test_usage_is_summed_across_records(self) -> None:
@@ -431,6 +508,148 @@ class TestParseGoalEntryAndTurns:
 		rows = _records({"type": "turn/start"}, {"type": "turn/start"})
 		assert parse_continuations(rows, DSH_SPEC) == 2
 		assert parse_continuations(_records({"type": "message"}), DSH_SPEC) is None
+
+
+# --------------------------------------------------------------------------- #
+# the record source: a file a harness wrote, or a command that prints one
+# --------------------------------------------------------------------------- #
+
+
+class TestTheRecordCommand:
+	"""A harness whose history is a database rather than a file (opencode, FR-058).
+
+	Driven against a real child: the export command is a real process whose stdout is
+	the record. The glob is one that matches nothing, so a passing test cannot be
+	passing because a file happened to be there.
+	"""
+
+	async def test_the_record_arrives_as_a_file_the_readers_already_understand(
+		self, tmp_path: Path
+	) -> None:
+		"""The seam's whole point: a command's stdout becomes a path, once."""
+		spec = db_spec(tmp_path, "db")
+		seed_store(tmp_path, "ses_probe-abc")
+		adapter = make_adapter(tmp_path, spec)
+		files = await adapter.session_files("ses_probe-abc")
+		assert len(files) == 1
+		assert files[0].is_file(), "every reader below opens a path, so this must be one"
+		assert files[0].name.startswith("sofact-record-")
+		records = await adapter.read_records(files[0])
+		assert records == (
+			{
+				"info": {
+					"id": "ses_probe-abc",
+					"outcome": "succeeded",
+					"tokens": {"input": 900, "output": 120, "reasoning": 0},
+				},
+				"messages": [{"role": "assistant", "content": "done"}],
+			},
+		)
+
+	async def test_the_glob_is_never_consulted_when_a_command_is_declared(
+		self, tmp_path: Path
+	) -> None:
+		"""A file the glob *would* match must not shadow the declared command."""
+		spec = db_spec(tmp_path, "db")
+		seed_store(tmp_path, "ses_probe-abc")
+		(tmp_path / "decoy.jsonl").write_text('{"info": {"outcome": "failed"}}\n', encoding="utf-8")
+		adapter = make_adapter(tmp_path, spec)
+		files = await adapter.session_files("ses_probe-abc")
+		assert len(files) == 1
+		assert files[0].name.startswith("sofact-record-")
+
+	async def test_a_command_that_refuses_yields_no_record_rather_than_an_empty_one(
+		self, tmp_path: Path
+	) -> None:
+		"""`the harness would not hand it over` is not `the session left no record`.
+
+		The working export is the control: without it this test passes on any code path
+		that returns nothing, including one that never ran the command at all.
+		"""
+		seed_store(tmp_path, "ses_probe-abc")
+		working = make_adapter(tmp_path, db_spec(tmp_path, "db"))
+		assert len(await working.session_files("ses_probe-abc")) == 1
+
+		refusing = make_adapter(tmp_path, db_spec(tmp_path, "db", command="export-refuse"))
+		assert await refusing.session_files("ses_probe-abc") == ()
+
+	async def test_a_command_that_prints_nothing_yields_no_record(self, tmp_path: Path) -> None:
+		"""An empty stdout is not an empty session, so it is no record at all."""
+		seed_store(tmp_path, "ses_probe-abc")
+		working = make_adapter(tmp_path, db_spec(tmp_path, "db"))
+		assert len(await working.session_files("ses_probe-abc")) == 1
+
+		silent = make_adapter(tmp_path, db_spec(tmp_path, "db", command="export-silent"))
+		assert await silent.session_files("ses_probe-abc") == ()
+
+	async def test_reading_twice_returns_the_same_path(self, tmp_path: Path) -> None:
+		"""The probe reads the record, then the extras read it again; the file is stable.
+
+		A fresh file per call would make `session_path` a different path in two
+		observations of one session, which is a fact about the reader rather than the
+		session.
+		"""
+		seed_store(tmp_path, "ses_probe-abc")
+		adapter = make_adapter(tmp_path, db_spec(tmp_path, "db"))
+		first = await adapter.session_files("ses_probe-abc")
+		second = await adapter.session_files("ses_probe-abc")
+		assert first == second
+		assert first[0].is_file(), "equality of two empty tuples would prove nothing"
+
+	async def test_a_spec_with_no_command_still_globs(self, tmp_path: Path, plan: GoalPlan) -> None:
+		"""The file-shaped source is unchanged; the command is an alternative, not a swap."""
+		adapter = adapter_for(tmp_path, "complete")
+		assert await adapter.session_files("s1") == ()
+		profile = await adapter.probe()
+		await adapter.dispatch(_step(plan, 0), plan, profile=profile)
+
+	async def test_a_failed_session_declares_failure_from_the_document(
+		self, tmp_path: Path
+	) -> None:
+		"""Measured on opencode: a 402-refused session exports outcome `failed`, exit 0.
+
+		Reading completion from the exit code would report that session as completed,
+		which is why the document is what decides it.
+		"""
+		seed_store(tmp_path, "ses_probe-abc", outcome="succeeded")
+		adapter = make_adapter(tmp_path, db_spec(tmp_path, "db"))
+		files = await adapter.session_files("ses_probe-abc")
+		records = await adapter.read_records(files[0])
+		assert parse_completion(records, adapter.spec) is True
+
+		seed_store(tmp_path, "ses_probe-refused", outcome="failed")
+		refused = make_adapter(tmp_path, db_spec(tmp_path, "db-fail"))
+		files = await refused.session_files("ses_probe-refused")
+		records = await refused.read_records(files[0])
+		assert parse_completion(records, refused.spec) is False
+
+	async def test_usage_is_read_from_the_exported_document(self, tmp_path: Path) -> None:
+		seed_store(tmp_path, "ses_probe-abc", output_tokens=120)
+		adapter = make_adapter(tmp_path, db_spec(tmp_path, "db"))
+		files = await adapter.session_files("ses_probe-abc")
+		records = await adapter.read_records(files[0])
+		assert parse_usage(records, adapter.spec) == 120
+
+	async def test_a_document_that_is_not_an_object_is_unreadable_not_empty(
+		self, tmp_path: Path
+	) -> None:
+		""" "we could not read it" must not be swallowed into "it said nothing"."""
+		spec = dataclasses.replace(
+			db_spec(tmp_path, "db"), session_command=(sys.executable, "-c", "print('[1, 2, 3]')")
+		)
+		adapter = make_adapter(tmp_path, spec)
+		files = await adapter.session_files("ses_probe-abc")
+		with pytest.raises(HarnessSessionUnreadable, match="not a JSON object"):
+			await adapter.read_records(files[0])
+
+	async def test_malformed_json_is_unreadable(self, tmp_path: Path) -> None:
+		spec = dataclasses.replace(
+			db_spec(tmp_path, "db"), session_command=(sys.executable, "-c", "print('nonsense')")
+		)
+		adapter = make_adapter(tmp_path, spec)
+		files = await adapter.session_files("ses_probe-abc")
+		with pytest.raises(HarnessSessionUnreadable, match="is not JSON"):
+			await adapter.read_records(files[0])
 
 
 # --------------------------------------------------------------------------- #
