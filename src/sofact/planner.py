@@ -112,6 +112,9 @@ _SHARED_CONSTRAINTS: tuple[str, ...] = (
 	"assertion that serves as one. Editing your own completion criteria is detected "
 	"by hash and rejects the work (FR-139).",
 	"Work idempotently: re-running this goal must be safe and must not compound changes (FR-099).",
+	"You are already on the branch SoFact created for this step. Work on it and do "
+	"not switch branches, create one, or commit to another: the branch is what keeps "
+	"this step's work from being built in place (FR-100).",
 	"Context-file loading is disabled and stays disabled: do not create or rely on "
 	"AGENTS.md or CLAUDE.md (FR-150).",
 )

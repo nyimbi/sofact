@@ -528,19 +528,18 @@ class TestBudgetAndStyle:
 	) -> None:
 		"""A constraint the child cannot satisfy is worse than a missing one (FR-100/141).
 
-		Every dispatched goal used to instruct the producer to "Work in the assigned
-		worktree on the assigned branch, never in place". No code assigns either: the
-		dispatch workspace is ``mkdir``-ed by ``FactoryService.dispatch_step`` and never
-		``git init``-ed, and ``GoalStep`` carries no module or branch field. So the
-		instruction named a tree that does not exist, in a directory that is not a
-		repository, on a branch nothing created — and a producer that follows it must
-		either invent a worktree or silently ignore its own instructions.
+		Two halves, and they move independently.
 
-		Worktree-per-module needs the P3 decomposition that would give a step a module
-		identity, so the requirement is not implemented. This test does not ask for it.
-		It asks that the goal text not assert it: the constraint is the operator's
-		precondition, stated as one, and the boundary SoFact can actually enforce — stay
-		inside the workspace it was given — is stated as the child's.
+		The branch half is now *true*: ``dispatch_step`` establishes the step's branch
+		through ``ensure_module_branch`` before the session starts and carries it on the
+		dispatch record, so a goal may tell the producer it is already on one. The test
+		requires that instruction rather than merely permitting it, because a producer
+		that switches away would defeat FR-100 while the log still claimed a branch.
+
+		The worktree half is still false and must stay out. FR-141 is deferred
+		([ADR-0024]): ``GoalStep`` carries no module identity, so no code can assign a
+		worktree, and the instruction that used to name one was an order the producer
+		could only disobey.
 		"""
 		contract = contract_of(
 			make_contract, OracleClass.CONTRACT, OracleClass.PROPERTY, OracleClass.SCHEMA
@@ -551,7 +550,12 @@ class TestBudgetAndStyle:
 			assert "assigned worktree" not in joined, (
 				"no worktree is assigned; the child cannot satisfy this and will ignore it"
 			)
-			assert "assigned branch" not in joined, "no branch is assigned either"
+			assert "on the branch" in joined, (
+				"the step's branch is established at dispatch, so the goal must say so"
+			)
+			assert "do not switch branches" in joined, (
+				"a producer that switches away defeats FR-100 silently"
+			)
 
 
 # --------------------------------------------------------------------------- #

@@ -58,6 +58,7 @@ __all__ = [
 	"IntegritySubject",
 	"LedgerEntry",
 	"LedgerKind",
+	"ModuleCheckout",
 	"OracleClass",
 	"OracleDeclaration",
 	"PlanStepKind",
@@ -1098,6 +1099,33 @@ class ResearchRecord(View):
 	note: str | None = None
 
 
+class ModuleCheckout(View):
+	"""The branch a plan step's work sits on (FR-100).
+
+	Recorded on the dispatch so "build never occurs in place" is a fact in the log
+	rather than a claim in a goal text. ``branch`` is the branch the session ran on;
+	``base_branch`` is what it was switched from, which is what a later integration
+	would need and what makes an unexpected switch visible.
+
+	``base_branch`` is ``None`` when the workspace had no branch to leave — a fresh
+	repository with an unborn HEAD — which is a real state and not an error.
+	"""
+
+	branch: NonEmptyStr
+	step_ordinal: int
+	created_repository: bool = False
+	created_branch: bool = False
+	base_branch: str | None = None
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.step_ordinal < 0:
+			raise ValueError(f"step_ordinal must be non-negative, got {self.step_ordinal}")
+		if self.created_branch and self.base_branch == self.branch:
+			raise ValueError("a branch cannot be created on top of itself")
+		return self
+
+
 class DispatchRecord(View):
 	"""What one attempt at one plan step actually did.
 
@@ -1136,6 +1164,14 @@ class DispatchRecord(View):
 	budget_violations: tuple[str, ...] = ()
 	session_path: str | None = None
 	stderr_tail: str | None = None
+	checkout: ModuleCheckout | None = None
+	"""The branch this session ran on (FR-100), or ``None`` when none was established.
+
+	``None`` on a *dispatched* record would mean the work happened in place, which
+	FR-100 forbids — so a dispatch that could not establish a branch is refused rather
+	than recorded here with a null. The field is optional because the record type also
+	covers the refusals, and a refusal has no branch to report.
+	"""
 
 	@property
 	def is_within_budget(self) -> bool:

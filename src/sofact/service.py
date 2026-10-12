@@ -30,6 +30,7 @@ from sofact.elicitation import (
 )
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner, digest_tree
+from sofact.git import ensure_module_branch
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -797,11 +798,17 @@ class FactoryService:
 		if step is None:
 			raise KeyError(f"plan {plan_id} has no step {step_id}")
 		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
+		# FR-100: the branch is established *before* the session starts, so the producer
+		# builds on it rather than in place. Refusing here rather than dispatching
+		# unbranched is the point -- a session that ran in place has already done the
+		# thing the requirement forbids by the time anyone could notice.
+		checkout = await ensure_module_branch(adapter.workspace, step.ordinal, step.kind.value)
 		record = await adapter.dispatch(
 			step,
 			plan,
 			profile=await self.latest_profile(name),
 			session_id=session_id,
+			checkout=checkout,
 		)
 		self._commit(
 			LedgerKind.STEP_DISPATCHED,

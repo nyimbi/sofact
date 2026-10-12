@@ -531,6 +531,24 @@ class TestDispatchStep:
 		assert record.session_path
 		assert LedgerKind.STEP_DISPATCHED.value in kinds(service)
 
+	async def test_a_dispatched_step_records_the_branch_it_ran_on(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-100 is a fact in the log, not a claim in the goal text.
+
+		The branch is established before the session starts and carried on the dispatch
+		record, so "build never occurs in place" can be checked after the run rather
+		than believed from a prompt. The workspace is a real repository afterwards,
+		which is the half a log entry alone would not prove.
+		"""
+		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")
+		record = await service.dispatch_step(plan_id, step_id)
+
+		assert record.checkout is not None, "a dispatched step must name its branch"
+		assert record.checkout.branch.startswith("sofact/")
+		assert record.checkout.branch != "main", "building on main is building in place"
+		assert (Path(record.workspace) / ".git").is_dir()
+
 	async def test_without_a_probe_nothing_is_dispatched(self, home: Path, tmp_path: Path) -> None:
 		"""FR-148: no capability may be assumed because it was declared."""
 		service = synthetic_service(home, tmp_path, "complete")
@@ -1167,14 +1185,22 @@ async def _compiled_plan(service: FactoryService):
 
 class TestWhatGetsWritten:
 	async def test_the_service_writes_exactly_one_file(self, home: Path, tmp_path: Path) -> None:
-		"""Every fact SoFact knows must be in the log, or it is not auditable."""
+		"""Every fact SoFact knows must be in the log, or it is not auditable.
+
+		Two trees are excluded, and each for a stated reason rather than to make this
+		pass. ``sessions`` is the harness's own session records, which SoFact reads and
+		does not author. ``.git`` is git's metadata inside the workspace SoFact created
+		(FR-100): it is the repository, not a record of what happened. Everything SoFact
+		*writes as its own account of the run* must still be the ledger alone, so a
+		second bookkeeping file appearing anywhere is still a failure.
+		"""
 		service, plan_id, step_id = await dispatched_service(home, tmp_path, "complete")
 		await service.dispatch_step(plan_id, step_id)
 		await service.check_integrity(plan_id)
 		written = {
 			path.relative_to(home)
 			for path in home.rglob("*")
-			if path.is_file() and "sessions" not in path.parts
+			if path.is_file() and "sessions" not in path.parts and ".git" not in path.parts
 		}
 		assert written == {Path("ledger.jsonl")}
 

@@ -57,6 +57,7 @@ from sofact.views import (
 	GoalStep,
 	HarnessCapability,
 	HarnessProfile,
+	ModuleCheckout,
 	ProbeOutcome,
 	StepOutcome,
 	now,
@@ -1730,6 +1731,7 @@ class ConfiguredHarnessAdapter:
 		*,
 		profile: HarnessProfile | None = None,
 		session_id: str | None = None,
+		checkout: ModuleCheckout | None = None,
 	) -> DispatchRecord:
 		"""Run one plan step as one out-of-process session.
 
@@ -1737,6 +1739,10 @@ class ConfiguredHarnessAdapter:
 		that could not be dispatched is a recorded fact
 		(:attr:`~sofact.views.StepOutcome.NOT_DISPATCHED`) rather than a missing row,
 		because a missing row is indistinguishable from a step nobody got to.
+
+		``checkout`` is the branch this step's work sits on (FR-100), established by the
+		caller because git is the service's concern rather than the adapter's — the
+		adapter runs a harness and does not manage repositories.
 		"""
 		if plan.step_by_id(step.id) is None:
 			raise ValueError(f"step {step.id} is not in plan {plan.id}")
@@ -1788,6 +1794,7 @@ class ConfiguredHarnessAdapter:
 				budget_violations=violations,
 				session_path=session_path,
 				stderr_tail=stderr_tail,
+				checkout=checkout,
 			)
 
 		if profile is None:
