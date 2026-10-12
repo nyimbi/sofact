@@ -17,6 +17,7 @@ import inspect
 import os
 import time
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from synthetic import (
 	synthetic_service,
 )
 
+from sofact._uuid7 import uuid7str
 from sofact.contract import executable_clauses
 from sofact.git import WORKTREE_DIRNAME
 from sofact.harness import (
@@ -42,8 +44,16 @@ from sofact.harness import (
 	ConfiguredHarnessAdapter,
 )
 from sofact.ledger import LOCK_FILENAME
-from sofact.service import DEFAULT_HARNESS, FactoryService, resolve_home, resolve_tools
+from sofact.research import ledger_checks
+from sofact.service import (
+	DEFAULT_HARNESS,
+	FactoryService,
+	research_goal,
+	resolve_home,
+	resolve_tools,
+)
 from sofact.views import (
+	ClaimKind,
 	ElicitationDimension,
 	GoalPlan,
 	GoalStep,
@@ -55,8 +65,11 @@ from sofact.views import (
 	PlanStepKind,
 	ProbeOutcome,
 	RepairOutcome,
+	ResearchMode,
+	SourcePosture,
 	StepOutcome,
 	VerdictOutcome,
+	VerificationStatus,
 )
 
 # --------------------------------------------------------------------------- #
@@ -1743,6 +1756,172 @@ class TestTheResearchRun:
 		await registered.start("a statement about factories")
 		with pytest.raises(KeyError, match="no research harness"):
 			await registered.research()
+
+
+# --------------------------------------------------------------------------- #
+# P1: the source ledger (FR-070, FR-069, FR-071, FR-073, FR-074, FR-075)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSourceLedger:
+	"""The producer's artefacts, read into an addressable ledger and recorded.
+
+	The reference implementation is the hand-built ledger in ``docs/sources/``, so the
+	parser is tested against both spellings that ledger uses (inline and block lists),
+	and against the producer failures that would otherwise be dropped on the floor.
+	"""
+
+	async def _service_with_goal(self, home: Path, tmp_path: Path, mode: str) -> FactoryService:
+		spec = dataclasses.replace(
+			base_spec(tmp_path, mode, name="pi-research"),
+			research_tools=("deep_research",),
+		)
+		registered = FactoryService(home=home, llm=None, specs={"pi-research": spec})
+		await registered.start("a platform that builds software from a conversation")
+		return registered
+
+	async def test_a_run_that_left_a_ledger_records_it(self, home: Path, tmp_path: Path) -> None:
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		record = await registered.research()
+		ledger = await registered.ledger_from(record)
+
+		assert ledger.version == 1, "the first ledger is version 1"
+		assert ledger.goal_id == record.goal_id
+		assert [s.id for s in ledger.sources] == ["S01", "S02"]
+		assert ledger.source("S01") is not None
+		assert ledger.source("S99") is None
+		assert Counter(kinds(registered))["source_ledger.recorded"] == 1
+		state = await registered.state()
+		assert state.ledger == ledger, "the fold replays the ledger"
+
+	async def test_the_front_matter_is_read_from_both_spellings(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""``docs/sources/`` uses inline lists and block lists; both must parse.
+
+		A parser that read only one of them would report a clean ledger over the
+		documents it could not read, which is the failure mode this whole module is
+		written against.
+		"""
+		inline = await self._service_with_goal(home, tmp_path, "research")
+		await inline.research()
+		ledger = await inline.ledger_from((await inline.state()).research[-1])
+		paper, vendor = ledger.source("S01"), ledger.source("S02")
+		assert paper is not None and vendor is not None
+		assert paper.retrieved == date(2026, 9, 12)
+		assert paper.verification is VerificationStatus.CONTENT_VERIFIED
+		assert vendor.posture is SourcePosture.POSITIONING
+
+		block = await self._service_with_goal(home, tmp_path, "research-sources-list")
+		await block.research()
+		listed = await block.ledger_from((await block.state()).research[-1])
+		assert [s.id for s in listed.sources] == ["S01", "S02"], (
+			"a block-list front-matter must parse as readily as an inline one"
+		)
+
+	async def test_a_claim_points_at_its_source_and_the_edge_is_navigable(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-070's load-bearing derivation: invalidating S01 invalidates what rests on it."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		await registered.research()
+		ledger = await registered.ledger_from((await registered.state()).research[-1])
+
+		resting = {claim.id for claim in ledger.resting_on("S01")}
+		assert resting == {"C1", "C2"}
+		disconfirming = ledger.claim("C2")
+		assert disconfirming is not None
+		assert disconfirming.kind is ClaimKind.DISCONFIRMING
+		assert [c.id for c in ledger.disconfirming] == ["C2"], "FR-071's count is a measurement"
+		assert [c.id for c in ledger.resting_on("S02")] == ["C3"]
+
+	async def test_a_positioning_only_claim_is_recorded_and_refused_as_grounds(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-074: vendor content is recorded, and cannot decide anything on its own."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		await registered.research()
+		ledger = await registered.ledger_from((await registered.state()).research[-1])
+
+		unbacked = {claim.id for claim in ledger.unbacked_decisions}
+		assert unbacked == {"C3", "C4"}, "C3 rests only on positioning; C4 is an opinion"
+		checks = {check.name: check for check in ledger_checks(ledger)}
+		assert checks["positioning-is-not-evidence"].passed is False
+		assert "C3" in checks["positioning-is-not-evidence"].detail
+		assert checks["claims-carry-provenance"].passed is True, (
+			"an opinion is labelled, not uncited: the two are different failures"
+		)
+
+	async def test_a_contradiction_is_recorded_rather_than_resolved(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-073: the disagreement is where the operator's decision is, so it is handed over."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		await registered.research()
+		ledger = await registered.ledger_from((await registered.state()).research[-1])
+
+		assert [c.id for c in ledger.contradictions] == ["X1"]
+		assert ledger.contradictions[0].resolution is None, "an unresolved one is a real state"
+
+	async def test_expiry_is_read_and_nothing_expires_by_default(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-075: a ledger with no expiry dates has nothing stale, and says so."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		await registered.research()
+		ledger = await registered.ledger_from((await registered.state()).research[-1])
+
+		assert ledger.expired(date(2026, 9, 13)) == ()
+		checks = {check.name: check for check in ledger_checks(ledger)}
+		assert checks["nothing-has-expired"].passed is True
+
+		aged = ledger.model_copy(
+			update={
+				"sources": (ledger.sources[0].model_copy(update={"expires": date(2026, 1, 1)}),)
+			}
+		)
+		stale = {check.name: check for check in ledger_checks(aged, as_of=date(2026, 9, 13))}
+		assert stale["nothing-has-expired"].passed is False
+		assert "S01" in stale["nothing-has-expired"].detail
+
+	async def test_a_run_that_left_no_ledger_is_refused(self, home: Path, tmp_path: Path) -> None:
+		"""No ledger and an empty ledger are different findings (NFR-024)."""
+		registered = await self._service_with_goal(home, tmp_path, "research-stub")
+		record = await registered.research()
+
+		with pytest.raises(ValueError, match="left no research-sources/"):
+			await registered.ledger_from(record)
+
+	async def test_a_second_ledger_is_versioned_rather_than_replacing_the_first(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-070's *versioned*: the log grows, and the operative ledger is the latest."""
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		await registered.research()
+		first = await registered.ledger_from((await registered.state()).research[-1])
+		await registered.research()
+		second = await registered.ledger_from((await registered.state()).research[-1])
+
+		assert (first.version, second.version) == (1, 2)
+		state = await registered.state()
+		assert state.ledgers == (first, second), "the older ledger stays in the log"
+		assert state.ledger == second, "the latest is the one the project reads under"
+		assert await registered.current_ledger() == second
+
+	async def test_a_ledger_for_another_goal_is_refused(self, home: Path, tmp_path: Path) -> None:
+		registered = await self._service_with_goal(home, tmp_path, "research")
+		with pytest.raises(ValueError, match="not the current goal"):
+			await registered.record_ledger(goal_id=uuid7str(), query="something else", documents=())
+
+	async def test_the_goal_now_asks_for_the_ledger_artefacts(self) -> None:
+		"""The producer is asked for a ledger, so reading one is transcription not inference."""
+		text = research_goal("whether the premise holds", mode=ResearchMode.DEEP)
+
+		assert "research-sources/" in text
+		assert "research-claims.json" in text
+		assert "## Concerns / information quality" in text
+		assert "disconfirming" in text, "FR-071's direction has to be asked for"
+		assert "positioning" in text, "FR-074's classification has to be asked for"
 
 	async def test_research_without_a_goal_is_refused(self, home: Path, tmp_path: Path) -> None:
 		registered = synthetic_service(home, tmp_path, "research", name="pi-research")

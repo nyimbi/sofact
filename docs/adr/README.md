@@ -47,6 +47,7 @@ than argued. Numbering is sequential and never reused.
 | [0032](0032-an-isolation-variable-is-measured-by-a-differential-with-a-control.md) | An isolation variable is measured, not asserted: `store_isolated` runs the same goal twice with `HOME` relocated and the spec's declared containment variables applied in one arm, withheld in the other, so the isolated arm's empty `HOME` is evidence only once the control arm's filled. A spec names which of its `env` keys make the claim, and a harness the probe cannot see reports a limit of the probe rather than a property of the harness | Accepted |
 | [0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md) | When a wave may run concurrently. FR-141 was deferred on a condition its own author wrote, and the capability map measured that the condition had fired; this record builds the worktree (per module, with the main tree holding the integration line) and makes `--concurrent` an operator flag. Both of `wave_is_isolatable`'s conditions are directory collisions — a module-less step has no worktree to be given, and two steps of one module would share a branch — so a wave that fails either runs sequentially |
 | [0034](0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md) | What a rollback is: a reading rule recorded in the log it cuts, applied by the fold, with the work it hides still in the log | Accepted |
+| [0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) | The source ledger is a graph of addressable claims: sources and claims are separate types joined by a derived edge, the parser fails closed rather than dropping what it cannot read, the disconfirming count is a measurement and not a gate, and deriving `supports` from the spec was refused after measuring that 5 of 21 cited sources appear only in prose | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -67,9 +68,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Seventeen records here answer questions the specification
+Not every decision resolves a `D`. Eighteen records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and fourteen because the rule each replaces was never written
+about the factory's behaviour, and fifteen because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -91,3 +92,4 @@ down at all and so had no `D` to resolve:
 | [0032](0032-an-isolation-variable-is-measured-by-a-differential-with-a-control.md) | Whether an isolation variable is a boundary. The rule it replaces read "the store moved when the variable was set" as "the variable contains the store", which is a measurement of the variable and not of the boundary — and a row keyed on the operator's own live store would have reported the measuring session's own writes as a leak |
 | [0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md) | When a wave may run concurrently. FR-141 was deferred on a condition its own author wrote, and the capability map measured that the condition had fired; this record builds the worktree (per module, with the main tree holding the integration line) and makes `--concurrent` an operator flag. Both of `wave_is_isolatable`'s conditions are directory collisions — a module-less step has no worktree to be given, and two steps of one module would share a branch — so a wave that fails either runs sequentially |
 | [0034](0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md) | What a rollback is, and what it may not be. The rule the capability map recorded as missing had the right shape already — "replay to a chosen entry index" — but the log is not a value the operator holds: FR-003 makes it append-only and the chain is what makes that load-bearing, so a rollback that truncated would destroy the evidence it needs and break every subsequent hash. The cut is recorded in the log it cuts and applied by the fold, a later cut supersedes an earlier one, and a cut row is never itself hidden |
+| [0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) | Where P1's automation ends. The reference ledger in `docs/sources/` already answers *what a ledger contains*, so the question was which parts of it a machine may derive: the source-to-claim edge is read from the producer's artefacts and derived as a set, the spec walk that would have supplied `supports` was measured and refused, and the one count FR-071 asks for is printed rather than gated because a gate that fails at zero pays a producer for inventing a disconfirming claim |

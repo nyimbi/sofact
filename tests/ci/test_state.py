@@ -46,6 +46,7 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.CAPABILITY_PROBED: "profiles",
 	LedgerKind.STEP_DISPATCHED: "dispatches",
 	LedgerKind.RESEARCH_RUN: "research",
+	LedgerKind.SOURCE_LEDGER_RECORDED: "ledgers",
 	LedgerKind.INTEGRITY_CHECKED: "integrity",
 	LedgerKind.INTEGRATION_CHECKED: "integrations",
 	LedgerKind.REPAIR_ATTEMPTED: "repairs",
@@ -86,12 +87,13 @@ def test_every_event_kind_lands_in_a_field_and_every_field_has_a_kind() -> None:
 def test_an_empty_log_folds_to_a_state_with_every_field_empty() -> None:
 	state = fold(())
 
-	assert len(ProjectState.model_fields) == 21, "a new state field must be folded too"
+	assert len(ProjectState.model_fields) == 22, "a new state field must be folded too"
 	for name in ProjectState.model_fields:
 		value = getattr(state, name)
 		assert value == (), f"{name} should be empty, got {value!r}"
 		assert isinstance(value, tuple), f"{name} must be immutable, got {type(value)}"
 	assert state.cut is None, "an uncut project reads under no rollback"
+	assert state.ledger is None, "a project with no research has no source ledger"
 
 
 # --------------------------------------------------------------------------- #

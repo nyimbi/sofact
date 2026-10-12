@@ -952,6 +952,111 @@ class TestTheResearchVerb:
 
 
 # --------------------------------------------------------------------------- #
+# the source ledger verb (FR-070)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSourcesVerb:
+	"""``sofact sources`` prints the ledger, and reads one out of a run's workspace.
+
+	The parser and the checks are measured in ``test_service.py``. What is under test
+	here is reachability and the exit code: the disconfirming count has to be visible,
+	and a failed check has to exit non-zero or nobody notices it failed.
+	"""
+
+	def _configure_research(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		spec = base_spec(tmp_path, mode, name="pi-research")
+		table = tmp_path / "harnesses.json"
+		table.write_text(
+			json.dumps({"harnesses": {spec.name: spec_json(spec)}}),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_HARNESS_SPECS", str(table))
+
+	def test_without_a_ledger_the_verb_says_what_to_run(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "sources"])
+
+		assert result.exit_code == 1, result.output
+		assert "no source ledger yet" in result.output
+		assert "sofact research" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_run_can_be_read_into_a_ledger_and_printed(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "research"])
+		assert dispatched.exit_code == 0, dispatched.output
+		run_id = dispatched.output.split("research ")[1].split(" @")[0].strip()
+
+		result = RUNNER.invoke(app, ["--home", str(home), "sources", "--from-run", run_id])
+
+		assert result.exit_code == 1, "C3 rests only on positioning: the check must fail"
+		assert "recorded ledger v1" in result.output
+		assert "[S01] A measured paper" in result.output
+		assert "[S02] A vendor page" in result.output
+		assert "1 disconfirming" in result.output, "FR-071's count is reported"
+		assert "DISCONFIRMS" in result.output
+		assert "1 contradiction(s)" in result.output
+		assert "UNRESOLVED" in result.output, "FR-073 hands the disagreement to the operator"
+		assert "rests on it: C1, C2" in result.output, "FR-070's edge is navigable"
+		assert "not allowed to decide anything on their own" in result.output
+
+	def test_the_recorded_ledger_is_read_back_from_the_log(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Once recorded, the ledger is in the log — the workspace is not needed again."""
+		self._configure_research(tmp_path, monkeypatch, "research")
+		conversation(home)
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "research"])
+		run_id = dispatched.output.split("research ")[1].split(" @")[0].strip()
+		assert (
+			RUNNER.invoke(app, ["--home", str(home), "sources", "--from-run", run_id]).exit_code
+			== 1
+		)
+
+		again = RUNNER.invoke(app, ["--home", str(home), "sources"])
+
+		assert "[S01] A measured paper" in again.output
+		assert (
+			"source_ledger.recorded" in RUNNER.invoke(app, ["--home", str(home), "ledger"]).output
+		)
+		assert RUNNER.invoke(app, ["--home", str(home), "verify-ledger"]).exit_code == 0
+
+	def test_a_run_that_left_no_ledger_is_refused_without_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_research(tmp_path, monkeypatch, "research-stub")
+		conversation(home)
+		dispatched = RUNNER.invoke(app, ["--home", str(home), "research"])
+		run_id = dispatched.output.split("research ")[1].split(" @")[0].strip()
+
+		result = RUNNER.invoke(app, ["--home", str(home), "sources", "--from-run", run_id])
+
+		assert result.exit_code == 1, result.output
+		assert "left no research-sources/" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_unknown_run_is_refused(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "sources", "--from-run", "01900000-0000-7000-8000-000000000000"],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "no research run" in result.output
+		assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
 # rollback — the operator's verb over the fold (FR-094, FR-003)
 # --------------------------------------------------------------------------- #
 

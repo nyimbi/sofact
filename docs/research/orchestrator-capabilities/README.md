@@ -13,7 +13,9 @@ capability is a gap here only if an FR requires it and the code does not do it, 
 capability is refused here only if an FR or ADR refuses it.
 
 **Outcome.** Twelve capabilities are already covered, several by a mechanism with a
-property the vendor's lacks. Five are real gaps against SoFact's own requirements, and
+property the vendor's lacks — and one more since this note was written: FR-070's
+addressable source ledger, which §2.4 had recorded as "covered, weaker", is now built
+(ADR-0035). Five were real gaps against SoFact's own requirements, and
 three of the five are **deferrals whose own stated condition has been met** — the tree
 is wrong about itself, which is the failure mode this ledger has been bitten by before.
 Four are refused with a spec reason, and four are not applicable because the vendor's
@@ -84,7 +86,7 @@ inferred from the presence of a similarly-named type. The disposition is one of:
 | TUI | OpenRig ships one | None; `typer` commands printing to stdout | **Refused** — a TUI is apparatus cost against F6/[S10]; FR-120 asks for a machine-usable surface, and a TUI is the opposite of that |
 | Provider-usage / context-usage tracking | `provider-usage`, `context-usage` under `OPENRIG_HOME` | Per-dispatch `tokens_observed`, `wall_clock_seconds`, `continuations_observed` (`views.py:1672`) | **Covered** — narrower than the vendor's (no per-provider aggregation, no attempt-level rollup, which the roadmap audit already records under FR-102) |
 | Culture / `CULTURE.md` | layered norms onto a default team | `_SHARED_CONSTRAINTS` (`planner.py:110`) + goal text + contract clauses | **Covered** — the same idea with a difference that matters: SoFact's constraints are compiled from the contract and pinned by hash (FR-096), so a norm cannot drift from the artefact it governs |
-| Context library | a library under `OPENRIG_HOME` | `docs/` + the spec + the ledger | **Covered, weaker** — SoFact has no *addressing* mechanism for its own context; FR-070 (addressable claims) is the stronger version and is unbuilt |
+| Context library | a library under `OPENRIG_HOME` | `docs/` + the spec + the ledger | **Covered, stronger** (2026-10-12, ADR-0035) — FR-070's addressable source ledger is built: `Source`/`Claim`/`Contradiction` are types, `sofact sources` prints and records one, and the claim-to-source edge is derived (`SourceLedger.resting_on`), so invalidating a source invalidates the claims resting on it. The vendor ships a directory of documents; this is a directory of documents whose entries can be cited, contradicted and expired |
 | Telemetry on by default | anonymous telemetry, documented opt-outs; opt-in OTel | None | **Refused by default** — NFR-024 argues for recording what was observed, not for shipping observations off-box. If telemetry is ever added, it is opt-in, and it must not carry prompt text (S26's own payload rule) |
 | Routines & schedules, heartbeat execution, work & task system, secrets & storage, company portability, org chart | Paperclip's 12 subsystems | Not in scope | **Not applicable** — these serve "run a company made of agents". SoFact's unit is a contract handed to a session, and §1.3's envelope is a platform, not an org |
 
@@ -220,15 +222,21 @@ Dependency-ordered, largest lever first:
    normally. Nothing is deleted: the log grows, the chain still verifies, and the work the
    rollback hides stays readable — which is the difference between this and a snapshot
    restore, and the reason the row above is "stronger" rather than "covered".
-6. **FR-070 addressable source ledger** (§2.4) — the stronger version of the durable
-   activity log both vendors ship; already recorded as unbuilt in the roadmap audit.
+6. ~~**FR-070 addressable source ledger** (§2.4)~~ — **done 2026-10-12** (ADR-0035).
+   `Source`/`Claim`/`Contradiction`/`SourceLedger` are types, the producer's
+   `research-sources/*.md` and `research-claims.json` artefacts are read into them by
+   `sofact.research`, `sofact sources` prints the ledger and records it as a
+   `source_ledger.recorded` row, and the claim-to-source edge is derived rather than
+   remembered — `SourceLedger.resting_on("S01")` is the set a source's invalidation
+   takes with it. The ledger is versioned, so a re-stated one appends rather than
+   replaces.
 
 Items 1–3 are the answer to the operator's request, in the order that serves the rest
 of the roadmap rather than the order the request was phrased in. Items 4–5 are the two
 rows where the vendor's version is *weaker* than an FR SoFact already has, and they were
-listed so the gap is recorded rather than rediscovered. Five of the six are now built;
-item 6 is the remaining one, and it is the strongest of the vendor-side rows rather than
-the weakest.
+listed so the gap is recorded rather than rediscovered. **All six are now built**, so
+the build order is complete and the remaining vendor-side gaps are the ones §2.4 records
+as deliberately out of scope rather than as work.
 
 ## 6. What this note does not settle
 

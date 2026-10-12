@@ -60,6 +60,12 @@ from sofact.planner import (
 	refutation_diagnosis,
 	revised_plan,
 )
+from sofact.research import (
+	LEDGER_CLAIMS_FILENAME,
+	LEDGER_SOURCES_DIRNAME,
+	ledger_checks,
+	parse_ledger,
+)
 from sofact.specification import approve as record_specification_approval
 from sofact.specification import gate as gate_specification
 from sofact.specification import specify as propose_specification
@@ -103,6 +109,7 @@ from sofact.views import (
 	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
+	SourceLedger,
 	Specification,
 	SpecificationDraft,
 	SpecificationGate,
@@ -154,6 +161,11 @@ def research_goal(query: str, *, mode: ResearchMode) -> str:
 	SoFact writes the prompt; the model performs the research. The goal names the tool,
 	the exact query, and the two files the workspace must end up holding, because the
 	artefact protocol — not the producer's honesty — is what makes the run observable.
+
+	The ledger artefacts are named here too (FR-070). Asking for them in the goal is
+	what makes the difference between a report and a ledger the producer's task rather
+	than a transcription SoFact performs on prose afterwards, and transcription from
+	prose is exactly what :mod:`sofact.research` refuses to do.
 	"""
 	assert query.strip(), "a research query must not be empty"
 	tool = "super_deep_research" if mode is ResearchMode.SUPER else "deep_research"
@@ -165,7 +177,27 @@ def research_goal(query: str, *, mode: ResearchMode) -> str:
 		"unchanged, to research-report.md in the working directory; then copy the file "
 		"~/.forecastx-reports/<the report id the tool reported>/meta.json to "
 		"research-meta.json in the working directory. Change the content of neither "
-		"file. Then reply DONE."
+		"file.\n\n"
+		f"Then write the source ledger, one file per source, in {LEDGER_SOURCES_DIRNAME}/ "
+		"— named sNN-slug.md — each opening with a YAML front-matter block delimited by "
+		"'---' lines and carrying: id (a stable citation key such as S01), slug, title, "
+		"type, url, retrieved (YYYY-MM-DD), verification (one of content-verified, "
+		"url-verified, reported, reported-via-secondary, unresolved-url), confidence, "
+		"posture (evidence or positioning — positioning for vendor content, manifests "
+		"and marketing), and expires (YYYY-MM-DD) where the claim is time-sensitive. "
+		"Follow the front-matter with a '## Precis' section saying what the source says "
+		"and a '## Concerns / information quality' section saying why it might be wrong. "
+		"Both are required: an entry without the critique is a link, not evidence.\n\n"
+		f"Then write {LEDGER_CLAIMS_FILENAME} in the working directory: an object with "
+		"'claims' (a list of {id, statement, kind, opinion, source_ids, superseded_by, "
+		"expires}, where kind is supporting, disconfirming or refuted, source_ids name "
+		"the sources the claim rests on, and opinion is true only for a claim that "
+		"rests on no source at all) and 'contradictions' (a list of {id, statement, "
+		"source_ids, resolution} for every place two cited sources disagree). Record "
+		"disconfirming claims whenever the evidence argues against the premise — a "
+		"ledger that only ever supports it is a rationalisation, and the count of "
+		"disconfirming claims is read from this file.\n\n"
+		"Then reply DONE."
 	)
 
 
@@ -1884,6 +1916,94 @@ class FactoryService:
 		)
 		self._commit(LedgerKind.RESEARCH_RUN, {"research": record.model_dump(mode="json")})
 		return record
+
+	# ------------------------------------------------------ FR-070: the source ledger
+
+	async def ledger_from(self, record: ResearchRecord) -> SourceLedger:
+		"""Read the source ledger a research run left, and record it (FR-070).
+
+		Read from the run's own workspace rather than passed in, so the ledger is an
+		artefact of the dispatch and not something a caller can assert. A run that left
+		no ledger directory is refused rather than recorded as an empty ledger: *no
+		ledger* and *a ledger with nothing in it* are different findings, and only one of
+		them means the producer was asked and had nothing to say.
+		"""
+		workdir = Path(record.workspace)
+		directory = workdir / LEDGER_SOURCES_DIRNAME
+		if not directory.is_dir():
+			raise ValueError(
+				f"research run {record.id} left no {LEDGER_SOURCES_DIRNAME}/ directory in "
+				f"{workdir}: there is no ledger to record, and an empty one would read as "
+				"a producer that looked and found nothing (FR-070, NFR-024)"
+			)
+		documents = tuple(
+			path.read_text(encoding="utf-8", errors="replace")
+			for path in sorted(directory.glob("*.md"))
+		)
+		claims_path = workdir / LEDGER_CLAIMS_FILENAME
+		claims: object | None = None
+		if claims_path.is_file():
+			claims = json.loads(claims_path.read_text(encoding="utf-8"))
+		return await self.record_ledger(
+			goal_id=record.goal_id, query=record.query, documents=documents, claims=claims
+		)
+
+	async def record_ledger(
+		self,
+		*,
+		goal_id: str,
+		query: str,
+		documents: Iterable[str],
+		claims: object | None = None,
+	) -> SourceLedger:
+		"""Parse a ledger's documents and append it to the log (FR-070).
+
+		The version is read from the folded state rather than taken from the caller: a
+		caller-supplied number is a number that can repeat or go backwards, and FR-070
+		makes the ledger *versioned* precisely so that "which ledger is this" has an
+		answer. Counting the state's ledgers rather than the log's rows is the right
+		count because a rollback hides a ledger row (FR-094) and the project's reading
+		then holds one fewer ledger — so the next one recorded *is* version 1 of that
+		reading, and numbering it 2 would describe a ledger the project no longer has.
+		"""
+		assert query.strip(), "a source ledger is the ledger *for* a query"
+		goal = await self.current_goal()
+		if goal is None:
+			raise KeyError("no goal yet; a source ledger is evidence about a goal")
+		if goal.id != goal_id:
+			raise ValueError(
+				f"goal {goal_id} is not the current goal ({goal.id}): a ledger recorded "
+				"against a goal nobody is working on would sit in the log unreadable "
+				"against the work it was meant to inform"
+			)
+		ledger = parse_ledger(
+			goal_id=goal_id,
+			query=query.strip(),
+			documents=documents,
+			claims=claims,
+			version=len((await self.state()).ledgers) + 1,
+		)
+		self._commit(LedgerKind.SOURCE_LEDGER_RECORDED, {"ledger": ledger.model_dump(mode="json")})
+		return ledger
+
+	async def current_ledger(self) -> SourceLedger | None:
+		"""The ledger the project is currently read under, or ``None`` (FR-070).
+
+		The latest one, because a re-stated ledger supersedes the one before it — the
+		same rule the fold applies, read through the service so a caller does not have to
+		know which of the two is authoritative.
+		"""
+		return (await self.state()).ledger
+
+	async def ledger_gate(self) -> tuple[GateCheck, ...]:
+		"""What a machine can check about the current ledger (FR-069, FR-074, FR-075).
+
+		No ledger at all yields an empty tuple rather than a failing check: a project
+		that has not researched yet has not failed a research check, and a gate that
+		failed there would make P1 look blocked when it is simply unstarted.
+		"""
+		ledger = await self.current_ledger()
+		return () if ledger is None else ledger_checks(ledger)
 
 	# --------------------------------------------------- FR-139: integrity at end
 

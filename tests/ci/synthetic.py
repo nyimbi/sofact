@@ -276,6 +276,88 @@ if "research-report.md" in goal:
 			),
 			encoding="utf-8",
 		)
+	if "research-sources" in goal and not mode.startswith("research-stub"):
+		# The FR-070 ledger: one document per source, plus the machine-readable claims.
+		# Two sources, one of them vendor positioning, so the ledger exercises both the
+		# posture classification and the claim-to-source edge. The listing variant
+		# writes the front-matter as block lists rather than inline ones, because both
+		# spellings occur in the hand-built reference ledger and only one of them is
+		# what a reader would guess.
+		ledger_dir = pathlib.Path("research-sources")
+		ledger_dir.mkdir(exist_ok=True)
+		tags = "\\n  - harness\\n  - research" if "research-sources-list" in mode else "[harness, research]"
+		(ledger_dir / "s01-measured-paper.md").write_text(
+			"---\\n"
+			"id: S01\\n"
+			"slug: measured-paper\\n"
+			"title: \\"A measured paper\\"\\n"
+			"type: paper\\n"
+			"url: https://example.com/paper\\n"
+			"retrieved: 2026-09-12\\n"
+			"verification: content-verified\\n"
+			"confidence: medium\\n"
+			"tags: " + tags + "\\n"
+			"---\\n\\n"
+			"## Precis\\n\\nThe paper measures a thing and reports the number.\\n\\n"
+			"## Key claims\\n\\n- the number is 42\\n\\n"
+			"## Concerns / information quality\\n\\nPreprint; not peer reviewed.\\n",
+			encoding="utf-8",
+		)
+		(ledger_dir / "s02-vendor-doc.md").write_text(
+			"---\\n"
+			"id: S02\\n"
+			"slug: vendor-doc\\n"
+			"title: \\"A vendor page\\"\\n"
+			"type: product-doc\\n"
+			"url: https://example.com/vendor\\n"
+			"retrieved: 2026-09-12\\n"
+			"verification: url-verified\\n"
+			"confidence: low\\n"
+			"posture: positioning\\n"
+			"---\\n\\n"
+			"## Precis\\n\\nThe vendor says its product does the thing.\\n\\n"
+			"## Concerns / information quality\\n\\nMarketing: no measurement, no method.\\n",
+			encoding="utf-8",
+		)
+		pathlib.Path("research-claims.json").write_text(
+			json.dumps(
+				{
+					"claims": [
+						{
+							"id": "C1",
+							"statement": "the mechanism works as specified",
+							"kind": "supporting",
+							"source_ids": ["S01"],
+						},
+						{
+							"id": "C2",
+							"statement": "the mechanism does not hold at scale",
+							"kind": "disconfirming",
+							"source_ids": ["S01"],
+						},
+						{
+							"id": "C3",
+							"statement": "the product is the market leader",
+							"kind": "supporting",
+							"source_ids": ["S02"],
+						},
+						{
+							"id": "C4",
+							"statement": "operators will accept a machine gate",
+							"opinion": True,
+						},
+					],
+					"contradictions": [
+						{
+							"id": "X1",
+							"statement": "whether the mechanism holds at scale",
+							"source_ids": ["S01", "S02"],
+						}
+					],
+				}
+			),
+			encoding="utf-8",
+		)
 
 records = [{"seq": 1, "type": "session", "data": {}}]
 records.append({"seq": 2, "type": "turn/start", "data": {"turn": 1}})

@@ -35,6 +35,7 @@ from sofact.views import (
 	PHASE_GATE,
 	PHASE_SEQUENCE,
 	Assumption,
+	ClaimKind,
 	ClauseKind,
 	Contract,
 	Decomposition,
@@ -50,6 +51,7 @@ from sofact.views import (
 	RepairOutcome,
 	ResearchMode,
 	ResearchRecord,
+	SourceLedger,
 	Specification,
 	SpecificationDraft,
 	SpecificationGate,
@@ -1734,6 +1736,124 @@ def _print_research(record: ResearchRecord) -> None:
 		raise typer.Exit(code=1)
 	if record.report_path is None:
 		raise typer.Exit(code=1)
+
+
+@app.command(name="sources")
+def sources(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	from_run: str | None = typer.Option(
+		None,
+		"--from-run",
+		help="Read the ledger out of this research run's workspace instead of printing it.",
+	),
+) -> None:
+	"""Print the current source ledger, or read one out of a research run (FR-070)."""
+	asyncio.run(_sources(_service(_home_of(ctx, home)), from_run))
+
+
+async def _sources(svc: FactoryService, from_run: str | None) -> None:
+	if from_run is not None:
+		runs = [r for r in (await svc.state()).research if r.id == from_run]
+		if not runs:
+			typer.secho(f"no research run {from_run} in this log.", fg="yellow")
+			raise typer.Exit(code=1)
+		try:
+			recorded = await svc.ledger_from(runs[0])
+		except (ValueError, OSError) as exc:
+			typer.secho(f"cannot read the ledger: {exc}", fg="red")
+			raise typer.Exit(code=1) from exc
+		typer.secho(
+			f"\nrecorded ledger v{recorded.version} from run {from_run}", fg="green", bold=True
+		)
+	ledger = await svc.current_ledger()
+	if ledger is None:
+		typer.secho(
+			"no source ledger yet: run `sofact research`, then "
+			"`sofact sources --from-run <id>` (FR-070).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+	_print_ledger(ledger)
+	checks = await svc.ledger_gate()
+	failed = [check for check in checks if not check.passed]
+	if failed:
+		raise typer.Exit(code=1)
+
+
+def _print_ledger(ledger: SourceLedger) -> None:
+	"""The ledger, its measurements, and what a machine could check about it.
+
+	The disconfirming count is printed as a **measurement** and never as a check
+	(FR-071): a zero is the finding that the research found no argument against the
+	premise, which is exactly what an operator needs to see, and a gate that failed
+	there would pay a producer for inventing one.
+	"""
+	typer.secho(
+		f"\nsource ledger v{ledger.version} for {ledger.query!r}",
+		fg="cyan",
+		bold=True,
+	)
+	typer.secho(
+		f"  {len(ledger.sources)} source(s), {len(ledger.claims)} claim(s); "
+		f"{len(ledger.disconfirming)} disconfirming, "
+		f"{len(ledger.contradictions)} contradiction(s) (FR-071, FR-073)",
+		fg="bright_black",
+	)
+	for source in ledger.sources:
+		superseded = f" [superseded by {source.superseded_by}]" if source.superseded_by else ""
+		typer.secho(
+			f"  [{source.id}] {source.title}{superseded}",
+			fg="cyan" if source.superseded_by is None else "bright_black",
+		)
+		typer.echo(
+			f"      {source.type} · {source.verification.value} · "
+			f"{source.confidence} · {source.posture.value}"
+		)
+		if source.url:
+			typer.secho(f"      {source.url}", fg="bright_black")
+		claims = ledger.resting_on(source.id)
+		if claims:
+			typer.secho(
+				f"      rests on it: {', '.join(claim.id for claim in claims)}",
+				fg="bright_black",
+			)
+	if ledger.claims:
+		typer.secho("\n  claims", fg="cyan", bold=True)
+		for claim in ledger.claims:
+			mark = {
+				ClaimKind.SUPPORTING: "supports",
+				ClaimKind.DISCONFIRMING: "DISCONFIRMS",
+				ClaimKind.REFUTED: "refuted",
+			}[claim.kind]
+			colour = "yellow" if claim.kind is ClaimKind.DISCONFIRMING else "bright_black"
+			sources_text = ", ".join(claim.source_ids) if claim.source_ids else "no source"
+			opinion = " (opinion)" if claim.opinion else ""
+			typer.secho(
+				f"    [{claim.id}] {mark}{opinion}: {claim.statement} — {sources_text}",
+				fg=colour,
+			)
+	if ledger.contradictions:
+		typer.secho(
+			"\n  contradictions (the operator's to settle — FR-073)",
+			fg="cyan",
+			bold=True,
+		)
+		for found in ledger.contradictions:
+			state = f"resolved: {found.resolution}" if found.resolution else "UNRESOLVED"
+			typer.secho(
+				f"    [{found.id}] {found.statement} — {', '.join(found.source_ids)} — {state}",
+				fg="green" if found.resolution else "yellow",
+			)
+	unbacked = ledger.unbacked_decisions
+	if unbacked:
+		typer.secho(
+			"\n  recorded but not allowed to decide anything on their own (FR-069, FR-074)",
+			fg="yellow",
+			bold=True,
+		)
+		for claim in unbacked:
+			typer.echo(f"    [{claim.id}] {claim.statement}")
 
 
 @app.command(name="verify")

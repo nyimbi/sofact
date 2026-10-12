@@ -513,6 +513,23 @@ verification status honestly (`reported`, not `verified`) and critiquing each
 source's commercial interest. That work is the **reference implementation** of this
 phase, and its structure is the specification for the automation.
 
+**That automation exists as of ADR-0035.** `sofact sources --from-run <id>` reads a
+run's `research-sources/` directory and its `research-claims.json` and records a
+`SourceLedger` in the log: `Source` and `Claim` are separate addressable types, the
+edge between them is derived (`resting_on`), and a claim citing a source the ledger
+does not hold is refused at construction rather than at read time. `docs/sources/`
+stays the reference implementation and is now the *slower* way to produce a ledger,
+not the only one.
+
+**The one thing the automation deliberately does not derive is `supports:`.** The
+obvious way to fill that field is to walk this specification for citations, and the
+walk was measured before it was built: of the 21 sources cited here, 5 ([S18], [S19],
+[S20], [S23], [S24]) appear only in prose outside any requirement. A citation walk
+would attribute those to nothing and report a complete ledger over an incomplete
+derivation. The edge FR-070 asks for therefore runs source-to-claim *inside* the
+ledger, where the producer states it, rather than spec-to-source, where it would be
+guessed.
+
 ### 5.2 Where the research engine must exceed the manual reference
 
 **FR-073** The automated engine must additionally perform **contradiction
@@ -1795,6 +1812,10 @@ v0.1's lane and oracle definition formats are retained. New surface:
 - **`sofact goal`** — submit a goal; begins P0.
 - **`sofact elicit`** — the Socratic dialogue; interactive or batch.
 - **`sofact research`** — P1; produces the source ledger and verdicts.
+- **`sofact sources`** — reads a research run's artefacts into a `SourceLedger`
+  (`--from-run <id>`), or prints the one the log holds. Claims and sources are
+  separately addressable, and the command exits non-zero when a provenance, evidence,
+  or staleness check fails (FR-069, FR-070, FR-071, FR-073–FR-075; ADR-0035).
 - **`sofact specify`** / **`sofact decompose`** — produce the gate artifacts.
 - **`sofact contract`** — P4; emits contracts + manufactured oracles.
 - **`sofact build`** — P5–P7; runs the platform build.
@@ -1804,6 +1825,7 @@ v0.1's lane and oracle definition formats are retained. New surface:
 
 **Running in v0.1** — the subset of the above that exists as executable code today:
 `sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
+`sources` (P1's ledger, read from the run's artefacts: FR-068–FR-075, ADR-0035),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
 `dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `run`. The planned
 verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is

@@ -40,6 +40,7 @@ uv run sofact phase               # which pipeline phase, and is a gate open
 uv run sofact ledger              # the append-only event log
 uv run sofact verify-ledger       # re-check the hash chain
 uv run sofact rollback --to 12 --reason "the decomposition was wrong"
+uv run sofact sources --from-run <id>   # read a research run into the source ledger
 ```
 
 State lives in `./.sofact` by default, or `$SOFACT_HOME`. Nothing is written outside
@@ -237,6 +238,33 @@ holds — report size, the loop's own search count from `research-meta.json`, ci
 and never rounds a report with no sources into research that happened: on a local model
 the extension's own timeout binds first, and that fact reads *unmeasured*, not *none
 found* (NFR-024).
+
+**The ledger is a graph, not a reading list** (`sofact sources`, FR-070, ADR-0035).
+`research_goal` asks the producer for `research-sources/sNN-slug.md` (front-matter
+provenance, a `## Precis`, and a `## Concerns / information quality` critique) plus
+`research-claims.json`; `sources --from-run <id>` reads those into a `SourceLedger` and
+records it. `Source` and `Claim` are separate addressable types joined by
+`Claim.source_ids`, so `resting_on(S03)` answers what invalidating that source takes
+with it — and a claim citing a source the ledger does not hold is refused when the
+ledger is built, because an edge to nothing cannot be invalidated with its source.
+`SourcePosture` makes FR-074 structural: a source cannot be `positioning` *and*
+`content-verified`, since reading vendor content carefully does not make it evidence,
+and `unbacked_decisions` names what may be recorded and may not decide. Contradictions
+are recorded with `resolution` left `None` and printed `UNRESOLVED` — the spec puts
+that decision with the operator, so a machine picking a winner would answer the one
+question the phase exists to hand over. Expiry is evaluated as of a date, so the same
+ledger can be current and then not.
+
+Two refusals are deliberate. The parser **fails closed**: a front-matter line that is
+neither `key: value` nor a list item raises, a block scalar raises rather than parsing
+as the literal `|`, and a document missing either required section raises — because a
+parser that skips what it cannot read reports a clean ledger over the documents it
+dropped, and a clean ledger is indistinguishable from a good one. And the disconfirming
+count FR-071 asks for is **printed, never gated**: a check that failed at zero would pay
+a producer for inventing a disconfirming claim, and a gate that rewards fabrication is
+worse than no gate. `supports:` is likewise not derived by walking the spec — measured,
+5 of the 21 sources it cites appear only in prose outside any requirement, so a citation
+walk would report a complete derivation over an incomplete one.
 
 The probe's remaining rows are **attempted rather than assumed** (FR-165). Five of them
 need more than one child, so each is a *differential*: `sandboxable` hands one child a tool

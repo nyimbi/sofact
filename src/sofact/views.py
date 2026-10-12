@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import IntEnum, StrEnum
 from typing import Annotated, Any, Final, Self
 
@@ -34,12 +34,15 @@ __all__ = [
 	"Assumption",
 	"AutonomyLevel",
 	"CapabilityFinding",
+	"Claim",
+	"ClaimKind",
 	"Clause",
 	"ClauseKind",
 	"ClauseStem",
 	"ClauseVerdict",
 	"CompletionClaim",
 	"Contract",
+	"Contradiction",
 	"Cut",
 	"DeclarationPrecision",
 	"Decomposition",
@@ -88,6 +91,9 @@ __all__ = [
 	"RepairAttempt",
 	"RepairOutcome",
 	"Requirement",
+	"Source",
+	"SourceLedger",
+	"SourcePosture",
 	"Specification",
 	"SpecificationDraft",
 	"SpecificationGate",
@@ -101,6 +107,7 @@ __all__ = [
 	"VerdictOutcome",
 	"VerificationMethod",
 	"VerificationReport",
+	"VerificationStatus",
 	"canonical_json",
 	"ceiling_for_rank",
 	"content_hash",
@@ -2058,6 +2065,296 @@ class ResearchRecord(View):
 	note: str | None = None
 
 
+class VerificationStatus(StrEnum):
+	"""How much of a source was actually checked (FR-069).
+
+	The legend ``docs/sources/README.md`` already uses, promoted to a type because the
+	distinction it draws is the whole point of the field: *content-verified* means the
+	text was read, *url-verified* means the link resolved, *reported* means neither, and
+	*unresolved-url* means the content was seen but its address was never captured.
+	Collapsing these into a boolean ``verified`` would let a source that resolved be
+	cited as though it had been read — the exact substitution the legend exists to
+	prevent.
+	"""
+
+	CONTENT_VERIFIED = "content-verified"
+	URL_VERIFIED = "url-verified"
+	REPORTED = "reported"
+	REPORTED_VIA_SECONDARY = "reported-via-secondary"
+	UNRESOLVED_URL = "unresolved-url"
+
+
+class SourcePosture(StrEnum):
+	"""Whose interest a source serves (FR-074).
+
+	``EVIDENCE`` is a source whose content a decision may rest on. ``POSITIONING`` is
+	vendor content, a manifesto, or marketing: it is *recorded* — a market claim is a
+	fact about the market — but it cannot support a decision alone, which is why the
+	refusal lives in :meth:`SourceLedger.unbacked_decisions` rather than in a warning.
+	"""
+
+	EVIDENCE = "evidence"
+	POSITIONING = "positioning"
+
+
+class ClaimKind(StrEnum):
+	"""What role a claim plays in the argument (FR-068, FR-071).
+
+	``SUPPORTING`` and ``DISCONFIRMING`` are the two directions FR-071 asks the research
+	phase to distinguish, and keeping them a typed field rather than a sign convention in
+	prose is what makes the disconfirming count a measurement rather than a reading.
+	``REFUTED`` is a claim the ledger itself no longer holds up — a superseded figure,
+	a claim whose only source turned out to be positioning — and it is kept rather than
+	deleted for the reason the log keeps everything: the record of having believed
+	something is part of how the current belief is read.
+	"""
+
+	SUPPORTING = "supporting"
+	DISCONFIRMING = "disconfirming"
+	REFUTED = "refuted"
+
+
+class Claim(View):
+	"""One addressable statement in the source ledger (FR-070).
+
+	Addressable means the claim has an id and a source points at it, so a claim can be
+	invalidated without editing the source that carried it and a source can be
+	invalidated without deleting the claims it carried. Those two operations are the
+	reason this is a separate type from :class:`Source` rather than a list of strings
+	inside one: FR-070's requirement is that "invalidating a source invalidates the
+	claims resting on it", and that is a graph edge, not a sentence.
+
+	``opinion`` is FR-069's label, and it is not a weaker kind of claim — it is a claim
+	with no source that is *allowed to exist* and *not allowed to support a decision*.
+	An uncited assertion recorded as opinion is honest; the same assertion recorded as
+	supporting is the failure the field prevents.
+	"""
+
+	id: NonEmptyStr
+	statement: NonEmptyStr
+	kind: ClaimKind = ClaimKind.SUPPORTING
+	opinion: bool = False
+	"""True when no source backs this. An opinion may be recorded and may not decide."""
+
+	source_ids: tuple[NonEmptyStr, ...] = ()
+	"""The sources this claim rests on. Empty is legal and means *unsupported*."""
+
+	superseded_by: NonEmptyStr | None = None
+	"""The claim that replaced this one, when one did (FR-073, FR-075)."""
+
+	expires: date | None = None
+	"""When this claim stops being safe to cite (FR-075). ``None`` for a durable claim."""
+
+	@model_validator(mode="after")
+	def _an_opinion_rests_on_nothing(self) -> Self:
+		if self.opinion and self.source_ids:
+			raise ValueError(
+				f"claim {self.id!r} is labelled opinion and cites {len(self.source_ids)} "
+				"source(s): a claim either rests on evidence or it is the operator's "
+				"reading, and a record that claims both is unreadable (FR-069)"
+			)
+		return self
+
+
+class Contradiction(View):
+	"""Two cited sources that disagree, and where (FR-073).
+
+	Recorded rather than resolved. The spec is explicit that a contradiction is "where
+	the operator's decision actually is", so a machine that picked a winner would be
+	answering the one question the phase exists to hand over.
+	"""
+
+	id: NonEmptyStr
+	statement: NonEmptyStr
+	"""What the two sources disagree *about*, in the ledger's own words."""
+
+	source_ids: tuple[NonEmptyStr, ...]
+	resolution: NonEmptyStr | None = None
+	"""The operator's ruling, when one was given. ``None`` means the disagreement stands
+	and is still the operator's to settle — which is a real state, not an omission."""
+
+	@model_validator(mode="after")
+	def _a_contradiction_names_at_least_two(self) -> Self:
+		if len(self.source_ids) < 2:
+			raise ValueError(
+				f"contradiction {self.id!r} names {len(self.source_ids)} source(s): a "
+				"source cannot disagree with itself (FR-073)"
+			)
+		return self
+
+
+class Source(View):
+	"""One entry in the versioned source ledger (FR-070).
+
+	Every field here exists because the hand-built ledger in ``docs/sources/`` needed it
+	— the spec calls that ledger the reference implementation of this phase, so the
+	automation is a transcription of a structure that was already proven by use, not an
+	invention. ``precis`` and ``critique`` are the two body sections that carried the most
+	weight there: what the source says, and why it might be wrong.
+	"""
+
+	id: NonEmptyStr
+	"""Stable citation key (``S01``…). What a claim points at, so it is not a slug."""
+
+	slug: NonEmptyStr
+	title: NonEmptyStr
+	type: NonEmptyStr
+	url: str | None = None
+	retrieved: date | None = None
+	verification: VerificationStatus = VerificationStatus.REPORTED
+	confidence: NonEmptyStr
+	posture: SourcePosture = SourcePosture.EVIDENCE
+	precis: NonEmptyStr
+	critique: NonEmptyStr
+	"""The information-quality critique (FR-070). Required, because a ledger without one
+	is a list of links: the value of the entry is the judgement about the source, not the
+	source."""
+
+	expires: date | None = None
+	"""When this source stops being safe to cite (FR-075), for a source that drifts."""
+
+	superseded_by: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _a_positioning_source_is_not_evidence(self) -> Self:
+		if self.posture is SourcePosture.POSITIONING and self.verification is (
+			VerificationStatus.CONTENT_VERIFIED
+		):
+			raise ValueError(
+				f"source {self.id!r} is positioning and content-verified: reading vendor "
+				"content carefully does not make it evidence, and recording it as both is "
+				"how a marketing claim acquires a citation (FR-074)"
+			)
+		return self
+
+
+class SourceLedger(View):
+	"""The versioned source ledger for one research run (FR-070, FR-069).
+
+	Sources and claims are held together but addressed separately, which is the shape
+	FR-070 asks for and the reason both live here rather than inside
+	:class:`ResearchRecord`: the record is a measurement of a *dispatch*, and this is the
+	artefact the dispatch was supposed to produce.
+	"""
+
+	version: int = 1
+	"""FR-070's *versioned*. Bumped when a run re-states a ledger already on the log."""
+
+	goal_id: UUID7
+	query: NonEmptyStr
+	sources: tuple[Source, ...] = ()
+	claims: tuple[Claim, ...] = ()
+	contradictions: tuple[Contradiction, ...] = ()
+	"""Where two cited sources disagree (FR-073). A field rather than a check, because
+	an empty tuple is the finding "none were detected" and a missing field is no finding
+	at all."""
+
+	@model_validator(mode="after")
+	def _ids_are_unique(self) -> Self:
+		for label, ids in (
+			("source", [s.id for s in self.sources]),
+			("claim", [c.id for c in self.claims]),
+		):
+			duplicates = sorted({i for i in ids if ids.count(i) > 1})
+			if duplicates:
+				raise ValueError(
+					f"duplicate {label} id(s) {duplicates}: an address that names two "
+					"things addresses neither (FR-070)"
+				)
+		return self
+
+	@model_validator(mode="after")
+	def _every_link_resolves(self) -> Self:
+		known_sources = {s.id for s in self.sources}
+		known_claims = {c.id for c in self.claims}
+		for claim in self.claims:
+			missing = sorted(set(claim.source_ids) - known_sources)
+			if missing:
+				raise ValueError(
+					f"claim {claim.id!r} cites unknown source(s) {missing}: a claim resting "
+					"on a source the ledger does not hold cannot be invalidated with it, "
+					"which is the whole point of the edge (FR-070)"
+				)
+			if claim.superseded_by is not None and claim.superseded_by not in known_claims:
+				raise ValueError(
+					f"claim {claim.id!r} is superseded by {claim.superseded_by!r}, which the "
+					"ledger does not hold"
+				)
+		for source in self.sources:
+			if source.superseded_by is not None and source.superseded_by not in known_sources:
+				raise ValueError(
+					f"source {source.id!r} is superseded by {source.superseded_by!r}, which "
+					"the ledger does not hold"
+				)
+		for found in self.contradictions:
+			unknown = sorted(set(found.source_ids) - known_sources)
+			if unknown:
+				raise ValueError(f"contradiction {found.id!r} names unknown source(s) {unknown}")
+		return self
+
+	@property
+	def disconfirming(self) -> tuple[Claim, ...]:
+		"""Claims that argue *against* the premise (FR-071).
+
+		The count of these is what makes a rationalisation engine detectable: a research
+		phase that only ever finds support has a disconfirming count of zero, and a zero
+		that is a measurement is a finding while a zero that is an absence is not.
+		"""
+		return tuple(c for c in self.claims if c.kind is ClaimKind.DISCONFIRMING)
+
+	@property
+	def unbacked_decisions(self) -> tuple[Claim, ...]:
+		"""Claims that must not decide anything on their own (FR-069, FR-074).
+
+		An opinion with no source, or a supporting claim whose every source is
+		positioning. Both are recorded and both are refused as grounds for a decision —
+		which is FR-074's "prevented from supporting a decision on their own", made
+		checkable rather than advised.
+		"""
+		posture = {s.id: s.posture for s in self.sources}
+		unbacked: list[Claim] = []
+		for claim in self.claims:
+			if claim.kind is ClaimKind.REFUTED or claim.opinion:
+				unbacked.append(claim)
+				continue
+			if claim.source_ids and all(
+				posture.get(sid) is SourcePosture.POSITIONING for sid in claim.source_ids
+			):
+				unbacked.append(claim)
+		return tuple(unbacked)
+
+	def source(self, source_id: str) -> Source | None:
+		"""One source by id, or ``None``. The addressable read FR-070 asks for."""
+		return next((s for s in self.sources if s.id == source_id), None)
+
+	def claim(self, claim_id: str) -> Claim | None:
+		"""One claim by id, or ``None``."""
+		return next((c for c in self.claims if c.id == claim_id), None)
+
+	def resting_on(self, source_id: str) -> tuple[Claim, ...]:
+		"""Every claim whose validity depends on ``source_id`` (FR-070).
+
+		This is the derivation FR-070's requirement names: invalidating a source
+		invalidates the claims resting on it, and that set has to be computable rather
+		than remembered. A claim citing two sources rests on both, so this is a *set* of
+		dependants, not a partition of the claims.
+		"""
+		return tuple(c for c in self.claims if source_id in c.source_ids)
+
+	def expired(self, as_of: date) -> tuple[Source | Claim, ...]:
+		"""Sources and claims past their expiry on ``as_of`` (FR-075).
+
+		Time-sensitive claims are the ones that rot: model landscapes and vendor terms
+		change fastest of anything in this domain. A ledger that cannot say which of its
+		entries have gone stale is a ledger whose figures are all equally trustworthy,
+		which is the state FR-075 exists to prevent.
+		"""
+		stale: list[Source | Claim] = []
+		stale.extend(s for s in self.sources if s.expires is not None and s.expires < as_of)
+		stale.extend(c for c in self.claims if c.expires is not None and c.expires < as_of)
+		return tuple(stale)
+
+
 class ModuleCheckout(View):
 	"""The branch a plan step's work sits on (FR-100).
 
@@ -2385,6 +2682,7 @@ class LedgerKind(StrEnum):
 	INTEGRATION_CHECKED = "integration.checked"
 	VERDICT_REUSED = "verdict.reused"
 	RESEARCH_RUN = "research.run"
+	SOURCE_LEDGER_RECORDED = "source_ledger.recorded"
 	REPAIR_ATTEMPTED = "repair.attempted"
 	DECOMPOSITION_PROPOSED = "decomposition.proposed"
 	DECOMPOSITION_GATED = "decomposition.gated"
@@ -2550,6 +2848,27 @@ class ProjectState(View):
 	beside it — two fields describing one decision is how a state comes to disagree
 	with itself.
 	"""
+
+	research: tuple[ResearchRecord, ...] = ()
+	ledgers: tuple[SourceLedger, ...] = ()
+	"""Every source ledger the log records, oldest first (FR-070).
+
+	A collection rather than one field, because FR-070's ledger is *versioned*: a later
+	run that re-states the same ground appends a new ledger rather than editing the old
+	one, exactly as the log itself does. The operative ledger is :attr:`ledger`, derived
+	from this rather than stored beside it.
+	"""
+
+	@property
+	def ledger(self) -> SourceLedger | None:
+		"""The current source ledger, or ``None`` before any research has been recorded.
+
+		The **latest** ledger, by log order: a re-stated ledger supersedes the one before
+		it for the same reason a re-answered elicitation dimension does (ADR-0007), and
+		the older one stays in ``ledgers`` because the record of what was believed before
+		is how the current belief is read.
+		"""
+		return self.ledgers[-1] if self.ledgers else None
 
 	@property
 	def cut(self) -> Cut | None:

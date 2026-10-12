@@ -37,20 +37,20 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-059 harness cannot reach oracle corpus/credentials | **Partly** | Prompt text only (`planner.py:127`). No sandbox, no check. |
 | FR-060 phase state machine, resumable after SIGKILL | **Implemented** (2026-10-12, ADR-0030) | `Phase`/`PHASE_SEQUENCE`/`PhaseAdvance` (`views.py`), `advance_phase`/`approve_gate`/`current_phase`/`open_gate` (`service.py`), `sofact phase` and `sofact gate`; `test_the_phase_survives_a_restart_because_it_is_in_the_log` (`test_phase.py`). A transition is its own ledger row, so a new process reads the phase off disk. |
 | FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
-| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), and **P2 now is too** (`SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`). P1 still has no findings artefact beyond a research report path. |
+| FR-062 every phase emits a durable artifact | **Partly** | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), **P2 now is too** (`SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`), and **P1's ledger now is** (`SOURCE_LEDGER_RECORDED`, FR-070/ADR-0035). What is still missing is the per-clause classification artefact FR-068 asks for. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
 | FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:231`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
 | FR-066 elicitation proposes no implementation | **Implemented** | `_SHARED_CONSTRAINTS` (`planner.py:110`) + `draft_stems` polarity (`elicitation.py:254`); `test_polarity_follows_the_dimension` (`test_elicitation.py:281`). |
 | FR-067 each clause carries `confidence` and `verification_method` | **Partly** | `Clause` (`views.py:351`) carries **neither**; ambiguity is not quantified per clause. `test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite* rule. |
 | FR-068 clause classified by research into validated/invalidated/… | **Not built** | No classification type. |
-| FR-069 finding provenance | **Partly** | `ResearchRecord.source_urls` (`views.py:1561`) records URLs only. No retrieval date, no verification status, no confidence, no opinion labelling. |
-| FR-070 versioned source ledger, claims separately addressable | **Not built** | One report path plus a URL tuple; sources are not addressable and claims do not point at them. |
-| FR-071 disconfirming count reported | **Not built** | No disconfirming search or count. |
+| FR-069 finding provenance | **Implemented** (2026-10-12, ADR-0035) | `Source` carries `url`, `retrieved`, `verification` (`VerificationStatus`, the `docs/sources/README.md` legend as a type) and `confidence`; `Claim.opinion` labels the uncited assertion, and `SourceLedger.unbacked_decisions` refuses one as grounds for a decision. `ResearchRecord.source_urls` remains the *dispatch* measurement. |
+| FR-070 versioned source ledger, claims separately addressable | **Implemented** (2026-10-12, ADR-0035) | `Source`/`Claim`/`Contradiction`/`SourceLedger` (`views.py`), parsed from the producer's `research-sources/*.md` and `research-claims.json` by `sofact.research`, recorded as `LedgerKind.SOURCE_LEDGER_RECORDED`, printed by `sofact sources`. `SourceLedger.resting_on(id)` derives the set a source's invalidation takes with it; `version` counts the ledgers the project reads under. `test_a_claim_points_at_its_source_and_the_edge_is_navigable` (`test_service.py`). |
+| FR-071 disconfirming count reported | **Implemented** (2026-10-12, ADR-0035) | `Claim.kind` is `supporting`/`disconfirming`/`refuted`; `SourceLedger.disconfirming` counts them and `sofact sources` prints the count. **Deliberately not a gate check** — a check that failed at zero would pay a producer for inventing one, so the count is a measurement (see ADR-0035 decision 6). |
 | FR-072 research bounded by declared budget | **Partly** | `--timeout` and the extension's own loop ceiling bound wall clock; there is no source/model-call budget per clause. |
-| FR-073 contradiction detection | **Not built** | No code. |
-| FR-074 evidence vs positioning classification | **Not built** | No code. |
-| FR-075 self-staleness / expiry | **Not built** | No code. |
+| FR-073 contradiction detection | **Implemented** (2026-10-12, ADR-0035) | `Contradiction` (`views.py`), read from the claims file, with `resolution` left `None` when the operator has not ruled — an unresolved disagreement is a real state, and `sofact sources` prints it as `UNRESOLVED`. Recorded rather than resolved: the spec says the disagreement is where the operator's decision is. |
+| FR-074 evidence vs positioning classification | **Implemented** (2026-10-12, ADR-0035) | `Source.posture` (`SourcePosture`), with the type refusing `positioning` + `content-verified` together; `SourceLedger.unbacked_decisions` and the `positioning-is-not-evidence` check make "prevented from supporting a decision on their own" structural. |
+| FR-075 self-staleness / expiry | **Implemented** (2026-10-12, ADR-0035) | `expires` on both `Source` and `Claim`; `SourceLedger.expired(as_of)` and the `nothing-has-expired` check are as-of a date, so the same ledger can be current and then not. |
 | FR-076 specification as traceable requirements | **Implemented** (2026-10-12) | `Specification`/`Requirement` (`views.py`), `specify` derives one requirement per clause (`specification.py`), `sofact specify`; both traceability directions are gate checks. `test_every_clause_reaches_a_requirement` (`test_specification.py`). |
 | FR-077 machine-checkable acceptance criterion per requirement | **Implemented** | `Requirement.criterion` is required and non-empty (`views.py`), taken from the clause's own oracle so the two cannot drift; `every_requirement_has_a_criterion` is a gate check. |
 | FR-078 system model in the specification | **Implemented** (2026-10-12) | `SystemModel`/`SystemEntity`/`SystemRelationship`/`SystemInvariant` (`views.py`); entities, relationships and invariants, machine-readable, carried on `Specification`. **State machines are not modelled** — the spec's FR-078 lists them and the type does not have them. |
@@ -212,9 +212,13 @@ only).
    its own row, `sofact phase` exits non-zero while a gate is open, and
    `test_the_phase_survives_a_restart_because_it_is_in_the_log` proves a second
    process reads the phase off disk. **What remains of this gap is FR-062's other
-   half**: P1 and P2 still emit no artefact of their own, so a resume lands at a
-   phase whose output is nothing. `sofact init` (§23 M1) also remains unbuilt — it is
-   a convenience over the phase machine rather than a prerequisite for it.
+   half**, narrowed twice since: P2 now emits `Specification`/`SpecificationGate`
+   (ADR-0031) and P1 now emits `SourceLedger` (ADR-0035), so a resume lands on a
+   phase whose output is an artefact. What is still missing is FR-068's per-clause
+   classification — a verdict on each intent clause, which the ledger holds claims
+   *about* but does not attribute to clauses. `sofact init` (§23 M1) also remains
+   unbuilt — it is a convenience over the phase machine rather than a prerequisite
+   for it.
 
 Honourable mentions, in the same ranking: FR-122/123/124 (no autonomy number is
 ever computed at delivery level, so the spec's most emphatic honesty requirement is
