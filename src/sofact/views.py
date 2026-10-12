@@ -21,13 +21,14 @@ import json
 import uuid
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Final, Self
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"INTEGRATION_REQUIREMENTS",
 	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
 	"AutonomyLevel",
@@ -57,6 +58,10 @@ __all__ = [
 	"GoalStyle",
 	"HarnessCapability",
 	"HarnessProfile",
+	"IntegrationCheck",
+	"IntegrationFinding",
+	"IntegrationFindingKind",
+	"IntegrationReport",
 	"IntegrityCheck",
 	"IntegrityOutcome",
 	"IntegritySubject",
@@ -1152,6 +1157,135 @@ class GoalPlan(View):
 		return tuple(levels)
 
 
+class IntegrationFindingKind(StrEnum):
+	"""What a P7 integration check found (FR-111-116).
+
+	Three kinds, and each is produced by a check that runs. A kind the code cannot emit
+	would be an enum member nothing reaches, which reads as a capability in the type and
+	is a gap in the report.
+	"""
+
+	UNDECLARED_DEPENDENCY = "undeclared_dependency"
+	"""A module imports a file owned by a module absent from its ``depends_on`` (FR-113)."""
+
+	UNBUILT_DEPENDENCY = "unbuilt_dependency"
+	"""A module was built before a module it depends on had any sealed work (FR-111)."""
+
+	UNATTRIBUTED_FILE = "unattributed_file"
+	"""A module imports a file that no module's step sealed, so no module owns it (FR-114)."""
+
+
+class IntegrationFinding(View):
+	"""One violation, attributed to the modules it implicates (FR-114).
+
+	``modules`` is the *minimum violating set*: the modules that must be repaired for the
+	finding to go away. FR-114 forbids a platform-wide rebuild in response to a local
+	failure, so the set is as small as the evidence allows and is what a repair is
+	scoped to.
+	"""
+
+	kind: IntegrationFindingKind
+	detail: NonEmptyStr
+	modules: tuple[NonEmptyStr, ...]
+	evidence: tuple[NonEmptyStr, ...] = ()
+	"""The concrete lines — the import statement, the path — so the finding is checkable."""
+
+
+INTEGRATION_REQUIREMENTS: Final[tuple[str, ...]] = (
+	"FR-111",
+	"FR-112",
+	"FR-113",
+	"FR-114",
+	"FR-115",
+	"FR-116",
+)
+"""Every requirement §10 states, so a check can claim one and a report can see the rest.
+
+The list is the *whole* of P7 rather than the part that is implemented. A report that
+named only what it ran could not distinguish a system that integrates from a system
+nothing was checked on, and the difference is exactly what a green line hides.
+"""
+
+
+class IntegrationCheck(View):
+	"""One P7 check, its outcome, and what it did not cover (FR-111-116).
+
+	``covered`` and ``uncovered`` are both required, because an integration report that
+	says only "passed" is one an operator cannot tell from a report about a system with
+	nothing to check.
+
+	``requirements`` is which of :data:`INTEGRATION_REQUIREMENTS` this check discharges.
+	:attr:`IntegrationReport.not_implemented` is the complement, so a requirement nobody
+	claims shows up as unimplemented rather than as absent — the failure mode being that
+	a report looks complete because it never mentioned the thing it skipped.
+	"""
+
+	name: NonEmptyStr
+	passed: bool
+	detail: NonEmptyStr
+	requirements: tuple[NonEmptyStr, ...]
+	covered: tuple[NonEmptyStr, ...] = ()
+	uncovered: tuple[NonEmptyStr, ...] = ()
+
+
+class IntegrationReport(View):
+	"""The result of one integration pass over a plan's dispatched work (FR-111-116).
+
+	Describes *one pass over one set of dispatches*, in the same sense FR-006 gives a
+	verdict: a later dispatch adds evidence and a new report is rendered. ``build_order``
+	is recorded because FR-111's incremental integration is only incremental if the order
+	is the topological one, and a report that omitted it could not show that.
+	"""
+
+	id: UUID7
+	plan_id: UUID7
+	goal_id: UUID7
+	contract_id: UUID7
+	rendered_at: datetime
+	build_order: tuple[NonEmptyStr, ...]
+	modules_built: tuple[NonEmptyStr, ...]
+	findings: tuple[IntegrationFinding, ...] = ()
+	checks: tuple[IntegrationCheck, ...] = ()
+
+	@model_validator(mode="after")
+	def _well_formed(self) -> Self:
+		if not self.build_order:
+			raise ValueError("an integration report over no build order reports nothing")
+		if not self.checks:
+			raise ValueError("an integration report with no checks is not a report")
+		return self
+
+	@property
+	def passed(self) -> bool:
+		"""Whether every check passed. Findings are what fail a check, never a summary."""
+		return all(check.passed for check in self.checks) and not self.findings
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of §10 that no check in this report discharges (FR-112, FR-115, FR-116).
+
+		Derived from what the checks claim rather than from a hand-kept list, so a check
+		that stops running takes its requirement with it into this tuple. FR-112's
+		public-API diff needs a declared interface a machine can compare against and the
+		decomposition states interfaces as prose; FR-115 needs a system model, which does
+		not exist as a type; FR-116 needs P2 acceptance criteria no module satisfies,
+		which the contract does not carry. All three are real gaps and this is where they
+		are reported.
+		"""
+		claimed = {name for check in self.checks for name in check.requirements}
+		return tuple(name for name in INTEGRATION_REQUIREMENTS if name not in claimed)
+
+	@property
+	def violating_modules(self) -> tuple[str, ...]:
+		"""The union of every finding's minimum violating set (FR-114).
+
+		The repair scope: exactly the modules some finding implicates, never the whole
+		plan. A union is still a *minimum* set in FR-114's sense — it is derived from the
+		findings rather than from the plan's membership.
+		"""
+		return tuple(sorted({name for finding in self.findings for name in finding.modules}))
+
+
 class IntegritySubject(StrEnum):
 	"""The three things FR-139 requires to be unmodified at completion."""
 
@@ -1657,6 +1791,7 @@ class LedgerKind(StrEnum):
 	CAPABILITY_PROBED = "capability.probed"
 	STEP_DISPATCHED = "step.dispatched"
 	INTEGRITY_CHECKED = "integrity.checked"
+	INTEGRATION_CHECKED = "integration.checked"
 	VERDICT_REUSED = "verdict.reused"
 	RESEARCH_RUN = "research.run"
 	REPAIR_ATTEMPTED = "repair.attempted"
@@ -1766,6 +1901,7 @@ class ProjectState(View):
 	dispatches: tuple[DispatchRecord, ...] = ()
 	profiles: tuple[HarnessProfile, ...] = ()
 	integrity: tuple[IntegrityCheck, ...] = ()
+	integrations: tuple[IntegrationReport, ...] = ()
 	claims: tuple[CompletionClaim, ...] = ()
 	research: tuple[ResearchRecord, ...] = ()
 	repairs: tuple[RepairAttempt, ...] = ()
@@ -1848,6 +1984,15 @@ class ProjectState(View):
 	def repairs_for_plan(self, plan_id: str) -> tuple[RepairAttempt, ...]:
 		"""Every repair attempt made against a plan, in log order."""
 		return tuple(r for r in self.repairs if r.plan_id == plan_id)
+
+	def integrations_for(self, plan_id: str) -> tuple[IntegrationReport, ...]:
+		"""Every integration pass over a plan, in log order."""
+		return tuple(r for r in self.integrations if r.plan_id == plan_id)
+
+	def latest_integration(self, plan_id: str) -> IntegrationReport | None:
+		"""Most recent integration report for a plan, if one was rendered."""
+		matching = [r for r in self.integrations if r.plan_id == plan_id]
+		return matching[-1] if matching else None
 
 	def attempts_at_clause(self, clause_id: str) -> tuple[RepairAttempt, ...]:
 		"""Every repair attempt at one clause, in log order.

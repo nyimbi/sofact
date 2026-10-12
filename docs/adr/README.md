@@ -38,6 +38,7 @@ than argued. Numbering is sequential and never reused.
 | [0023](0023-a-record-is-addressed-by-a-path.md) | A session record is addressed by a filesystem path: `claude` joins the producer set as a measured row, and `opencode` is dropped because its record is a database row and no glob names it | Accepted |
 | [0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) | Branch-per-step (FR-100) is built, sealed and recorded on the dispatch (the branch's *name* is revised by ADR-0025); worktree isolation (FR-141) is deferred until a wave runs concurrently or a plan spans more than one module, and worktrees are containment rather than confinement | Accepted |
 | [0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) | The decomposition gate has two halves and a module is one clause: the proposal is a function of the contract and calls no model, the machine half is facts and cannot be waived by approval, and a step names the module it implements so the branch is per module with several steps sharing it, reconciling FR-100 with FR-136 | Accepted |
+| [0026](0026-p7-checks-three-of-six-requirements-and-names-the-rest.md) | P7 checks three of §10's six requirements (FR-111 build order, FR-113 import discipline by parsing the sealed files, FR-114 minimum violating set) and names the other three on every report rather than reporting green: FR-112 needs a machine-readable interface, FR-115 the system model, FR-116 system-level criteria | Accepted |
 
 ## Mapping to the specification's open decisions
 

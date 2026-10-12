@@ -30,6 +30,7 @@ from sofact.views import (
 	Goal,
 	GoalPlan,
 	HarnessProfile,
+	IntegrationReport,
 	IntegrityCheck,
 	LedgerEntry,
 	LedgerKind,
@@ -59,6 +60,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	dispatches: list[DispatchRecord] = []
 	profiles: list[HarnessProfile] = []
 	integrity: list[IntegrityCheck] = []
+	integrations: list[IntegrationReport] = []
 	research: list[ResearchRecord] = []
 	# Repair attempts are keyed by id with last-write-wins, like a re-answered
 	# elicitation dimension (ADR-0007): an attempt is written when its session ends and
@@ -103,6 +105,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				dispatches.append(DispatchRecord.model_validate(payload["dispatch"]))
 			case LedgerKind.INTEGRITY_CHECKED:
 				integrity.append(IntegrityCheck.model_validate(payload["check"]))
+			case LedgerKind.INTEGRATION_CHECKED:
+				integrations.append(IntegrationReport.model_validate(payload["integration"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -119,6 +123,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		dispatches=tuple(dispatches),
 		profiles=tuple(profiles),
 		integrity=tuple(integrity),
+		integrations=tuple(integrations),
 		research=tuple(research),
 		repairs=tuple(repairs.values()),
 	)

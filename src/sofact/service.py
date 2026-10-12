@@ -44,6 +44,7 @@ from sofact.harness import (
 from sofact.harness import (
 	spec_for as harness_spec_for,
 )
+from sofact.integration import integrate
 from sofact.ledger import LEDGER_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
 from sofact.planner import (
@@ -74,6 +75,7 @@ from sofact.views import (
 	GoalStep,
 	GoalStyle,
 	HarnessProfile,
+	IntegrationReport,
 	IntegrityCheck,
 	LedgerKind,
 	OracleDeclaration,
@@ -1473,6 +1475,34 @@ class FactoryService:
 				{"check": check.model_dump(mode="json")},
 			)
 		return checks
+
+	# ------------------------------------------------------- P7: FR-111 - FR-116
+
+	async def check_integration(self, plan_id: str) -> IntegrationReport:
+		"""Run P7 over a plan's dispatched work, and record the report (FR-111 - FR-116).
+
+		Reads the plan, the *approved* decomposition and the dispatches from the log rather
+		than taking any of them from the caller. Integration is a statement about the
+		system as built, and a caller that could supply the module graph could supply one
+		whose declared dependencies happen to match the imports it is about to check.
+
+		The decomposition is required rather than optional: without one there is no module
+		graph, so "no module reaches another's internals" has nothing to be a violation
+		*of*. A plan whose contract has no approved decomposition is refused by
+		``require_approved_decomposition`` for the same reason planning is (FR-061).
+		"""
+		plan = await self.plan_by_id(plan_id)
+		decomposition = await self.require_approved_decomposition(plan.contract_id)
+		state = await self.state()
+		dispatches = state.dispatches_for(plan_id)
+		workspaces = {record.workspace for record in dispatches if record.workspace}
+		root = Path(next(iter(workspaces))) if len(workspaces) == 1 else None
+		report = integrate(plan, decomposition, dispatches, root=root)
+		self._commit(
+			LedgerKind.INTEGRATION_CHECKED,
+			{"integration": report.model_dump(mode="json")},
+		)
+		return report
 
 	# --------------------------------------------------------- FR-143: precision
 

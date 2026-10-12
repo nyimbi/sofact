@@ -914,6 +914,66 @@ async def _integrity(svc: FactoryService) -> None:
 		raise typer.Exit(code=1)
 
 
+@app.command(name="integrate")
+def integrate_command(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Run P7 over the current plan's dispatched work (FR-111 - FR-116)."""
+	asyncio.run(_integrate(_service(_home_of(ctx, home))))
+
+
+async def _integrate(svc: FactoryService) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	plan = await svc.latest_plan(built.id)
+	if plan is None:
+		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	try:
+		report = await svc.check_integration(plan.id)
+	except ValueError as exc:
+		typer.secho(f"cannot integrate: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+	typer.secho(f"\nintegration of plan {report.plan_id}", fg="cyan", bold=True)
+	typer.secho("  build order: " + " -> ".join(report.build_order), fg="bright_black")
+	typer.echo(f"  built: {', '.join(report.modules_built) or 'nothing'}")
+	for check in report.checks:
+		mark = "ok  " if check.passed else "FAIL"
+		typer.secho(
+			f"  [{mark}] {check.name} ({', '.join(check.requirements)}): {check.detail}",
+			fg="green" if check.passed else "red",
+		)
+		for line in check.uncovered:
+			typer.secho(f"         not covered: {line}", fg="bright_black")
+	for finding in report.findings:
+		typer.secho(f"  {finding.kind.value}: {finding.detail}", fg="red")
+		typer.secho(
+			f"         repair scope (FR-114): {', '.join(finding.modules)}", fg="bright_black"
+		)
+		for line in finding.evidence:
+			typer.secho(f"         {line}", fg="bright_black")
+	if report.not_implemented:
+		typer.secho(
+			"\n  not implemented: " + ", ".join(report.not_implemented) + ". "
+			"FR-112 needs a declared interface a machine can diff; FR-115 needs the system "
+			"model of §6.3 as a type; FR-116 needs P2 acceptance criteria. A green line "
+			"above is not a claim about these.",
+			fg="yellow",
+		)
+	if not report.passed:
+		typer.secho(
+			"\n  integration failed. Repair is scoped to the modules named above, never "
+			"to the platform (FR-114).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+
+
 @app.command()
 def precision(
 	ctx: typer.Context,
