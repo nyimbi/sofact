@@ -364,6 +364,12 @@ def decomposition_hash(decomposition: Decomposition) -> str:
 				"name": m.name,
 				"class": m.module_class.value,
 				"interface": m.interface,
+				# The declared surface is part of what was approved, or an approval would
+				# describe a module whose public names could change underneath it. Same
+				# reasoning as ADR-0025's exclusion of ids, in the other direction: ids
+				# are excluded because they are minted per proposal, and the surface is
+				# included because it is a decision.
+				"surface": [member.model_dump(mode="json") for member in m.surface],
 				"clauses": list(m.clause_ids),
 				"depends_on": sorted(m.depends_on),
 			}

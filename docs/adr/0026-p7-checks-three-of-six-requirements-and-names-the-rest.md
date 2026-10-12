@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-12
+- **Amended by:** [ADR-0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md) — point 1's rule that `not_implemented` is the complement of what the checks **claim** is superseded: it is the complement of what they **discharge**. The failure it left open is a check that runs, claims a requirement, and exercises none of it — which is exactly the state FR-112's conformance check starts in. The rest of this record stands.
 - **Related:** FR-111–116, FR-090, FR-092, FR-061, FR-113, FR-114, §10, §6.3, D2/D5; [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) (the cumulative-branch limitation this record's attribution works around)
 
 ## Context

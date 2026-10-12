@@ -960,9 +960,10 @@ async def _integrate(svc: FactoryService) -> None:
 	if report.not_implemented:
 		typer.secho(
 			"\n  not implemented: " + ", ".join(report.not_implemented) + ". "
-			"FR-112 needs a declared interface a machine can diff; FR-115 needs the system "
-			"model of §6.3 as a type; FR-116 needs P2 acceptance criteria. A green line "
-			"above is not a claim about these.",
+			"FR-112 needs a module to declare a machine-readable surface before its "
+			"public-API diff has two sides; FR-115 needs the system model of §6.3 as a "
+			"type; FR-116 needs P2 acceptance criteria. A green line above is not a claim "
+			"about these.",
 			fg="yellow",
 		)
 	if not report.passed:

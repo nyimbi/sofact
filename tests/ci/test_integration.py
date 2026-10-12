@@ -25,7 +25,9 @@ from sofact.integration import (
 	attribute_files,
 	check_build_order,
 	check_imports,
+	check_interface_conformance,
 	integrate,
+	public_surface,
 )
 from sofact.planner import DEFAULT_STEP_BUDGET, compile_plan
 from sofact.views import (
@@ -39,6 +41,8 @@ from sofact.views import (
 	ElicitationDimension,
 	GoalPlan,
 	IntegrationFindingKind,
+	InterfaceMember,
+	InterfaceMemberKind,
 	ModuleCheckout,
 	OracleClass,
 	OracleDeclaration,
@@ -357,7 +361,132 @@ class TestTheBuildOrder:
 
 
 # --------------------------------------------------------------------------- #
-# FR-112, FR-115, FR-116: the requirements that are not implemented
+# FR-112: the declared surface diffed against the built one
+# --------------------------------------------------------------------------- #
+
+
+def with_surface(
+	decomposition: Decomposition, name: str, *members: InterfaceMember
+) -> Decomposition:
+	"""The decomposition with one module's declared surface replaced."""
+	return decomposition.model_copy(
+		update={
+			"modules": tuple(
+				m.model_copy(update={"surface": members}) if m.name == name else m
+				for m in decomposition.modules
+			)
+		}
+	)
+
+
+class TestTheBuiltSurface:
+	def test_a_public_function_class_and_constant_are_read_from_the_ast(self) -> None:
+		"""The extraction FR-112's right-hand side is built from."""
+		surface = public_surface(
+			["m.py"],
+			{
+				"m.py": "def run(a, b):\n\tpass\n\n\nclass Store:\n\tpass\n\n\nLIMIT = 3\n",
+			},
+		)
+
+		assert {(m.name, m.kind) for m in surface} == {
+			("run", InterfaceMemberKind.FUNCTION),
+			("Store", InterfaceMemberKind.CLASS),
+			("LIMIT", InterfaceMemberKind.CONSTANT),
+		}
+		assert next(m for m in surface if m.name == "run").parameters == ("a", "b")
+
+	def test_a_private_name_is_not_on_the_surface(self) -> None:
+		"""Python's convention is the definition of public here, and it is the whole test."""
+		surface = public_surface(
+			["m.py"], {"m.py": "def _helper():\n\tpass\n\n\n_HIDDEN = 1\n\n\ndef run():\n\tpass\n"}
+		)
+
+		assert [m.name for m in surface] == ["run"]
+
+	def test_a_method_is_not_a_module_level_name(self) -> None:
+		"""A method is reached through its class; counting it would flag every private helper."""
+		surface = public_surface(["m.py"], {"m.py": "class Store:\n\tdef save(self):\n\t\tpass\n"})
+
+		assert [m.name for m in surface] == ["Store"]
+
+	def test_a_file_that_does_not_parse_contributes_nothing(self) -> None:
+		"""Judging syntax is the producer's toolchain's job, not integration's."""
+		assert public_surface(["m.py"], {"m.py": "def broken(:\n"}) == ()
+
+	def test_a_non_python_file_is_not_parsed(self) -> None:
+		assert public_surface(["m.js"], {"m.js": "export function run() {}"}) == ()
+
+
+class TestTheInterfaceDiff:
+	def test_a_declared_name_the_build_does_not_expose_is_a_finding(self) -> None:
+		"""Direction one: the module did not deliver what it promised.
+
+		The source exposes nothing public, so the only difference is the declared name —
+		which is what makes this a test of one direction rather than of both.
+		"""
+		findings = check_interface_conformance(
+			{"a": ("a.py",)},
+			declared={"a": (InterfaceMember(name="run", kind=InterfaceMemberKind.FUNCTION),)},
+			sources={"a.py": "_pending = 1\n"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.MISSING_PUBLIC_NAME]
+		assert findings[0].modules == ("a",)
+
+	def test_a_built_name_the_declaration_does_not_carry_is_a_finding(self) -> None:
+		"""Direction two, and the one FR-090 cares about.
+
+		The declared surface is what a dependent is permitted to reach for. A producer
+		that widens it has added a second way in that no dependent declared and no gate
+		approved, and reporting only the missing direction would let that through.
+		"""
+		findings = check_interface_conformance(
+			{"a": ("a.py",)},
+			declared={"a": (InterfaceMember(name="run", kind=InterfaceMemberKind.FUNCTION),)},
+			sources={"a.py": "def run():\n\tpass\n\n\ndef sneak():\n\tpass\n"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.UNDECLARED_PUBLIC_NAME]
+		assert "sneak" in findings[0].detail
+
+	def test_a_declared_surface_the_build_matches_exactly_is_not_a_finding(self) -> None:
+		"""The negative. An empty diff is what FR-112 asks for and this is one."""
+		findings = check_interface_conformance(
+			{"a": ("a.py",)},
+			declared={"a": (InterfaceMember(name="run", kind=InterfaceMemberKind.FUNCTION),)},
+			sources={"a.py": "def run():\n\tpass\n"},
+		)
+
+		assert findings == ()
+
+	def test_a_function_built_with_a_different_arity_is_a_finding(self) -> None:
+		"""A name that is present is not a signature that matches."""
+		findings = check_interface_conformance(
+			{"a": ("a.py",)},
+			declared={
+				"a": (
+					InterfaceMember(
+						name="run", kind=InterfaceMemberKind.FUNCTION, parameters=("a", "b")
+					),
+				)
+			},
+			sources={"a.py": "def run(a):\n\tpass\n"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.WRONG_ARITY]
+		assert "2 parameter(s)" in findings[0].detail and "1" in findings[0].detail
+
+	def test_a_module_with_no_declaration_is_skipped_rather_than_passed(self) -> None:
+		"""Nothing to diff is not an empty diff, and the report says which it was."""
+		assert (
+			check_interface_conformance({"a": ("a.py",)}, declared={}, sources={"a.py": "X = 1\n"})
+			== ()
+		)
+
+
+# --------------------------------------------------------------------------- #
+# FR-115, FR-116: the requirements that are not implemented
 # --------------------------------------------------------------------------- #
 
 
@@ -365,10 +494,12 @@ class TestWhatIsNotImplemented:
 	def test_the_report_names_every_requirement_it_did_not_discharge(self) -> None:
 		"""The load-bearing test for honesty about scope.
 
-		FR-112 needs a declared interface a machine can diff against and the decomposition
-		states interfaces as prose; FR-115 needs a system model, which is not a type;
-		FR-116 needs P2 acceptance criteria the contract does not carry. A report that
-		omitted them would let a green line read as "P7 is done".
+		FR-112 is *not* in the tuple here even though the conformance check runs, because
+		the check diffs nothing when no module declared a surface -- the decomposition
+		states interfaces as prose and a proposal has no signature to derive one from.
+		FR-115 needs a system model, which is not a type; FR-116 needs P2 acceptance
+		criteria the contract does not carry. A report that omitted them would let a green
+		line read as "P7 is done".
 		"""
 		contract = two_clause_contract()
 		proposal = propose(contract)
@@ -378,9 +509,47 @@ class TestWhatIsNotImplemented:
 		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
 
 		assert report.not_implemented == ("FR-112", "FR-115", "FR-116"), (
-			"FR-114 is discharged by the import check, so it must not appear here"
+			"the conformance check ran but diffed nothing, so FR-112 is not discharged"
 		)
 		assert report.passed, "the implemented checks passed; that is not the same as P7 done"
+
+	def test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it(self) -> None:
+		"""The complement of the test above, and the reason it is a real distinction.
+
+		Once a module carries a machine-readable surface the diff has two sides, and the
+		same requirement moves out of ``not_implemented`` without any list being edited.
+		"""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		name = proposal.modules[0].name
+		declared = with_surface(
+			proposal, name, InterfaceMember(name="run", kind=InterfaceMemberKind.FUNCTION)
+		)
+		dispatches = [sealed(module=name, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, declared, dispatches, sources={"a.py": "def run():\n\tpass\n"})
+
+		assert report.not_implemented == ("FR-115", "FR-116")
+		assert report.passed
+
+	def test_a_surface_that_does_not_match_fails_the_report(self) -> None:
+		"""FR-112's diff is a hard stop like every other integration check (FR-061)."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		name = proposal.modules[0].name
+		declared = with_surface(
+			proposal, name, InterfaceMember(name="run", kind=InterfaceMemberKind.FUNCTION)
+		)
+		dispatches = [sealed(module=name, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, declared, dispatches, sources={"a.py": "_pending = 1\n"})
+
+		assert not report.passed
+		assert report.violating_modules == (name,)
+		conformance = next(c for c in report.checks if c.name == "interface_conformance")
+		assert not conformance.passed
 
 	def test_every_check_claims_requirements_that_exist(self) -> None:
 		"""A check claiming a requirement §10 does not state would be a typo wearing a claim."""

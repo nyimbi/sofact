@@ -65,6 +65,8 @@ __all__ = [
 	"IntegrityCheck",
 	"IntegrityOutcome",
 	"IntegritySubject",
+	"InterfaceMember",
+	"InterfaceMemberKind",
 	"LedgerEntry",
 	"LedgerKind",
 	"Module",
@@ -505,6 +507,16 @@ class Module(View):
 	interface: NonEmptyStr
 	clause_ids: tuple[UUID7, ...] = ()
 	depends_on: tuple[UUID7, ...] = ()
+	surface: tuple[InterfaceMember, ...] = ()
+	"""The declared public names, in a form FR-112 can diff a build against.
+
+	Empty is a real state and not an error: nothing in a contract's clauses is a
+	machine-readable signature (``OracleDeclaration`` carries a class, a description and
+	an optional command, and no parameter list), so a proposal has nothing to derive one
+	from and says so by leaving this empty. P7 reports an empty surface as *uncovered*
+	rather than as conforming, which is the difference between "the diff was empty" and
+	"there was nothing to diff".
+	"""
 
 	@model_validator(mode="after")
 	def _consistent(self) -> Self:
@@ -521,6 +533,38 @@ class Module(View):
 	def ceiling(self) -> AutonomyLevel:
 		"""The highest autonomy this module's *class* permits (FR-125/FR-126)."""
 		return MODULE_CLASS_CEILING[self.module_class]
+
+
+class InterfaceMemberKind(StrEnum):
+	"""What kind of public name a module declares on its surface (FR-090, FR-112)."""
+
+	FUNCTION = "function"
+	CLASS = "class"
+	CONSTANT = "constant"
+
+
+class InterfaceMember(View):
+	"""One declared public name, in a form a machine can diff against a build (FR-112).
+
+	FR-112 requires the public-API diff to be empty, and a diff needs two sides. This is
+	the declared side: what the module's surface *is*, stated before the module exists.
+
+	``parameters`` is empty for a constant and for a class, and for a function it is the
+	parameter names in order. It is deliberately not a type signature: SoFact does not
+	know the operator's language (ADR-0025), and a type it invented would be a fabricated
+	contract that P5 implements and P7 certifies. A name and its arity is the part that is
+	both language-agnostic and checkable.
+	"""
+
+	name: NonEmptyStr
+	kind: InterfaceMemberKind
+	parameters: tuple[NonEmptyStr, ...] = ()
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.kind is not InterfaceMemberKind.FUNCTION and self.parameters:
+			raise ValueError(f"{self.name!r} is a {self.kind.value} and cannot carry parameters")
+		return self
 
 
 class GateCheck(View):
@@ -1174,6 +1218,15 @@ class IntegrationFindingKind(StrEnum):
 	UNATTRIBUTED_FILE = "unattributed_file"
 	"""A module imports a file that no module's step sealed, so no module owns it (FR-114)."""
 
+	UNDECLARED_PUBLIC_NAME = "undeclared_public_name"
+	"""The build exposes a public name the module never declared (FR-112)."""
+
+	MISSING_PUBLIC_NAME = "missing_public_name"
+	"""A declared public name is absent from the build (FR-112)."""
+
+	WRONG_ARITY = "wrong_arity"
+	"""A declared function's parameter count differs from the build (FR-112)."""
+
 
 class IntegrationFinding(View):
 	"""One violation, attributed to the modules it implicates (FR-114).
@@ -1227,6 +1280,20 @@ class IntegrationCheck(View):
 	covered: tuple[NonEmptyStr, ...] = ()
 	uncovered: tuple[NonEmptyStr, ...] = ()
 
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this check actually carried out, which may be fewer than it claims.
+
+		A check can claim a requirement and exercise none of it: FR-112's diff claims
+		nothing when no module declared a surface, and a report that counted the claim
+		would call that requirement implemented on the strength of a check that diffed
+		nothing. ``passed`` is not the test — a check over no modules passes vacuously,
+		which is exactly the state FR-112 is in until something declares a surface.
+		"""
+		if not self.covered:
+			return ()
+		return self.requirements
+
 
 class IntegrationReport(View):
 	"""The result of one integration pass over a plan's dispatched work (FR-111-116).
@@ -1262,18 +1329,20 @@ class IntegrationReport(View):
 
 	@property
 	def not_implemented(self) -> tuple[str, ...]:
-		"""Requirements of §10 that no check in this report discharges (FR-112, FR-115, FR-116).
+		"""Requirements of §10 that this report did not carry out (FR-112, FR-115, FR-116).
 
-		Derived from what the checks claim rather than from a hand-kept list, so a check
-		that stops running takes its requirement with it into this tuple. FR-112's
-		public-API diff needs a declared interface a machine can compare against and the
-		decomposition states interfaces as prose; FR-115 needs a system model, which does
-		not exist as a type; FR-116 needs P2 acceptance criteria no module satisfies,
-		which the contract does not carry. All three are real gaps and this is where they
-		are reported.
+		Derived from what the checks *discharged* rather than from a hand-kept list, so a
+		check that stops running takes its requirement with it into this tuple. The
+		distinction between claiming and discharging is what keeps FR-112 honest: the
+		conformance check always runs, but it diffs nothing until a module declares a
+		machine-readable surface, and a report that counted the claim would drop FR-112
+		from this tuple on the strength of a check that compared nothing. FR-115 needs a
+		system model, which does not exist as a type; FR-116 needs P2 acceptance criteria
+		no module satisfies, which the contract does not carry. Both are gaps no check
+		claims, and this is where all of them are reported.
 		"""
-		claimed = {name for check in self.checks for name in check.requirements}
-		return tuple(name for name in INTEGRATION_REQUIREMENTS if name not in claimed)
+		discharged = {name for check in self.checks for name in check.discharged}
+		return tuple(name for name in INTEGRATION_REQUIREMENTS if name not in discharged)
 
 	@property
 	def violating_modules(self) -> tuple[str, ...]:

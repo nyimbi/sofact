@@ -53,6 +53,8 @@ from sofact.views import (
 	IntegrationFinding,
 	IntegrationFindingKind,
 	IntegrationReport,
+	InterfaceMember,
+	InterfaceMemberKind,
 	now,
 )
 
@@ -61,12 +63,15 @@ __all__ = [
 	"attribute_files",
 	"check_build_order",
 	"check_imports",
+	"check_interface_conformance",
 	"integrate",
+	"public_surface",
 ]
 
 INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
 	"build_order",
 	"import_discipline",
+	"interface_conformance",
 )
 """The checks that run, named so a report can be read without parsing prose."""
 
@@ -328,6 +333,135 @@ def check_build_order(
 	return tuple(findings)
 
 
+def public_surface(paths: Sequence[str], sources: dict[str, str]) -> tuple[InterfaceMember, ...]:
+	"""The public names a module's files actually expose, read from their ASTs (FR-112).
+
+	Python's public surface is the top-level names that do not begin with an underscore:
+	module-level ``def`` and ``class`` statements, and module-level assignments. Nested
+	definitions are not part of the module's surface — a method is reached through its
+	class, and counting it here would report a difference the moment a producer added a
+	private helper method.
+
+	A file that does not parse contributes nothing, which is the same choice FR-113's
+	analysis makes and for the same reason: judging syntax is the producer's language
+	toolchain's job, not integration's.
+	"""
+	found: list[InterfaceMember] = []
+	for path in paths:
+		if not path.endswith(_SOURCE_SUFFIXES):
+			continue
+		text = sources.get(path)
+		if text is None:
+			continue
+		try:
+			tree = ast.parse(text)
+		except SyntaxError:
+			continue
+		for node in tree.body:
+			if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+				if node.name.startswith("_"):
+					continue
+				found.append(
+					InterfaceMember(
+						name=node.name,
+						kind=InterfaceMemberKind.FUNCTION,
+						parameters=tuple(
+							arg.arg
+							for arg in (
+								*node.args.posonlyargs,
+								*node.args.args,
+								*node.args.kwonlyargs,
+							)
+						),
+					)
+				)
+			elif isinstance(node, ast.ClassDef):
+				if not node.name.startswith("_"):
+					found.append(InterfaceMember(name=node.name, kind=InterfaceMemberKind.CLASS))
+			elif isinstance(node, ast.Assign | ast.AnnAssign):
+				for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+					if isinstance(target, ast.Name) and not target.id.startswith("_"):
+						found.append(
+							InterfaceMember(name=target.id, kind=InterfaceMemberKind.CONSTANT)
+						)
+	return tuple(found)
+
+
+def check_interface_conformance(
+	ownership: dict[str, tuple[str, ...]],
+	*,
+	declared: dict[str, tuple[InterfaceMember, ...]],
+	sources: dict[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""Diff each module's built public surface against the surface it declared (FR-112).
+
+	Both directions, because FR-112 says the diff must be *empty* and an empty diff is
+	symmetric. A declared name absent from the build is a module that did not deliver
+	what it promised; a built name absent from the declaration is a module that widened
+	its surface, which is how a producer quietly adds a second way in. Reporting only the
+	first would let the second through, and the second is the one that matters for FR-090:
+	the declared surface is what dependents are permitted to reach for.
+
+	A module with no declared surface is not checked at all — there is nothing to diff —
+	and the caller reports it as uncovered. That is the honest answer while nothing in a
+	contract produces a machine-readable signature, and it is the difference between "the
+	diff was empty" and "there was nothing to diff".
+	"""
+	assert sources, "cannot check interface conformance with no sources"
+	findings: list[IntegrationFinding] = []
+	for module in sorted(ownership):
+		declaration = declared.get(module)
+		if not declaration:
+			continue
+		built = {member.name: member for member in public_surface(ownership[module], sources)}
+		wanted = {member.name: member for member in declaration}
+		for name in sorted(set(wanted) - set(built)):
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.MISSING_PUBLIC_NAME,
+					detail=(
+						f"{module} declared {name!r} on its surface and the build does not "
+						"expose it (FR-112)"
+					),
+					modules=(module,),
+					evidence=(f"{module}: {wanted[name].kind.value} {name}",),
+				)
+			)
+		for name in sorted(set(built) - set(wanted)):
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.UNDECLARED_PUBLIC_NAME,
+					detail=(
+						f"{module} exposes {name!r}, which its declared surface does not "
+						"contain, so no dependent may rely on it (FR-090, FR-112)"
+					),
+					modules=(module,),
+					evidence=(f"{module}: {built[name].kind.value} {name}",),
+				)
+			)
+		for name in sorted(set(wanted) & set(built)):
+			expected, actual = wanted[name], built[name]
+			if expected.kind is not InterfaceMemberKind.FUNCTION:
+				continue
+			if len(expected.parameters) != len(actual.parameters):
+				findings.append(
+					IntegrationFinding(
+						kind=IntegrationFindingKind.WRONG_ARITY,
+						detail=(
+							f"{module}.{name} was declared with "
+							f"{len(expected.parameters)} parameter(s) and built with "
+							f"{len(actual.parameters)} (FR-112)"
+						),
+						modules=(module,),
+						evidence=(
+							f"{module}: {name}({', '.join(expected.parameters)}) declared, "
+							f"({', '.join(actual.parameters)}) built",
+						),
+					)
+				)
+	return tuple(findings)
+
+
 def integrate(
 	plan: GoalPlan,
 	decomposition: Decomposition,
@@ -349,11 +483,22 @@ def integrate(
 		module.name: {d.name for d in (decomposition.module(i) for i in module.depends_on) if d}
 		for module in decomposition.modules
 	}
+	surfaces = {module.name: module.surface for module in decomposition.modules}
 	build_findings = check_build_order(decomposition, dispatches)
 	import_findings = (
 		check_imports(ownership, declared=declared, root=root, sources=sources) if ownership else ()
 	)
-	findings = (*build_findings, *import_findings)
+	# The surface check needs the *text*, not only the paths, so it reads once and the
+	# import check reuses what it read -- two passes over the same files would be two
+	# chances for them to disagree about what a file says.
+	text = sources if sources is not None else (_read(root, ownership) if root else {})
+	declared_surfaces = {name: surface for name, surface in surfaces.items() if surface}
+	conformance_findings = (
+		check_interface_conformance(ownership, declared=declared_surfaces, sources=text)
+		if ownership and declared_surfaces and text
+		else ()
+	)
+	findings = (*build_findings, *import_findings, *conformance_findings)
 
 	built = tuple(sorted(name for name, paths in ownership.items() if paths))
 	analysed = tuple(
@@ -365,6 +510,8 @@ def integrate(
 	)
 	unanalysed = tuple(name for name in built if name not in analysed)
 	unattributed = tuple(f"{path}" for path in orphans)
+	diffed = tuple(name for name in built if declared_surfaces.get(name))
+	undiffed = tuple(name for name in built if not declared_surfaces.get(name))
 
 	checks = (
 		IntegrationCheck(
@@ -395,6 +542,31 @@ def integrate(
 				"relative imports are not resolved, so a reach written as `from . import x` "
 				"is not seen",
 				"a dynamic import (`importlib.import_module`) is not seen",
+			),
+		),
+		IntegrationCheck(
+			name="interface_conformance",
+			passed=not conformance_findings,
+			detail=(
+				f"{len(diffed)} module(s) diffed against their declared surface; the diff is empty"
+				if diffed and not conformance_findings
+				else f"{len(conformance_findings)} difference(s) between a declared and a built surface"
+				if conformance_findings
+				else "no module declared a machine-readable surface, so nothing was diffed"
+			),
+			requirements=("FR-112",),
+			covered=tuple(
+				f"{name}: declared surface diffed against the built public names" for name in diffed
+			),
+			uncovered=(
+				*(
+					f"{name}: no declared surface, so the diff had nothing to compare"
+					for name in undiffed
+				),
+				"parameter *types* are not compared; a declared surface carries names and "
+				"arity because SoFact does not know the operator's language (ADR-0025)",
+				"a name's kind is not compared; a declared constant built as a function "
+				"reports only if its arity differs",
 			),
 		),
 	)

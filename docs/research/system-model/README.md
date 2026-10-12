@@ -3,6 +3,13 @@
 Snapshot: 2026-10-12. Scope: what a machine-readable system model has to be for
 FR-112 and FR-115 to become checkable, and what it must *not* be.
 
+**Outcome:** the proposal below was adopted for its interface half —
+[ADR-0027](../adr/0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md)
+implements `Module.surface` and the two-directional diff, which makes FR-112 checkable
+for any module that declares a surface. Nothing derives a surface yet, so the check runs
+and diffs nothing on a proposal. FR-115 is untouched: entities and relationships are a
+separate decision, as the last section says.
+
 ## The blocker, stated exactly
 
 P7 ships two checks and names three unimplemented requirements (ADR-0026). Two of the
