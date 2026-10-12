@@ -108,8 +108,8 @@ nothing could check is not a verified one). A run you capped with `--max-steps` 
 rather than failure and exits `0` unless a step it ran was refuted. `verify` remains the
 command that renders a verdict on demand (P6).
 
-`pi`, `dsh` and `claude` ship as specs. To point SoFact at another harness without
-editing `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
+`pi`, `dsh`, `claude` and `opencode` ship as specs. To point SoFact at another harness
+without editing `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
 
 ```json
 {
@@ -137,6 +137,29 @@ envelope is named explicitly when there is one — `dsh` events are
 its usage path begins `message`. Nothing is stripped implicitly, because a fixed
 envelope silently reads nothing on a harness that has no such block, and "no usage" is
 indistinguishable from "wrong path" once that happens.
+
+A record need not be a file the harness wrote. A harness whose history is a database
+declares `session_command` — an argv whose **stdout is the record** — and `record_format`
+(`jsonl` for one object per line, `json` for one document covering the session). SoFact
+runs the command and writes its stdout to a file in the session directory, so every reader
+sees a path and the seam stays single. `opencode` is wired this way:
+
+```json
+{
+	"argv": ["opencode", "run", "--standalone", "-s", "{session_id}", "--format", "json",
+	         "--model", "{model}"],
+	"record_format": "json",
+	"session_command": ["opencode", "session", "export", "--standalone", "{session_id}"],
+	"session_id_prefix": "ses_",
+	"completion_reason_path": ["info", "outcome"],
+	"completion_reason_value": "succeeded"
+}
+```
+
+Completion is read from the **record**, never the exit code: a measured opencode session
+whose provider refused the request still exported `outcome: "failed"` and exited `0`. A
+`session_command` that exits non-zero or prints nothing yields *no* record, because "the
+harness would not hand it over" and "the session left no record" are different facts.
 
 ## Model
 

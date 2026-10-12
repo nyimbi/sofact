@@ -118,9 +118,9 @@ reading Claude Code's record through omc's wrapper, which is `CLAUDE_SPEC` with 
 steps. **Recommendation: not a driver.** If omc's orchestration is wanted, it is a layer
 *above* SoFact's dispatch (or a `claude` spec variant), not a row in the harness table.
 
-## The decision this leaves
+## The decision this leaves — now made
 
-Two things are now separable, and ADR-0023 conflated them:
+Two things were separable, and ADR-0023 conflated them:
 
 1. **The record-source seam.** Whether `HarnessSpec` may name a *command* that yields a
    record, not only a glob over a directory. Three candidates want it: opencode
@@ -132,6 +132,17 @@ Two things are now separable, and ADR-0023 conflated them:
    here: it is the only one that accepts a caller-minted id, so a dispatch addresses its
    own record instead of guessing, and it exposes `outcome` as a structured completion
    signal. `omp` is a pi variant and adds nothing pi does not already give.
+
+**Both are decided in [ADR-0028](../../adr/0028-a-record-source-may-be-a-command-whose-stdout-is-the-record.md),
+which supersedes ADR-0023 decision 1.** `HarnessSpec` now carries `session_command` (an
+argv whose stdout is the record) and `record_format` (`jsonl` or `json`), the command's
+stdout is materialised into a file so the seam stays singular, and `opencode` is wired as
+a fourth spec. Two measured facts the spec depends on are recorded there: a failed session
+still exports and exits 0, so completion is read from the document; and `opencode run` has
+no flag that narrows the tool set, so the sandbox probe cannot be built for it.
+
+`omp` is **not** wired. Its record is pi's shape and it adds nothing pi does not give, so
+the private-directory-plus-newest lookup it would need has no second customer yet.
 
 ## Sources
 

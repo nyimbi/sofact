@@ -1,6 +1,8 @@
 # 23. A session record is addressed by a path, and that bounds the producer set
 
-* Status: Accepted
+* Status: Accepted (decision 1 superseded by
+  [ADR-0028](0028-a-record-source-may-be-a-command-whose-stdout-is-the-record.md);
+  decisions 2-4 stand)
 * Date: 2026-10-12
 * Deciders: operator
 * Related: [ADR-0012](0012-the-harness-table-is-data-not-code.md),
