@@ -17,7 +17,9 @@ from sofact.git import (
 	BRANCH_PREFIX,
 	GitUnavailableError,
 	ensure_module_branch,
+	ensure_module_worktree,
 	git_available,
+	integrate_worktree,
 	seal_branch,
 )
 
@@ -399,3 +401,164 @@ async def test_excluded_paths_are_not_committed(tmp_path: Path) -> None:
 	tracked = await run_git(workspace, "ls-files")
 	assert "module.py" in tracked
 	assert "sessions/transcript.json" not in tracked, "the factory committed its own bookkeeping"
+
+
+# --------------------------------------------------------------------------- #
+# FR-141: worktree per module
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_worktree_gives_the_step_its_own_directory(tmp_path: Path) -> None:
+	"""The whole point: two branches of one repository share one working tree."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+
+	checkout = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+
+	assert checkout.worktree is not None, "an isolated step must name where it ran"
+	assert Path(checkout.worktree).is_dir()
+	assert Path(checkout.worktree).resolve() != workspace.resolve()
+	assert checkout.branch == f"{BRANCH_PREFIX}ledger-core"
+
+
+async def test_two_isolated_steps_cannot_see_each_others_files(tmp_path: Path) -> None:
+	"""Measured, because this is the property a branch alone does *not* have.
+
+	The sibling branch test above pins the opposite result for branches: each module's
+	branch contains every earlier module's files. Here each step's *directory* holds only
+	its own, which is what FR-141 asks for and what makes a concurrent wave safe.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	left = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+	right = await ensure_module_worktree(workspace, 1, "operation", module="reporting")
+	assert left.worktree is not None and right.worktree is not None
+
+	(Path(left.worktree) / "core.py").write_text("# core\n", encoding="utf-8")
+	(Path(right.worktree) / "report.py").write_text("# report\n", encoding="utf-8")
+
+	assert not (Path(left.worktree) / "report.py").exists(), (
+		"a sibling step's file appeared in this step's worktree, so the wave is not isolated"
+	)
+	assert not (Path(right.worktree) / "core.py").exists()
+	assert not (workspace / "core.py").exists(), (
+		"an isolated session's file reached the shared workspace before it was integrated"
+	)
+
+
+async def test_re_isolating_the_same_step_reuses_its_worktree(tmp_path: Path) -> None:
+	"""FR-099: a retry must not discard the worktree it is retrying."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	first = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+	assert first.worktree is not None
+	(Path(first.worktree) / "core.py").write_text("# core\n", encoding="utf-8")
+
+	second = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+
+	assert second.worktree == first.worktree
+	assert (Path(second.worktree or "") / "core.py").exists(), "the retry discarded the work"
+
+
+async def test_a_step_no_module_owns_gets_a_branch_but_no_worktree(tmp_path: Path) -> None:
+	"""A worktree is per *module*, and a bootstrap step has none to be per.
+
+	Handing it one would be worse than refusing: two module-less steps of a wave share
+	the fallback branch, so they would share one directory and collide exactly as two
+	branches of one working tree do.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+
+	checkout = await ensure_module_worktree(workspace, 0, "bootstrap")
+
+	assert checkout.module is None
+	assert checkout.worktree is None, "no module means no worktree to be per"
+	assert checkout.branch == f"{BRANCH_PREFIX}000-bootstrap", "the branch is still established"
+
+
+async def test_integrating_a_worktree_moves_its_work_onto_the_line(tmp_path: Path) -> None:
+	"""A worktree that is never merged is a place work goes to disappear."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+	assert checkout.worktree is not None
+	(Path(checkout.worktree) / "core.py").write_text("# core\n", encoding="utf-8")
+	sealed = await seal_branch(checkout, Path(checkout.worktree), note="core work")
+
+	merged = await integrate_worktree(workspace, sealed, note="integrate ledger-core")
+
+	assert merged.integrated_commit is not None
+	assert merged.merge_conflict is False
+	assert merged.worktree == checkout.worktree, (
+		"the checkout still records where the session ran; integrated_commit says the work landed"
+	)
+	assert not Path(checkout.worktree).exists()
+	assert (workspace / "core.py").exists(), "the work did not reach the integration line"
+
+
+async def test_a_later_step_branches_from_the_integrated_line(tmp_path: Path) -> None:
+	"""The integration line is what the *next* wave checks out, so it must advance."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	first = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+	assert first.worktree is not None
+	(Path(first.worktree) / "core.py").write_text("# core\n", encoding="utf-8")
+	sealed = await seal_branch(first, Path(first.worktree), note="core work")
+	await integrate_worktree(workspace, sealed, note="integrate ledger-core")
+
+	second = await ensure_module_worktree(workspace, 1, "operation", module="reporting")
+
+	assert second.worktree is not None
+	assert (Path(second.worktree) / "core.py").exists(), (
+		"the second wave's worktree lacks the first wave's work, so a dependent is building "
+		"on a tree its dependency never touched"
+	)
+
+
+async def test_a_conflicting_merge_is_recorded_rather_than_raised(tmp_path: Path) -> None:
+	"""Two steps that touched one file is a scheduling result, not a crash.
+
+	The merge is aborted, so the integration line stays a tree a human can read instead
+	of one holding conflict markers no oracle can parse -- and the branch survives as a
+	ref, so the work is recoverable.
+	"""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	base = await ensure_module_worktree(workspace, 0, "operation", module="ledger-core")
+	assert base.worktree is not None
+	(Path(base.worktree) / "shared.py").write_text("v = 1\n", encoding="utf-8")
+	await integrate_worktree(
+		workspace,
+		await seal_branch(base, Path(base.worktree), note="base"),
+		note="integrate base",
+	)
+
+	left = await ensure_module_worktree(workspace, 1, "operation", module="reporting")
+	right = await ensure_module_worktree(workspace, 2, "operation", module="metrics")
+	assert left.worktree is not None and right.worktree is not None
+	(Path(left.worktree) / "shared.py").write_text("v = 2\n", encoding="utf-8")
+	(Path(right.worktree) / "shared.py").write_text("v = 3\n", encoding="utf-8")
+	sealed_left = await seal_branch(left, Path(left.worktree), note="left")
+	sealed_right = await seal_branch(right, Path(right.worktree), note="right")
+
+	await integrate_worktree(workspace, sealed_left, note="integrate left")
+	conflicted = await integrate_worktree(workspace, sealed_right, note="integrate right")
+
+	assert conflicted.merge_conflict is True
+	assert conflicted.integrated_commit is None
+	assert not Path(right.worktree).exists(), "an aborted merge still removes its worktree"
+	assert (workspace / "shared.py").read_text(encoding="utf-8") == "v = 2\n", (
+		"the abort left the integration line holding a half-applied merge"
+	)
+	assert "<<<<<<<" not in (workspace / "shared.py").read_text(encoding="utf-8")
+
+
+async def test_integrating_a_checkout_with_no_worktree_is_refused(tmp_path: Path) -> None:
+	"""A shared-tree checkout has nothing to merge, and inventing one would be a lie."""
+	workspace = tmp_path / "workspace"
+	workspace.mkdir()
+	checkout = await ensure_module_branch(workspace, 0, "bootstrap")
+
+	with pytest.raises(AssertionError, match="only a worktree checkout can be integrated"):
+		await integrate_worktree(workspace, checkout, note="nothing to do")

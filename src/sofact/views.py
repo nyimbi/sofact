@@ -2087,6 +2087,45 @@ class ModuleCheckout(View):
 	created_repository: bool = False
 	created_branch: bool = False
 	base_branch: str | None = None
+	worktree: str | None = None
+	"""The directory this step's session ran in, when it was given its own (FR-141).
+
+	``None`` means the session ran in the shared workspace on its branch, which is the
+	sequential path: with one writer there is nothing to isolate it from. A path means the
+	session had a checkout of its own, so a sibling step's files were not present in it and
+	this step's files were not present in the sibling's.
+
+	The path stays after the worktree has been integrated and removed, because it is a
+	record of *where the session ran* rather than of what exists now — the same way
+	``workspace`` names a directory rather than asserting one is there. Whether the
+	directory is still live is answered by ``integrated_commit``, not by this field.
+
+	This is **containment, not confinement**. Measured (ADR-0023), neither ``pi`` nor
+	``claude`` confines its child to its working directory, so a producer that wanders
+	escapes a worktree exactly as easily as it escapes a shared tree. What a worktree buys
+	is that a session that stays put cannot collide with its sibling — and that is the
+	whole of what FR-141 can be without a container runtime (ADR-0005).
+	"""
+	integrated_commit: str | None = None
+	"""The commit the integration line reached when this worktree was merged back.
+
+	Set only by :func:`~sofact.git.integrate_worktree`. ``None`` on a worktree checkout
+	means no merge has been recorded, which is the normal state while the session is
+	running and the *abnormal* state afterwards — a worktree that was never merged is work
+	the next wave cannot see, and P7's build-order check reads this field to say so. A
+	session that changed nothing also leaves it ``None``, because there was nothing to
+	merge; ``sealed_commit`` and ``head_commit`` both being ``None`` is what tells that
+	case apart from a merge that never happened.
+	"""
+	merge_conflict: bool = False
+	"""Whether the merge back onto the integration line conflicted and was aborted.
+
+	A conflict is a recorded outcome, not an error: two concurrent steps that touched one
+	file are a real scheduling result, and reporting it as a crash would lose the
+	distinction between a factory that cannot merge and two modules that genuinely
+	overlap. The merge is aborted rather than left half-applied, so the workspace stays a
+	tree a human can reason about.
+	"""
 	sealed_commit: str | None = None
 	"""The commit SoFact created to seal this step's work, or ``None`` if there was none.
 
@@ -2132,6 +2171,21 @@ class ModuleCheckout(View):
 			raise ValueError(
 				"a seal names a commit exactly when it names paths: "
 				f"commit={self.sealed_commit!r} paths={self.sealed_paths}"
+			)
+		if self.integrated_commit is not None and self.worktree is None:
+			raise ValueError(
+				"only a worktree checkout has a merge to report: "
+				f"worktree={self.worktree!r} integrated={self.integrated_commit!r}"
+			)
+		if self.merge_conflict and self.integrated_commit is not None:
+			raise ValueError(
+				"an aborted merge does not leave the integration line at a commit: "
+				f"integrated={self.integrated_commit!r}"
+			)
+		if self.integrated_commit is not None and self.head_commit != self.integrated_commit:
+			raise ValueError(
+				"a merge that succeeded leaves the integration line at the branch tip: "
+				f"head={self.head_commit!r} integrated={self.integrated_commit!r}"
 			)
 		return self
 

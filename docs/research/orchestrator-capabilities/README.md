@@ -71,7 +71,7 @@ inferred from the presence of a similarly-named type. The disposition is one of:
 
 | Capability | Vendor evidence | SoFact status | Disposition |
 | --- | --- | --- | --- |
-| Producer isolation by enforced boundary | tmux + workspace trust; Paperclip workspaces & runtime | `CLAUDE_CONFIG_DIR`, `OPENCODE_DB`+`OPENCODE_TEST_HOME` as env vars; `--standalone` measured to matter (ADR-0028). No worktree | **Gap — build** (FR-141 + FR-059). See §3.1: the deferral's condition has fired |
+| Producer isolation by enforced boundary | tmux + workspace trust; Paperclip workspaces & runtime | `CLAUDE_CONFIG_DIR`, `OPENCODE_DB`+`OPENCODE_TEST_HOME` as env vars; `--standalone` measured to matter (ADR-0028); a **worktree per module** with the main tree holding the integration line (FR-141, ADR-0033) | **Half closed 2026-10-12** — FR-141 is built and `--concurrent` is an operator flag; FR-059 is not. A worktree is containment, not confinement: the child is still not confined, and `sandboxable` reads absent for both harnesses |
 | "An isolation variable is not a boundary" | stated outright: `OPENRIG_HOME` alone does not isolate provider config | The `store_isolated` row (FR-019) now runs the same goal twice with `HOME` relocated and the spec's containment variables applied in one arm, withheld in the other | **Closed 2026-10-12** — see §3.3. The store is contained and measured; the *child* is not, and `sandboxable` still reads absent for both harnesses |
 | Imported-bundle SHA-256 integrity | `RigBundle`, `bundle-audit.jsonl` | No import mechanism at all, so nothing to protect. The archive discipline for *sources* is a human process (`docs/sources/archive/`, global rule) | **Not applicable** — and if a bundle import is ever built, this row becomes a build item, not a nice-to-have |
 | Multi-organization isolation | "Company-scoped access checks keep each organization's work, agents, and activity separate" | One goal per state directory; `current_goal()` returns the most recent (`service.py:297`) | **Not applicable now** — S27 says the same. It becomes relevant at FR-124 (per-deployment topology ceilings), which is itself unbuilt |
@@ -94,21 +94,31 @@ This is the part of the note worth acting on. A deferral is a claim that the tre
 correct *for now*; when the trigger it named is met, the claim is false and nothing
 fails to tell you.
 
-### 3.1 FR-141 worktree-per-module
+### 3.1 FR-141 worktree-per-module — **closed 2026-10-12**
+
+> **Built.** [ADR-0033](../../adr/0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md)
+> supersedes ADR-0024's deferral. `ensure_module_worktree` creates the module's branch
+> *in* the worktree and leaves the main tree on the integration line, `_integrate_wave`
+> merges each isolated step back before the next wave is judged, and `--concurrent` is
+> now reachable from the CLI — which was the second half of the condition this section
+> measured. The measurement below is kept because it is what made the closure
+> decidable, and because the last paragraph's point stands as a method: a requirement
+> deferred on a condition its own author wrote has to be re-read against that condition.
 
 ADR-0024 defers worktrees, and the spec's own table states the condition: FR-141 is
 deferred "until a wave runs concurrently or a plan spans more than one module"
 (`product-spec.md:1240`). ADR-0024 §3 states it again as "whichever comes first".
-Measured:
+Measured (and true **as of the measurement**, before the build — the flags
+and greps below are what the tree looked like then):
 
-- **The multi-module half has fired.** A plan spanning more than one module is not
+- **The multi-module half had fired.** A plan spanning more than one module is not
   merely possible, it is the case `_module_for` was written for: it resolves a step's
   branch from its clauses, and its own docstring names "a step whose clauses span two
   modules" as a real input (`service.py:904`). Any decomposition with two modules
   produces one. `grep -rn worktree src/` returns four hits and every one is a comment
   saying it is deferred, including `harness.py:732` and `harness.py:1685`, where the
   *probe* tells the operator that real confinement is elsewhere.
-- **The concurrent half has fired at the API and not at the surface.**
+- **The concurrent half had fired at the API and not at the surface.**
   `dispatch_plan(concurrent=True)` exists and `asyncio.gather`s a wave
   (`service.py:1038`), but **the CLI has no flag for it** — `grep -n concurrent
   src/sofact/cli.py` returns one hit and it is a print of the word "concurrent" for a
@@ -198,10 +208,12 @@ Dependency-ordered, largest lever first:
    is not a boundary" is measured rather than assumed. It narrows §3.1's hazard without
    closing it: a contained store is not a confined child, and `sandboxable` still reads
    absent.
-4. **FR-141 worktree per module** (§3.1) — cheap to *decide* (the deferral's condition
-   has fired and the tree should stop claiming otherwise) and moderate to build. It is
-   not urgent while `concurrent` is unreachable from the CLI, and building it is also
-   what would let `concurrent` become an operator flag.
+4. ~~**FR-141 worktree per module** (§3.1)~~ — **done 2026-10-12** (ADR-0033). The
+   worktree is per module, the main tree holds the integration line, and `--concurrent`
+   is an operator flag. A wave is isolated only when every step in it is owned by a
+   distinct module, because both failure modes are directory collisions: a module-less
+   step has no worktree to be given, and two steps of one module share a branch. This is
+   also what unblocked item 5 — a rollback is only safe once the tree is isolated.
 5. **Ledger rollback to a chosen entry** (§2.1) — an operator verb over the fold;
    pairs with FR-094 and is what Paperclip's "rollback" is. Small, and only safe once
    the tree is isolated (item 4).
@@ -232,4 +244,5 @@ listed so the gap is recorded rather than rediscovered.
 - `docs/research/neighbouring-orchestrators/README.md` — the ledger defect and §4's differentiation table
 - `docs/research/roadmap-gap/README.md` — the FR audit this note's dispositions are drawn from
 - `docs/adr/0024-branch-per-step-is-built-worktrees-are-deferred.md` — the deferral §3.1 fires
+- `docs/adr/0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md` — the record that closed §3.1
 - `docs/spec/product-spec.md` — FR-059, FR-060, FR-070, FR-094, FR-117, FR-120, FR-140, FR-141, FR-148, FR-165, NFR-024

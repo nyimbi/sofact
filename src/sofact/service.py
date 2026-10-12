@@ -31,7 +31,13 @@ from sofact.elicitation import (
 )
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner, digest_tree
-from sofact.git import ensure_module_branch, seal_branch
+from sofact.git import (
+	WORKTREE_DIRNAME,
+	ensure_module_branch,
+	ensure_module_worktree,
+	integrate_worktree,
+	seal_branch,
+)
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -1162,13 +1168,21 @@ class FactoryService:
 		home does nest them, and a ``git add --all`` would then commit the factory's
 		ledger into the module being built. Sealing excludes them instead, because
 		SoFact's account of the run is not the run's product.
+
+		``WORKTREE_DIRNAME`` is excluded unconditionally: a concurrent wave's sibling
+		checkouts live inside the workspace (FR-141), and one module's seal must not
+		commit another module's directory. Measured on this tree: with four worktrees
+		live and the exclusion absent, a step's seal reported 600 paths, and those paths
+		are what P7 attributes files *from* — so every module would have appeared to
+		contain every other module's code.
 		"""
 		home = self.home.resolve()
 		resolved = workspace.resolve()
+		unowned = (WORKTREE_DIRNAME,)
 		if resolved != home and home not in resolved.parents:
-			return ()
-		unowned = (LEDGER_FILENAME, LOCK_FILENAME, "sessions")
-		return tuple(name for name in unowned if (resolved / name).exists())
+			return tuple(name for name in unowned if (resolved / name).exists())
+		nested = (*unowned, LEDGER_FILENAME, LOCK_FILENAME, "sessions")
+		return tuple(name for name in nested if (resolved / name).exists())
 
 	async def _module_for(self, plan: GoalPlan, clause_ids: tuple[str, ...]) -> str | None:
 		"""The name of the module a step's clauses belong to, when exactly one owns them.
@@ -1201,6 +1215,7 @@ class FactoryService:
 		tools: str | None = None,
 		session_id: str | None = None,
 		fresh: bool = False,
+		isolate: bool = False,
 	) -> DispatchRecord:
 		"""Run one plan step as one out-of-process session.
 
@@ -1211,6 +1226,13 @@ class FactoryService:
 
 		``fresh`` re-runs the oracles even when the workspace and the oracle set are
 		unchanged since a previous verdict (FR-006); the default reuses instead.
+
+		``isolate`` gives the session its own working tree instead of the shared one
+		(FR-141). It is off by default because isolation is not free: the session's files
+		are not in the shared workspace until the worktree is integrated, so a caller that
+		asked for it must integrate. :meth:`dispatch_plan` does, for the waves it runs
+		concurrently; a direct caller of this method that passes ``isolate=True`` gets a
+		record whose ``checkout.worktree`` is set and whose ``integrated_commit`` is not.
 		"""
 		plan = await self.plan_by_id(plan_id)
 		step = plan.step_by_id(step_id)
@@ -1226,12 +1248,23 @@ class FactoryService:
 		# step, because FR-136 forbids one session per module: a module's work spans
 		# several steps, and those steps share its branch. A step no single module owns
 		# (bootstrap; a step spanning two) falls back to its own ordinal and kind.
-		checkout = await ensure_module_branch(
-			adapter.workspace,
-			step.ordinal,
-			step.kind.value,
-			module=await self._module_for(plan, step.clause_ids),
+		#
+		# FR-141: under ``isolate`` the branch gets a working tree of its own, and the
+		# adapter's workspace moves into it, so the session cannot see or overwrite a
+		# sibling's files. Everything downstream -- the seal, the session directory, the
+		# oracles -- then works on the worktree without knowing the difference.
+		module = await self._module_for(plan, step.clause_ids)
+		checkout = (
+			await ensure_module_worktree(
+				adapter.workspace, step.ordinal, step.kind.value, module=module
+			)
+			if isolate
+			else await ensure_module_branch(
+				adapter.workspace, step.ordinal, step.kind.value, module=module
+			)
 		)
+		if checkout.worktree is not None:
+			adapter = adapter.variant(workspace=Path(checkout.worktree))
 		record = await adapter.dispatch(
 			step,
 			plan,
@@ -1292,18 +1325,30 @@ class FactoryService:
 		A step may start only once every step it depends on has *completed* **and** not been
 		refuted by a verdict: FR-142 says a dependent must not start on an "unverified"
 		dependency, and a completed session is checked for exactly that reason. A wave also
-		ends the run when a step did not complete. ``concurrent`` is
-		off by default and is not a performance setting: two sessions editing one workspace
-		is a merge conflict, and whether a wave may run together is a question about
-		worktrees (FR-141) that the operator owns, not the scheduler. ``fresh`` is FR-006's
-		bypass, threaded to every step's check.
+		ends the run when a step did not complete. ``fresh`` is FR-006's bypass, threaded
+		to every step's check.
+
+		``concurrent`` runs a wave's steps at once, and it is **only safe because each gets
+		a worktree of its own** (FR-141): two sessions in one working tree are a merge
+		conflict waiting to happen, not a speedup. Each isolated step's branch is merged
+		back onto the integration line before the wave is judged, because a dependent must
+		build on what its dependency produced — a wave whose work sat in unmerged worktrees
+		would leave the next wave checking out a tree missing everything it depends on.
+
+		A wave is isolated only when every step in it is owned by a *distinct* module
+		(:meth:`wave_is_isolatable`), because a worktree is per module. A wave that fails
+		that runs **sequentially** — the one place ``concurrent`` is refused rather than
+		honoured, and it is refused because the alternative is two sessions in one
+		directory with nothing separating them.
 		"""
 		assert max_steps is None or max_steps > 0, "max_steps must be positive"
 		plan = await self.plan_by_id(plan_id)
+		workdir = Path(workspace) if workspace is not None else (self.home / "workspace")
 		produced: list[DispatchRecord] = []
 		for wave in plan.waves():
 			if max_steps is not None and len(produced) >= max_steps:
 				break
+			isolate = concurrent and len(wave) > 1 and await self.wave_is_isolatable(plan, wave)
 			if concurrent and len(wave) > 1:
 				records = list(
 					await asyncio.gather(
@@ -1316,11 +1361,14 @@ class FactoryService:
 								model=model,
 								tools=tools,
 								fresh=fresh,
+								isolate=isolate,
 							)
 							for step in wave
 						),
 					),
 				)
+				if isolate:
+					records = await self._integrate_wave(workdir, records)
 			else:
 				records = [
 					await self.dispatch_step(
@@ -1344,6 +1392,74 @@ class FactoryService:
 			if max_steps is not None and len(produced) >= max_steps:
 				break
 		return tuple(produced)
+
+	async def wave_is_isolatable(self, plan: GoalPlan, wave: tuple[GoalStep, ...]) -> bool:
+		"""Whether every step of a concurrent wave can be given a worktree of its own.
+
+		Two conditions, and each is a directory collision rather than a preference.
+
+		A step no module owns has no worktree to be given: :func:`~sofact.git.ensure_module_worktree`
+		hands it the shared-tree branch, because a worktree is *per module* (FR-141) and
+		there is no module to name one after. Two such steps would both run in the shared
+		tree, which is the collision ``--concurrent`` exists to avoid. (Their *branches*
+		would differ — the fallback name carries the step's ordinal — but no worktree is
+		created for either, so the branches are not what collides.)
+
+		Two steps of the **same** module would be given the same branch and therefore the
+		same directory: FR-136 puts a module's work on one branch across several steps,
+		which is right sequentially and is exactly one directory too few concurrently.
+
+		The check is made here rather than inside the worktree helper because the answer
+		decides the *wave's* schedule, not one step's checkout: one unisolatable step
+		means the whole wave runs sequentially, which is the safe reading.
+		"""
+		assert wave, "an empty wave has nothing to isolate"
+		modules = [await self._module_for(plan, step.clause_ids) for step in wave]
+		return all(module is not None for module in modules) and len(set(modules)) == len(modules)
+
+	async def _integrate_wave(
+		self, workspace: Path, records: list[DispatchRecord]
+	) -> list[DispatchRecord]:
+		"""Merge each isolated step's branch back onto the integration line, and record it.
+
+		Run in the wave's own order rather than as the sessions finish, because the merge
+		order is what the integration line's history means and a nondeterministic order
+		would make two runs of one plan differ in a way nothing explains.
+
+		The merge runs after every session has ended, so the seals are all in place; a
+		merge of a branch whose seal had not happened yet would integrate a tree the
+		producer had not finished. It runs in the **shared** workspace, which is the
+		repository the worktrees belong to — a merge issued from inside a worktree would
+		move that worktree's branch instead of the integration line. A conflicted merge is
+		recorded on the dispatch rather than raised, because the branch survives as a ref
+		and the next wave's build order is what turns it into a finding.
+		"""
+		integrated: list[DispatchRecord] = []
+		for record in records:
+			checkout = record.checkout
+			if checkout is None or checkout.worktree is None:
+				# A step no module owns has no worktree to integrate: it ran in the shared
+				# tree, so its work is already on the line. The scheduler keeps such steps
+				# out of isolated waves, and this branch is what makes the loop total.
+				integrated.append(record)
+				continue
+			merged = await integrate_worktree(
+				workspace,
+				checkout,
+				note=f"integrate {checkout.branch} ({record.outcome.value})",
+			)
+			updated = record.model_copy(update={"checkout": merged})
+			# The merge is a fact about this dispatch that the first write could not know,
+			# so it goes in as its own row rather than by editing the one already written:
+			# the ledger is append-only (FR-003), and a rewritten dispatch row would break
+			# the chain that makes the log tamper-evident. The fold takes the latest row
+			# per dispatch id, so the merge is what a reader of the state sees.
+			self._commit(
+				LedgerKind.STEP_DISPATCHED,
+				{"dispatch": updated.model_dump(mode="json")},
+			)
+			integrated.append(updated)
+		return integrated
 
 	# ------------------------------------------------- FR-101: the repair loop
 

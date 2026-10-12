@@ -25,6 +25,7 @@ import hashlib
 from pathlib import Path
 from typing import Final
 
+from sofact.git import WORKTREE_DIRNAME
 from sofact.views import Clause, Contract, Evidence, EvidenceKind, content_hash
 
 __all__ = [
@@ -55,6 +56,7 @@ DEFAULT_DIGEST_EXCLUDES: Final = (
 	"build",
 	"dist",
 	"*.egg-info",
+	WORKTREE_DIRNAME,
 )
 """Names a digest of the artefact ignores, at any depth.
 
@@ -63,6 +65,16 @@ change under test: a producer that runs its own test suite will populate ``__pyc
 as a side effect, and a digest that moved because of it would invalidate a verdict the
 oracles would have reproduced exactly. Glob patterns (``*.egg-info``) match one path
 component; the rest match whole component names.
+
+``.git`` is here for that reason and one stronger one: a session's work is *sealed* into
+a commit when it ends (FR-100), so the repository's own bytes change after every session
+whether or not the artefact did. Digesting them would make FR-006's cache key move on
+every dispatch and no verdict would ever be reused.
+
+``WORKTREE_DIRNAME`` is here because a concurrent wave's sibling checkouts live inside
+the workspace (FR-141): each holds a *copy* of the modules built so far, so folding them
+in would key a verdict to another step's files and make two sessions of one wave look
+like one change.
 """
 
 

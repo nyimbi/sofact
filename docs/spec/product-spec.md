@@ -848,7 +848,16 @@ Budgets, pause, resume, termination, and retry are SoFact's. Gates are the human
 
 **FR-141** Concurrent sessions must be isolated by **git worktree per module**, not
 by branch alone — branches share a working tree, so branch-per-module is not
-sufficient isolation for parallel dispatch (FR-100).
+sufficient isolation for parallel dispatch (FR-100). The main working tree holds the
+**integration line** and the module's branch lives only in its worktree, because git
+refuses a branch checked out twice; each isolated step's branch is merged back onto
+that line before the next wave is dispatched, so a dependent builds on what its
+dependency produced. A wave is isolated only when every step in it is owned by a
+*distinct* module: a step no module owns has no worktree to be given, and two steps of
+one module would share a branch and therefore one directory. Either case runs the wave
+sequentially rather than partially isolated. A worktree is **containment, not
+confinement** — it stops two sessions at once from seeing each other's files and does
+not stop one that wanders (ADR-0023, ADR-0005). Built 2026-10-12; ADR-0033.
 
 **FR-142** Dispatch must follow the **topological build order** (FR-092) as
 **waves**: modules whose dependencies are *verified* — not merely built — may run
@@ -1216,7 +1225,8 @@ distribution surface, never the architecture.**
    is no engineering reason to reach in-process.
 3. **It is a feature, not a product.** Every mechanism this spec treats as
    differentiated already exists as a free MIT plugin: evidence-gated completion
-   (≥5 independent implementations), worktree isolation, budget caps, wave
+   (≥5 independent implementations), worktree isolation (built here 2026-10-12,
+   ADR-0033), budget caps, wave
    scheduling, LLM-as-verifier (≥7), and meta-harness orchestration across
    harnesses including `pi` ([S22]). The marketplaces are free and the one paid
    channel is plugin licensing. Meanwhile **`elicit` occurs zero times across 4,609
@@ -1255,7 +1265,7 @@ ones are thin wrappers around tools SoFact already drives.
 | `dsh-completion-guard`, `beforedone`, `stalegreen`, `dsh-evidence-gate`, `reliability-governor` | Fails deletion: deleting it changes SoFact's completion verdict | **Refuse as oracle.** Admissible only as an optional *producer-side hygiene* measure, off the trust path, with FR-107 measuring whether SoFact's external verification catches what the guard missed. |
 | `dsh-plugin-agent-budget`, `dsh-budget` | Fails deletion: budget is SoFact's authority (FR-140) | **Refuse as authority.** Own budget accounting stays in the control plane. |
 | `dsh-plugin-kit` (shared approval/session-event gates) | Fails deletion: it *is* the gate | **Refuse.** Gates are the human's (FR-140); a shared plugin makes them a dependency. |
-| `dsh-git-worktree` (FR-141) | Passes deletion | **Admissible but not worthwhile**: it is a thin wrapper over `git worktree add`, and SoFact drives only `init`, `switch`, `config`, `add`, `commit` and `status` for FR-100's branch-per-step, which seals each step's work as a commit on its branch — FR-141 is deferred until a wave runs concurrently or a plan spans more than one module ([ADR-0024](../adr/0024-branch-per-step-is-built-worktrees-are-deferred.md)). Vetting plus pinning plus licence review costs more than the code either way. Compose only if FR-141 grows beyond worktree lifecycle. |
+| `dsh-git-worktree` (FR-141) | Passes deletion | **Refuse; built here instead.** It is a thin wrapper over `git worktree add`, and FR-141 is no longer deferred: SoFact drives `init`, `switch`, `config`, `add`, `commit`, `status`, `worktree add`/`list`/`remove`, `merge` and `merge --abort` ([ADR-0033](../adr/0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md)). What the wrapper would have to supply that SoFact does not — the integration line, the per-wave merge order, the conflict record — is the part that makes the feature safe, and it is the part a wrapper cannot see. Vetting plus pinning plus licence review costs more than the code either way. |
 | `030611/dsh-telemetry-redactor` | Passes deletion, but is superseded by config | **Refuse in favour of configuration** (FR-156). See below. |
 | `dsh-research-container`, egress plugins (FR-019/FR-152) | Fails: an in-process guard cannot be the boundary of the process it guards | **Refuse as boundary.** Egress confinement belongs to the container/network layer (D9). |
 | `LongHorizon-Harness` (T4 split producer/evaluator) | Fails: it is an outer loop, i.e. §8's subject | **Refuse; study as prior art.** |

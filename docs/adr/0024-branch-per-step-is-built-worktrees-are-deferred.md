@@ -9,8 +9,14 @@
 * Superseded by: [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md),
   for the branch's *name* only. This record built branch-per-**step**, because a step's
   ordinal and kind were all the plan could supply before a module identity existed; the
-  branch is now named for the module and several steps share it. The deferral of FR-141
-  recorded here stands.
+  branch is now named for the module and several steps share it.
+* Superseded by: [ADR-0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md),
+  for the deferral of FR-141 (decision 3) and for the consequence that parallel dispatch
+  stays off by default. The deferral's condition — "a wave runs concurrently or a plan
+  spans more than one module, whichever comes first" — was measured to have fired, and
+  the capability map recorded that this tree was claiming a trigger it had met. Everything
+  else here stands: the branch, the seal that makes it a boundary, and decision 4 (a
+  worktree is containment, not confinement).
 * Related: [ADR-0005](0005-no-container-runtime.md),
   [ADR-0006](0006-the-verifier-cannot-reach-the-executor.md),
   [ADR-0023](0023-a-record-is-addressed-by-a-path.md)

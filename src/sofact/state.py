@@ -62,7 +62,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	specification_gates: list[SpecificationGate] = []
 	decompositions: list[Decomposition] = []
 	gates: list[DecompositionGate] = []
-	dispatches: list[DispatchRecord] = []
+	dispatches: dict[str, DispatchRecord] = {}
 	profiles: list[HarnessProfile] = []
 	integrity: list[IntegrityCheck] = []
 	integrations: list[IntegrationReport] = []
@@ -112,7 +112,15 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 			case LedgerKind.CAPABILITY_PROBED:
 				profiles.append(HarnessProfile.model_validate(payload["profile"]))
 			case LedgerKind.STEP_DISPATCHED:
-				dispatches.append(DispatchRecord.model_validate(payload["dispatch"]))
+				# Keyed rather than appended, because a dispatch can be written more than once
+				# and the later row is the more complete one: FR-141's wave integration merges
+				# a worktree back after the session has ended, and the merge is a fact the
+				# first write could not know. The log stays append-only (FR-003) -- this is
+				# the fold's rule for reading it, not a licence to rewrite a row. Position
+				# is the dispatch's first appearance, so log order still means when it
+				# started rather than when it was last amended.
+				dispatched = DispatchRecord.model_validate(payload["dispatch"])
+				dispatches[dispatched.id] = dispatched
 			case LedgerKind.INTEGRITY_CHECKED:
 				integrity.append(IntegrityCheck.model_validate(payload["check"]))
 			case LedgerKind.INTEGRATION_CHECKED:
@@ -134,7 +142,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		specification_gates=tuple(specification_gates),
 		decompositions=tuple(decompositions),
 		gates=tuple(gates),
-		dispatches=tuple(dispatches),
+		dispatches=tuple(dispatches.values()),
 		profiles=tuple(profiles),
 		integrity=tuple(integrity),
 		integrations=tuple(integrations),

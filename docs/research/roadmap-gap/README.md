@@ -112,7 +112,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-138 termination is not verification | **Implemented** | `verify` takes no claim (`verification.py:232`); `test_verify_takes_no_completion_claim` (`test_verification.py:92`), `test_a_lying_producer_is_measured_not_believed` (`test_service.py:1108`). |
 | FR-139 re-verify contract/goal/oracle hashes at completion | **Implemented** | `oracle_set_hash` (`contract.py:85`), `check_integrity` (`planner.py:712`); `test_an_undisturbed_plan_reports_intact` (`test_service.py:1192`). |
 | FR-140 authority separation | **Implemented** | Budgets live in `StepBudget` (`views.py:1060`) and are enforced by killing the child (`harness.py:1072`); `test_exceeding_the_wall_clock_cap_is_budget_exhausted_not_failed` (`test_harness.py:886`), `test_a_spec_with_no_budget_flag_reports_that_rather_than_a_gap` (`test_harness.py:1068`). |
-| FR-141 worktree per module | **Deferred** | ADR-0024. Prompt text only (`planner.py:124`); README states it is the largest gap. |
+| FR-141 worktree per module | **Implemented** | ADR-0033 supersedes ADR-0024's deferral. `ensure_module_worktree` / `integrate_worktree` (`git.py`), `dispatch_step(isolate=…)` and `wave_is_isolatable` (`service.py:1396`), `--concurrent` (`cli.py`); `TestWorktreeIsolation` (`test_service.py:816`) and the FR-141 banner (`test_git.py:411`). The main tree holds the integration line; the module's branch lives only in its worktree. |
 | FR-142 dispatch follows topological order, waves | **Implemented** | `dispatch_plan` (`service.py:1009`), `GoalPlan.waves` (`views.py:1182`); `test_steps_run_in_wave_order` (`test_service.py:745`), `test_the_default_is_not_concurrent` (`:805`). |
 | FR-143 per-session telemetry | **Implemented** | `DispatchRecord` + `declaration_precision` (`service.py:1509`); `test_precision_now_measures_instead_of_reporting_zero` (`test_service.py:1167`). |
 | FR-144 degrade where goal mode is absent | **Implemented** | `DispatchMode.SINGLE_SHOT` (`views.py:1533`), `capability_loss` (`views.py:1725`); `test_the_full_probe_measures_the_rows_the_quick_one_skips` (`test_cli.py:532`). |
@@ -180,8 +180,10 @@ only).
    **FR-115/FR-116 remain unbuilt** — the P7 conformance check and system-level
    acceptance criteria now have a model to conform against and still do not conform
    anything. That last part is the next unit, not a blocker.
-2. **No isolation boundary of any kind (FR-016–020, FR-059, FR-141).** FR-141 is
-   deferred by ADR-0024 and is the gap the README itself names as mattering most;
+2. **No confinement boundary of any kind (FR-016–020, FR-059).** FR-141 is **built**
+   as of 2026-10-12 (ADR-0033) and no longer belongs in this gap: two sessions at once
+   cannot see or overwrite each other's files. What remains is that a worktree
+   *contains* a session that stays put and does not *confine* one that wanders;
    FR-059's "the harness cannot reach the oracle corpus" is prompt text and nothing
    else; FR-149's hermeticity is a property of the argv, not of the process. The
    measurement that forced this is in ADR-0024: neither `pi` nor `claude` confines

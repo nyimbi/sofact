@@ -1435,9 +1435,7 @@ class TestStoreIsolation:
 		``CONFIRMED`` for a harness the instrument cannot see would be the fabricated
 		capability ``ProbeOutcome`` exists to prevent.
 		"""
-		spec = dataclasses.replace(
-			base_spec(tmp_path, "complete"), env=(), isolation_env=()
-		)
+		spec = dataclasses.replace(base_spec(tmp_path, "complete"), env=(), isolation_env=())
 		profile = await make_adapter(tmp_path, spec).probe()
 		finding = profile.finding(HarnessCapability.STORE_ISOLATED)
 		assert finding is not None
@@ -1507,9 +1505,7 @@ class TestStoreIsolation:
 		assert "SYNTHETIC_HOME" in finding.attempted
 		assert "SYNTHETIC_EXTRA" not in finding.attempted
 
-	async def test_a_spec_that_asserts_no_containment_is_not_measured(
-		self, tmp_path: Path
-	) -> None:
+	async def test_a_spec_that_asserts_no_containment_is_not_measured(self, tmp_path: Path) -> None:
 		"""``pi`` isolates by ``--session-dir`` in its argv, and never claims this row."""
 		spec = dataclasses.replace(base_spec(tmp_path, "complete"), isolation_env=())
 		profile = await make_adapter(tmp_path, spec).probe()

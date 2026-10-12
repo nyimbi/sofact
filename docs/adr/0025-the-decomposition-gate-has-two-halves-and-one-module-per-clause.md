@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-12
-- **Supersedes:** the branch-*naming* half of [ADR-0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) — that record built branch-per-**step**, which was the most the plan could supply before a module identity existed; the branch is now named for the module. ADR-0024's deferral of FR-141 stands.
+- **Supersedes:** the branch-*naming* half of [ADR-0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) — that record built branch-per-**step**, which was the most the plan could supply before a module identity existed; the branch is now named for the module. ADR-0024's deferral of FR-141 stood until [ADR-0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md).
 - **Related:** FR-087–094, FR-125, FR-126, FR-061, §7.1, §14; [ADR-0024](0024-branch-per-step-is-built-worktrees-are-deferred.md) (which named module identity as FR-141's blocker)
 
 ## Context

@@ -31,6 +31,7 @@ from synthetic import (
 )
 
 from sofact.contract import executable_clauses
+from sofact.git import WORKTREE_DIRNAME
 from sofact.harness import (
 	CLAUDE_SPEC,
 	DEFAULT_TOOLS,
@@ -810,6 +811,141 @@ class TestDispatchPlan:
 
 		signature = inspect.signature(FactoryService.dispatch_plan)
 		assert signature.parameters["concurrent"].default is False
+
+
+class TestWorktreeIsolation:
+	"""FR-141: a concurrent wave runs in a worktree per module.
+
+	The property under test is not "a worktree exists" but the one a branch cannot give:
+	two sessions of one wave must not be able to see or overwrite each other's files, and
+	the work each produced must reach the tree the next wave checks out.
+	"""
+
+	async def test_a_concurrent_wave_isolates_every_step_it_can(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Each step of an ownable wave names a worktree, and none of them is the workspace."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		records = await service.dispatch_plan(plan.id, max_steps=4, concurrent=True)
+
+		operations = [r for r in records if r.step_ordinal > 0]
+		assert operations, "the plan has no wave after the bootstrap step"
+		for record in operations:
+			assert record.checkout is not None
+			assert record.checkout.worktree is not None, (
+				f"step {record.step_ordinal} ran in the shared tree, so a concurrent wave "
+				"would have put two sessions in one directory"
+			)
+		worktrees = {r.checkout.worktree for r in operations if r.checkout is not None}
+		assert len(worktrees) == len(operations), "two steps of one wave shared a worktree"
+		assert all(Path(w).name != "workspace" for w in worktrees if w)
+
+	async def test_an_isolated_wave_leaves_no_worktree_behind(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A worktree that outlives its wave is a leak, and one per wave compounds."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id, max_steps=4, concurrent=True)
+
+		leftover = sorted((home / "workspace" / WORKTREE_DIRNAME).glob("*"))
+		assert leftover == [], f"worktrees outlived their wave: {leftover}"
+
+	async def test_the_integration_line_holds_every_isolated_steps_work(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The measurement that makes isolation safe rather than merely tidy.
+
+		Each isolated step's branch is merged onto the integration line before the wave is
+		judged. Without that, the next wave checks out a tree missing everything its
+		dependencies produced — and P7 would analyse modules that are not there.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "writes-work-complete")
+		records = await service.dispatch_plan(plan.id, max_steps=4, concurrent=True)
+
+		for record in records:
+			if record.step_ordinal == 0:
+				continue
+			assert record.checkout is not None
+			assert record.checkout.integrated_commit is not None, (
+				f"step {record.step_ordinal}'s work never reached the integration line"
+			)
+			assert record.checkout.merge_conflict is False
+
+	async def test_the_shared_workspace_sees_what_the_wave_built(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The files a producer wrote in its worktree are in the workspace afterwards."""
+		service, plan = await plan_and_service(home, tmp_path, "writes-work-complete")
+		records = await service.dispatch_plan(plan.id, max_steps=2, concurrent=True)
+
+		assert any(record.checkout and record.checkout.worktree for record in records)
+		assert (home / "workspace" / "produced.py").is_file(), (
+			"the wave's work is not in the tree the next wave will check out"
+		)
+
+	async def test_a_wave_with_an_unownable_step_is_not_isolated(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A wave containing a step no module owns cannot be given a worktree per step.
+
+		``ensure_module_worktree`` gives such a step the *shared-tree* branch, because a
+		worktree is per module (FR-141) and there is no module to name one after. Two such
+		steps in one wave would therefore both run in the shared tree, which is the
+		collision ``--concurrent`` exists to avoid — so the wave is refused, not partially
+		isolated.
+
+		The bootstrap step is the module-less one in every plan the compiler emits, and the
+		compiler never puts two module-less steps in a wave (one clause per step, one module
+		per clause), so this guard is not reachable through ``dispatch_plan`` today. It is
+		tested here, on a wave assembled from the plan's own steps, because the guard is what
+		stands between a future compiler that emits such a wave and two sessions in one
+		directory — and an unreachable guard with no test is one nobody notices is broken.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		wave = plan.waves()[1]
+		assert len(wave) > 1, "the fixture no longer has a multi-step wave to test"
+		assert await service.wave_is_isolatable(plan, wave) is True, (
+			"a wave of distinct module-owned steps was called unisolatable"
+		)
+
+		bootstrap = plan.steps[0]
+		assert not bootstrap.clause_ids, "the first step is no longer the module-less one"
+		assert await service.wave_is_isolatable(plan, (bootstrap, *wave)) is False, (
+			"a wave containing the module-less bootstrap step was called isolatable"
+		)
+
+		# The other half of the predicate: two steps of *one* module would share a branch
+		# and therefore one directory. FR-136 makes that normal sequentially.
+		twice = (wave[0], wave[0])
+		assert await service.wave_is_isolatable(plan, twice) is False, (
+			"two steps of one module were called isolatable, but they share one branch"
+		)
+
+	async def test_the_merge_is_recorded_as_its_own_row(self, home: Path, tmp_path: Path) -> None:
+		"""The log is append-only, so the merge is a second row and the fold takes the latest.
+
+		A rewritten dispatch row would break the chain FR-003 makes tamper-evident, so the
+		integration writes a new one — and the fold has to resolve the two into the state a
+		reader expects: the merged checkout, at the position the dispatch started.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "writes-work-complete")
+		before = kinds(service).count("step.dispatched")
+		records = await service.dispatch_plan(plan.id, max_steps=4, concurrent=True)
+		isolated = [r for r in records if r.checkout and r.checkout.integrated_commit]
+		after = kinds(service).count("step.dispatched")
+
+		assert isolated, "no step was isolated, so this test would prove nothing"
+		assert after > before, "no merge row was written"
+		state = await service.state()
+		stored = state.dispatches_for(plan.id)
+		assert len(stored) == len(records), (
+			"the fold appended the merge as a second dispatch instead of resolving it onto "
+			"the one it belongs to"
+		)
+		by_id = {record.id: record for record in stored}
+		for record in isolated:
+			merged = by_id[record.id].checkout
+			assert merged is not None and merged.integrated_commit is not None
 
 	async def test_a_non_positive_max_steps_is_refused(self, home: Path, tmp_path: Path) -> None:
 		service, plan = await plan_and_service(home, tmp_path, "complete")

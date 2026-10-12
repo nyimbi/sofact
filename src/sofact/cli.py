@@ -124,6 +124,14 @@ _STEP_OPTION = typer.Option(
 )
 _ALL_OPTION = typer.Option(False, "--all", help="Dispatch every wave, stopping at the first stall.")
 _MAX_STEPS_OPTION = typer.Option(None, "--max-steps", help="Cap how many steps `--all` may start.")
+_CONCURRENT_OPTION = typer.Option(
+	False,
+	"--concurrent",
+	help=(
+		"Run each wave's steps at once, each in a worktree of its own (FR-141). A wave "
+		"that cannot be given one worktree per step runs sequentially."
+	),
+)
 _FRESH_OPTION = typer.Option(
 	False,
 	"--fresh",
@@ -986,6 +994,7 @@ def dispatch(
 	all_steps: bool = _ALL_OPTION,
 	max_steps: int | None = _MAX_STEPS_OPTION,
 	fresh: bool = _FRESH_OPTION,
+	concurrent: bool = _CONCURRENT_OPTION,
 ) -> None:
 	"""Send plan steps to the harness as out-of-process sessions (FR-058)."""
 	asyncio.run(
@@ -999,6 +1008,7 @@ def dispatch(
 			max_steps,
 			tools=tools,
 			fresh=fresh,
+			concurrent=concurrent,
 		),
 	)
 
@@ -1014,6 +1024,7 @@ async def _dispatch(
 	*,
 	tools: str | None = None,
 	fresh: bool = False,
+	concurrent: bool = False,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -1089,6 +1100,18 @@ async def _dispatch(
 			),
 		)
 	else:
+		if concurrent:
+			# FR-141's one precondition, stated where the operator can act on it. A worktree
+			# is per *module*, so a wave is isolated only when every step in it is owned by
+			# a distinct module -- a module-less step has no worktree to be given, and two
+			# steps of one module would share a branch and therefore one directory. Either
+			# way the wave runs sequentially, and saying so here means the operator is not
+			# left reading a speedup that did not happen.
+			typer.secho(
+				"  --concurrent: each wave runs in per-module worktrees; a wave that cannot "
+				"be given one worktree per step runs sequentially (FR-141).",
+				fg="bright_black",
+			)
 		records = await svc.dispatch_plan(
 			plan.id,
 			name=harness,
@@ -1097,6 +1120,7 @@ async def _dispatch(
 			tools=resolved_tools,
 			max_steps=max_steps,
 			fresh=fresh,
+			concurrent=concurrent,
 		)
 
 	for record in records:
