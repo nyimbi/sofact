@@ -33,7 +33,7 @@ Honesty about provenance is the whole point of this file. Statuses:
 
 | Status | Meaning |
 | --- | --- |
-| `content-verified` | Full text read this session, or — for `execution-record` entries — actually executed here. Present: S18, S19, S21, S22, S23, S24, S25. |
+| `content-verified` | Full text read this session, or — for `execution-record` entries — actually executed here. Present: S18, S19, S21, S22, S23, S24, S25, S26, S27. |
 | `url-verified` | URL resolved successfully this session. |
 | `reported` | Encountered during research earlier in this session (pre-compaction); content not re-read, URL not re-resolved. **Check `superseded_by` before citing**: S20 is partially superseded by S21. |
 | `reported-via-secondary` | Known only through another source's citation, not read directly. |
@@ -72,6 +72,8 @@ figure in this ledger as confirmed until its status changes.
 | [S22](s22-dsh-plugin-ecosystem.md) | **`dsh` plugin ecosystem** | ecosystem-survey | **`content-verified`** | **high** | **4,609 repos, 4,150 `dsh`-named.** Every mechanism SoFact treats as differentiated already exists free — evidence gates (≥5), worktree isolation, budgets, wave scheduling, LLM verifiers (≥7), cross-harness orchestration. **`elicit` occurs 0 times; `gate` 258.** Plugins are **mutable at runtime by the agent** → an in-process verifier is reachable by the producer (D16, R29). |
 | [S23](s23-harness-base-candidates.md) | **Harness base candidates: `oh-my-pi`, `oh-my-dsh`** | ecosystem-survey | **`content-verified`** (GitHub API, npm) / `reported` (README claims) | **medium-high** | **`oh-my-dsh` names ≥8 unrelated repos** across four kinds of artifact — a 530-plugin capability library, a curated overlay distribution, an auto-synced catalog, standalone agents. The name does not resolve to a base. **`oh-my-pi`** is a *detached hard fork of `pi`* (`fork: false`, no parent; 30,727★; npm `@oh-my-pi/pi-coding-agent`@18.1.18; 602 MB; 2,802 open issues). The capability library already ships `deep-research` (P1), `tower` (P4 + wave + **in-process conflict reviewer**), `fleet-orchestrator`, `secret-scanner` → a base would absorb much of SoFact's pipeline and turn FR-155 from a filter into an **audit**. Zero plugins installed; `LaplaceYoung/oh-my-dsh` declares **no licence**. |
 | [S25](s25-forecastx-deep-research.md) | **`@forecastx/deep-research` executed** | **execution-record** | **`content-verified`** | **high** | **The research loop SoFact delegates to.** A `pi` extension whose tools spawn a recursive headless `pi` (`pi --mode json -p --no-session`, model pinned by `RESEARCH_MODEL`) that runs a web-search loop and saves `report.md` + machine-readable `meta.json` (query, stats, `sources: {id, title, url}`). **Measured live**: on a local 35 B model its own 240 s ceiling binds before its advertised five-search floor — 3 searches, then a 140-character stub with `sources: []`. The research prompt is hardcoded Chinese; the package **auto-loads into every `pi` session**, which is the measurement that froze SoFact's build composition (FR-154) and motivated the `pi-research` spec (FR-167). |
+| [S26](s26-openrig.md) | OpenRig | product-doc | `url-verified` (README fetched raw, read in full) | medium | **A second implementation of SoFact's own architectural position** — "a rig wraps your harnesses." tmux + daemon + SQLite, YAML topology (`RigSpec`), seats with persistent identity, snapshot/restore, bundle integrity (SHA-256). **"YOLO is off by default"**, permission changes follow a real user answer, and restore reports per-node outcomes including `awaiting-decision`. States outright that **`OPENRIG_HOME` alone does not isolate provider configuration** — the general form of SoFact's own env-var isolation hazard. No verification claims: "review the exact candidate artifact" is a human reading a diff. |
+| [S27](s27-paperclip.md) | Paperclip | product-doc | `url-verified` (README fetched raw, read in full) | medium | **100.7k★** orchestration control plane for teams of existing agents — "not an agent framework." Twelve subsystems; embedded Postgres; MIT. Leads its differentiators with **"atomic task checkout. A single assignee and execution locks prevent competing runs from claiming the same task"** — the mechanism SoFact's unlocked `Ledger.append` lacks, and which was reproduced failing here. Verification is human review ("verify from diffs, screenshots & tests") with no oracle and no producer/verifier separation. **Star count is an outlier and must not be cited as evidence of quality.** |
 
 ## Verification queue
 
@@ -164,11 +166,13 @@ Status of this ledger is tracked as part of the open-question set in
 
 ## Status of this ledger
 
-S01–S25. Seven entries are `content-verified`: [S18], [S19] (primary interface
+S01–S27. Nine entries are `content-verified`: [S18], [S19] (primary interface
 reads), [S21] (the first **executed** source in the project — a runtime measured
 rather than read), [S22] (a measured ecosystem census), [S23] (GitHub API measurements of the
 named harness bases), [S24] (the talk transcript plus the author's own long-form
-expansion), and [S25] (the research extension read in full and executed once). Everything else is
+expansion), [S25] (the research extension read in full and executed once), and [S26]
+and [S27] (two neighbouring orchestrators' READMEs, fetched raw and read in full —
+their own claims are `reported`, since neither was installed). Everything else is
 `reported`, and each such entry should be treated as a hypothesis with a citation
 attached, not as evidence.
 
