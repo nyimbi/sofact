@@ -36,6 +36,7 @@ than argued. Numbering is sequential and never reused.
 | [0021](0021-research-is-dispatched-not-performed.md) | Research is dispatched, not performed: SoFact authors the goal deterministically, records the artefacts, and never rounds a sourceless report into a conclusion | Accepted |
 | [0022](0022-a-refutation-is-a-work-order.md) | A refutation is a work order: the verifier's diagnosis becomes another session's goal, the loop is bounded per clause, and running out is a row rather than a silence | Accepted |
 | [0023](0023-a-record-is-addressed-by-a-path.md) | A session record is addressed by a filesystem path: `claude` joins the producer set as a measured row, and `opencode` is dropped because its record is a database row and no glob names it | Accepted |
+| [0024](0024-worktree-isolation-is-deferred.md) | Worktree isolation (FR-100/FR-141) is deferred, not required: nothing depends on it while dispatch is single-module and sequential, and it is containment rather than confinement | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -56,9 +57,9 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Twelve records here answer questions the specification
+Not every decision resolves a `D`. Thirteen records here answer questions the specification
 never had to ask — three because they are about this repository's own tooling rather than
-about the factory's behaviour, and nine because the rule each replaces was never written
+about the factory's behaviour, and ten because the rule each replaces was never written
 down at all and so had no `D` to resolve:
 
 | ADR | What it settles |
@@ -75,3 +76,4 @@ down at all and so had no `D` to resolve:
 | [0021](0021-research-is-dispatched-not-performed.md) | Where P1's research comes from. The rule it replaced had no research phase at all — the project's own research was performed by hand, outside the platform |
 | [0022](0022-a-refutation-is-a-work-order.md) | What happens after a refuted wave, which is the one place the factory stopped being able to finish. The rule it replaces read FR-101's "not retry indefinitely" as "do not retry" and halted for good, so `DEFAULT_STEP_ATTEMPTS = 1` carried the whole policy — and the halt was in the constant, not in the architecture |
 | [0023](0023-a-record-is-addressed-by-a-path.md) | Which harnesses the adapter can address at all. The rule it makes explicit is that `session_glob` is a filesystem glob, so a record kept in a database is unreachable no matter how good its telemetry — which is what drops `opencode` while admitting `claude` |
+| [0024](0024-worktree-isolation-is-deferred.md) | Whether FR-100/FR-141 must be built before the factory can be trusted. They were asserted as done by the goal text and by the spec's tooling table while no code invoked git; this record states they are deferred, names the precondition for revisiting, and refuses to sell worktrees as confinement when the measurement says a tool allowlist is not one |
