@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from sofact.views import (
 	CompletionClaim,
 	Contract,
+	Cut,
 	Decomposition,
 	DecompositionGate,
 	DispatchRecord,
@@ -47,8 +48,64 @@ from sofact.views import (
 __all__ = ["fold"]
 
 
+def _cut_rows(entries: tuple[LedgerEntry, ...]) -> tuple[LedgerEntry, ...]:
+	"""Every cut row the log holds, oldest first — including the superseded ones.
+
+	Read from the whole log rather than from what survives the cut, because a cut that a
+	later one supersedes is still a decision the log records, and a field that collected
+	only the survivors would make the log's own history depend on its last line.
+	"""
+	return tuple(entry for entry in entries if entry.kind is LedgerKind.CUT_RECORDED)
+
+
+def _hidden_by_latest_cut(entries: tuple[LedgerEntry, ...]) -> frozenset[int]:
+	"""Indices the latest cut hides: everything after its target and before itself.
+
+	Only the latest cut's rule applies. Two cuts whose skips composed would make the
+	current state depend on the *history* of rollback decisions rather than on one
+	decision, and "read as of entry M" is not a statement that should stack — the
+	operator who cuts twice to successively later entries means the later one, and one
+	who cuts backwards means to hide more. Both readings are served by taking the last.
+
+	**A cut row is never hidden, and neither is the latest one's own row.** The skip
+	exists to un-do *work*, and a cut is not work — it is the record of a decision about
+	how to read the log. Hiding one would make the log's account of its own reading rules
+	depend on the most recent reading rule, so an operator who rolled back furthest would
+	see the least of their rollback history, which is backwards: the reason an earlier
+	cut was taken is exactly what the operator re-cutting needs. It would also let the
+	skip swallow the *reason* for a rollback, leaving the unexplained gap the cut's own
+	docstring says must not exist. Leaving the rows visible costs nothing, because a cut
+	row contributes no state of its own — its whole effect is this function's return
+	value, computed from the full log before the fold's loop runs.
+	"""
+	rows = _cut_rows(entries)
+	if not rows:
+		return frozenset()
+	latest = rows[-1]
+	cut = Cut.model_validate(latest.payload["cut"])
+	assert cut.target_index < latest.index, (
+		f"a cut at entry {latest.index} targets {cut.target_index}, which is not before it: "
+		"a cut can only roll back to what has already happened"
+	)
+	hidden = set(range(cut.target_index + 1, latest.index))
+	hidden.difference_update(row.index for row in rows)
+	return frozenset(hidden)
+
+
 def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
-	"""Derive :class:`ProjectState` by replaying ``entries`` in order."""
+	"""Derive :class:`ProjectState` by replaying ``entries`` in order.
+
+	An operator's :class:`~sofact.views.Cut` is applied here rather than by truncating
+	the file: FR-003 makes the log append-only, and a rollback that deleted the rows it
+	rolled back would destroy the evidence that the work happened — which is what an
+	operator rolling back most needs to keep. The rule is the latest cut's: read through
+	its ``target_index``, skip everything between that target and the cut row itself,
+	then fold whatever follows normally. So a cut is "the state as of entry N, plus
+	whatever I have done since deciding that", and a second cut to a later entry
+	un-does the first.
+	"""
+	ordered = tuple(entries)
+	hidden = _hidden_by_latest_cut(ordered)
 	goals: list[Goal] = []
 	answers: list[ElicitationAnswer] = []
 	drafts: list[SpecificationDraft] = []
@@ -74,8 +131,11 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	# attempt appears twice and only its final outcome is current. The full history stays
 	# in the log; the fold reports the settled value.
 	repairs: dict[str, RepairAttempt] = {}
+	cuts: list[Cut] = []
 
-	for entry in entries:
+	for entry in ordered:
+		if entry.index in hidden:
+			continue
 		payload = entry.payload
 		match entry.kind:
 			case LedgerKind.GOAL_CREATED:
@@ -127,6 +187,12 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				integrations.append(IntegrationReport.model_validate(payload["integration"]))
 			case LedgerKind.PHASE_ADVANCED:
 				phases.append(PhaseAdvance.model_validate(payload["advance"]))
+			case LedgerKind.CUT_RECORDED:
+				# Collected, and the *effect* is the skip above — applied before this loop
+				# ran, from the latest row among the entries being folded. The collection is
+				# the log's own record of every cut; `ProjectState.cut` derives the operative
+				# one from it, so the two cannot disagree.
+				cuts.append(Cut.model_validate(payload["cut"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -149,6 +215,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		research=tuple(research),
 		repairs=tuple(repairs.values()),
 		phases=tuple(phases),
+		cuts=tuple(cuts),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

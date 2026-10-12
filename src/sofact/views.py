@@ -40,6 +40,7 @@ __all__ = [
 	"ClauseVerdict",
 	"CompletionClaim",
 	"Contract",
+	"Cut",
 	"DeclarationPrecision",
 	"Decomposition",
 	"DecompositionGate",
@@ -2390,6 +2391,7 @@ class LedgerKind(StrEnum):
 	SPECIFICATION_PROPOSED = "specification.proposed"
 	SPECIFICATION_GATED = "specification.gated"
 	PHASE_ADVANCED = "phase.advanced"
+	CUT_RECORDED = "cut.recorded"
 
 
 class LedgerEntry(View):
@@ -2452,6 +2454,44 @@ class ChainStatus(View):
 	reason: str | None = None
 
 
+class Cut(View):
+	"""An operator's decision to read the log as of an earlier entry (FR-094, FR-003).
+
+	A *reading rule*, not a deletion. FR-003 makes the log append-only and the chain is
+	what makes it tamper-evident, so history is not erasable here — and truncating the
+	file would destroy the evidence that the rolled-back work ever happened, which is
+	the one thing an operator rolling back most needs to keep. So the cut is recorded
+	in the log it cuts, and the fold applies it.
+
+	The rule is "read through ``target_index``, then resume after the cut row": entries
+	after the target *and* before the cut are skipped, and everything the operator does
+	next is folded normally. Without that second half a cut would be a permanent
+	dead-end — the project could never make progress again — and with it a cut is
+	exactly "the state as of entry N, plus whatever has happened since I decided that".
+
+	The **latest** cut wins. Cutting again to a later entry un-does the first, because
+	that is what "read as of entry M" means and a stack of cuts whose effects compose
+	would make the current state depend on a history of decisions rather than on one.
+	"""
+
+	target_index: int
+	"""The last entry index the state is read *through*, inclusive."""
+
+	at: datetime
+	by: NonEmptyStr
+	"""Who cut: an operator verb, so this is a name rather than ``factory``."""
+
+	reason: NonEmptyStr
+	"""Why, in the operator's words. A cut with no reason is an unexplained gap in
+	the state, and the next reader has no way to tell it from a bug."""
+
+	@model_validator(mode="after")
+	def _index_is_real(self) -> Self:
+		if self.target_index < 0:
+			raise ValueError(f"a cut target must be a real entry index, got {self.target_index}")
+		return self
+
+
 class Advice(View):
 	"""An advisory opinion from the model, plus why it is missing if it is missing.
 
@@ -2502,6 +2542,31 @@ class ProjectState(View):
 	repairs: tuple[RepairAttempt, ...] = ()
 	notes: tuple[str, ...] = ()
 	phases: tuple[PhaseAdvance, ...] = ()
+	cuts: tuple[Cut, ...] = ()
+	"""Every cut the log records, oldest first (FR-094).
+
+	A collection like every other field, because that is what the log holds: rows. The
+	*operative* rule is :attr:`cut`, and it is derived from this rather than stored
+	beside it — two fields describing one decision is how a state comes to disagree
+	with itself.
+	"""
+
+	@property
+	def cut(self) -> Cut | None:
+		"""The rollback this state is read under, or ``None`` (FR-094, FR-003).
+
+		The **latest** cut, because that is the only one whose rule the fold applies: a
+		second cut to a later entry un-does the first, so naming the earliest would
+		describe a rule the state was not folded under.
+
+		A state folded under a cut is not the same object as one that genuinely stopped at
+		that entry, and the difference is invisible in every other field — both have the
+		same goals, the same contracts, the same reports. Without this, a rolled-back
+		project and a project that simply never got further would be indistinguishable to
+		every reader including the gates, which is exactly the confusion a rollback must
+		not create.
+		"""
+		return self.cuts[-1] if self.cuts else None
 
 	@property
 	def current_phase(self) -> Phase:

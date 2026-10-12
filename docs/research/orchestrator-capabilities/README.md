@@ -54,8 +54,8 @@ inferred from the presence of a similarly-named type. The disposition is one of:
 | Per-seat / per-agent permission policy | `rig seat set-permissions`, audited; "YOLO is off by default" | No per-module permission policy. `ModuleClass` ceilings (`views.py:478`) cap autonomy by class; the sandbox is prompt text | **Gap — build** (FR-059): "The harness must run inside the lane's sandbox with no access to the oracle corpus, holdout scenarios, or factory credentials." Ceilings are declared; the boundary is asserted in goal text only (`planner.py:127`) |
 | Budget hard-stops, cost control | per-seat policy; "budget hard-stops"; cost events | `StepBudget` (`views.py:1060`) — wall clock, continuations, attempts, tokens; `BUDGET_EXHAUSTED` is a real `StepOutcome`; budgets are SoFact's authority (FR-140) | **Covered, stronger** — FR-140 makes budget SoFact's and *not the harness's*, which is the structural version of "hard-stop"; the vendor's is policy the agent is asked to honour |
 | Atomic checkout / execution locks | "A single assignee and execution locks prevent competing runs from claiming the same task" | `Ledger._exclusive` — `fcntl.flock` across the read-modify-write (ADR-0029) | **Covered** — this was the defect, found by reading S27 and fixed |
-| Durable audit log | SQLite + `bundle-audit.jsonl`; Postgres "durable activity" | The ledger: append-only, hash-chained, 18 `LedgerKind`s (`views.py:1848`), `require_intact` before every fold | **Covered, stronger** — tamper-*evident*, which neither vendor claims; the chain is the reason FR-003 is a hard error rather than a log line |
-| Revision + rollback | snapshot/restore; "revisioned config with rollback" | `Decomposition` revisions + `decomposition_hash`; approving a superseded revision is refused (FR-094) | **Covered, partly** — revision yes; there is **no operator rollback verb**. `grep -rn rollback src/` returns nothing. Over an append-only fold this is cheap: replay to a chosen entry index |
+| Durable audit log | SQLite + `bundle-audit.jsonl`; Postgres "durable activity" | The ledger: append-only, hash-chained, 22 `LedgerKind`s (`views.py`), `require_intact` before every fold | **Covered, stronger** — tamper-*evident*, which neither vendor claims; the chain is the reason FR-003 is a hard error rather than a log line |
+| Revision + rollback | snapshot/restore; "revisioned config with rollback" | `Decomposition` revisions + `decomposition_hash`; approving a superseded revision is refused (FR-094); `sofact rollback --to N` cuts the log's reading rule and records why (ADR-0034) | **Covered, stronger** — the vendor's rollback restores a snapshot; SoFact's is a reading rule over an append-only, hash-chained log, so the work a rollback hides is still there to be read and the chain still verifies. The vendor cannot show what it rolled back *from* |
 | Goal ancestry / traceability | culture + continuity; "goal ancestry" | `decomposition.gate` checks traceability both directions (`decomposition.py:423,438`) | **Covered** — Paperclip carries ancestry for agent *context*; SoFact carries it for escape attribution (FR-127). Same mechanism, different purpose |
 
 ### 2.2 Durability and resumption
@@ -214,16 +214,21 @@ Dependency-ordered, largest lever first:
    distinct module, because both failure modes are directory collisions: a module-less
    step has no worktree to be given, and two steps of one module share a branch. This is
    also what unblocked item 5 — a rollback is only safe once the tree is isolated.
-5. **Ledger rollback to a chosen entry** (§2.1) — an operator verb over the fold;
-   pairs with FR-094 and is what Paperclip's "rollback" is. Small, and only safe once
-   the tree is isolated (item 4).
+5. ~~**Ledger rollback to a chosen entry** (§2.1)~~ — **done 2026-10-12** (ADR-0034).
+   `sofact rollback --to N --reason ...` records a `cut.recorded` row and the fold reads
+   through the target, skipping the range it hides and folding everything after the cut
+   normally. Nothing is deleted: the log grows, the chain still verifies, and the work the
+   rollback hides stays readable — which is the difference between this and a snapshot
+   restore, and the reason the row above is "stronger" rather than "covered".
 6. **FR-070 addressable source ledger** (§2.4) — the stronger version of the durable
    activity log both vendors ship; already recorded as unbuilt in the roadmap audit.
 
 Items 1–3 are the answer to the operator's request, in the order that serves the rest
 of the roadmap rather than the order the request was phrased in. Items 4–5 are the two
-rows where the vendor's version is *weaker* than an FR SoFact already has, and they are
-listed so the gap is recorded rather than rediscovered.
+rows where the vendor's version is *weaker* than an FR SoFact already has, and they were
+listed so the gap is recorded rather than rediscovered. Five of the six are now built;
+item 6 is the remaining one, and it is the strongest of the vendor-side rows rather than
+the weakest.
 
 ## 6. What this note does not settle
 

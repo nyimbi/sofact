@@ -952,6 +952,95 @@ class TestTheResearchVerb:
 
 
 # --------------------------------------------------------------------------- #
+# rollback — the operator's verb over the fold (FR-094, FR-003)
+# --------------------------------------------------------------------------- #
+
+
+class TestTheRollbackVerb:
+	"""``sofact rollback --to N --reason ...`` reads the project as of entry N.
+
+	The fold's behaviour and the service's refusals are measured elsewhere. What is
+	under test here is reachability and the exit code: a capability the operator cannot
+	invoke is a constant, and a refusal that exits 0 is a refusal nobody notices.
+	"""
+
+	def test_rolling_back_hides_the_work_and_says_so(self, home: Path) -> None:
+		conversation(home)
+		assert RUNNER.invoke(app, ["--home", str(home), "draft"]).exit_code == 0
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "rollback", "--to", "1", "--reason", "the draft was wrong"],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "rolled back to entry 1" in result.output
+		assert "none deleted" in result.output, "the operator must be told the log kept the work"
+		assert "the draft was wrong" in result.output, "the reason is echoed back"
+
+	def test_the_log_keeps_what_the_rollback_hid(self, home: Path) -> None:
+		"""A rollback that deleted its own evidence would be the one thing it must not be."""
+		conversation(home)
+		assert RUNNER.invoke(app, ["--home", str(home), "draft"]).exit_code == 0
+		before = RUNNER.invoke(app, ["--home", str(home), "ledger"])
+		assert "draft.created" in before.output
+
+		assert (
+			RUNNER.invoke(
+				app, ["--home", str(home), "rollback", "--to", "1", "--reason", "rework"]
+			).exit_code
+			== 0
+		)
+		after = RUNNER.invoke(app, ["--home", str(home), "ledger"])
+
+		assert "draft.created" in after.output, "the draft row is still in the log"
+		assert "cut.recorded" in after.output
+		assert RUNNER.invoke(app, ["--home", str(home), "verify-ledger"]).exit_code == 0
+
+	def test_a_target_in_the_future_is_refused(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(
+			app, ["--home", str(home), "rollback", "--to", "999", "--reason", "typo"]
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "does not exist" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_reason_is_required(self, home: Path) -> None:
+		"""An unexplained gap reads as a bug, so the flag is not optional."""
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "rollback", "--to", "1"])
+
+		assert result.exit_code != 0
+		assert "--reason" in result.output
+
+	def test_status_says_the_project_is_read_under_a_cut(self, home: Path) -> None:
+		"""The whole point of recording the cut: the next reader cannot miss it.
+
+		Every other line ``status`` prints — the phase, the readiness, the draft — is
+		read under the cut, so a status that stayed silent would present a rolled-back
+		project as the current one.
+		"""
+		conversation(home)
+		plain = RUNNER.invoke(app, ["--home", str(home), "status"])
+		assert "rolled back" not in plain.output
+
+		assert (
+			RUNNER.invoke(
+				app, ["--home", str(home), "rollback", "--to", "1", "--reason", "rework"]
+			).exit_code
+			== 0
+		)
+		after = RUNNER.invoke(app, ["--home", str(home), "status"])
+
+		assert after.exit_code == 0, after.output
+		assert "rolled back to entry 1" in after.output
+		assert "rework" in after.output
+		assert "the log keeps what it hid" in after.output
+
+
+# --------------------------------------------------------------------------- #
 # the repair loop — the difference between a factory that stops and one that ends
 # --------------------------------------------------------------------------- #
 

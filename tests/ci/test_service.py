@@ -990,6 +990,81 @@ class TestWorktreeIsolation:
 
 
 # --------------------------------------------------------------------------- #
+# rollback: an operator verb over the fold (FR-094, FR-003)
+# --------------------------------------------------------------------------- #
+
+
+class TestRollback:
+	"""The cut verb, and the three ways it must refuse.
+
+	What is under test is not that the state gets smaller — ``test_state.py`` owns the
+	fold's half. It is that the *service* will not write a cut row the fold cannot read:
+	the refusals are the boundary, and each one exists because the log is a file rather
+	than a value the service controls.
+	"""
+
+	async def test_a_cut_hides_work_and_keeps_the_log(self, home: Path, tmp_path: Path) -> None:
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		target = next(
+			entry.index
+			for entry in service.ledger.entries()
+			if entry.kind is LedgerKind.PLAN_COMPILED
+		)
+		length_before = len(service.ledger.entries())
+
+		record = await service.cut(target, by="operator", reason="the plan was wrong")
+		state = await service.state()
+
+		assert state.cut == record
+		assert state.dispatches == (), "the dispatches were rolled back"
+		assert state.plans == (plan,), "the plan was the target, so it survives"
+		assert len(service.ledger.entries()) == length_before + 1
+		assert (await service.verify_ledger()).ok is True
+
+	async def test_a_cut_to_the_present_rolls_nothing_back(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Refused rather than recorded as a no-op: it would look like a rollback."""
+		service = FactoryService(home=home, llm=None)
+		service.ledger.append(LedgerKind.ADVISOR_NOTE, {"text": "one"})
+		present = service.ledger.entries()[-1].index
+
+		with pytest.raises(ValueError, match="is the present"):
+			await service.cut(present, by="operator", reason="nowhere to go")
+		assert len(service.ledger.entries()) == 1, "a refused cut writes nothing"
+
+	async def test_a_cut_past_the_end_is_refused(self, home: Path, tmp_path: Path) -> None:
+		"""A target the log does not have would hide nothing while looking like it hid something."""
+		service = FactoryService(home=home, llm=None)
+		for index in range(3):
+			service.ledger.append(LedgerKind.ADVISOR_NOTE, {"text": f"note {index}"})
+
+		with pytest.raises(ValueError, match="does not exist"):
+			await service.cut(9, by="operator", reason="typo")
+		assert len(service.ledger.entries()) == 3, "a refused cut writes nothing"
+
+	async def test_a_cut_on_an_empty_log_is_refused(self, home: Path) -> None:
+		service = FactoryService(home=home, llm=None)
+
+		with pytest.raises(ValueError, match="log is empty"):
+			await service.cut(0, by="operator", reason="nothing to roll back")
+
+	async def test_a_cut_needs_an_operator_and_a_reason(self, home: Path) -> None:
+		"""Both are assertions, and both are load-bearing: an unattributed cut is
+		unaccountable and an unexplained one reads as a bug."""
+		service = FactoryService(home=home, llm=None)
+		for index in range(3):
+			service.ledger.append(LedgerKind.ADVISOR_NOTE, {"text": f"note {index}"})
+
+		with pytest.raises(AssertionError, match="needs an operator"):
+			await service.cut(0, by="  ", reason="why")
+		with pytest.raises(AssertionError, match="needs a reason"):
+			await service.cut(0, by="operator", reason="   ")
+		assert len(service.ledger.entries()) == 3, "a refused cut writes nothing"
+
+
+# --------------------------------------------------------------------------- #
 # the repair loop (FR-101's bound on a loop that otherwise does not exist)
 # --------------------------------------------------------------------------- #
 

@@ -142,6 +142,17 @@ _MAX_ATTEMPTS_OPTION = typer.Option(
 	"--max-attempts",
 	help="How many times one refuted clause may be handed back before it is called exhausted.",
 )
+_TO_OPTION = typer.Option(
+	...,
+	"--to",
+	help="The entry index to read the project as of, inclusive (FR-094).",
+)
+_CUT_BY_OPTION = typer.Option("operator", "--by", help="Who is rolling back.")
+_REASON_OPTION = typer.Option(
+	...,
+	"--reason",
+	help="Why. Recorded in the log, because an unexplained gap reads as a bug.",
+)
 
 
 def _service(home: Path | None) -> FactoryService:
@@ -429,6 +440,22 @@ async def _status(svc: FactoryService) -> None:
 		line += f" — stopped at the {PHASE_GATE[stopped.phase].value} gate"
 	typer.secho(line, fg="yellow" if stopped is not None else "white", bold=True)
 
+	# Printed before the readiness loop, which rebinds `state` to each dimension's
+	# status. A cut changes what every other line here means — the phase, the
+	# readiness, the draft are all read under it — so a reader who did not know one
+	# was in force would be reading a rolled-back project as the current one.
+	cut = state.cut
+	if cut is not None:
+		typer.secho(
+			f"\nrolled back to entry {cut.target_index} by {cut.by}: {cut.reason}",
+			fg="magenta",
+			bold=True,
+		)
+		typer.secho(
+			"  the phase above and everything below are read under it; the log keeps what it hid",
+			fg="bright_black",
+		)
+
 	readiness = await svc.readiness(goal.id)
 	done, total = readiness.progress
 	typer.secho(f"\nreadiness {done}/{total}", fg="white", bold=True)
@@ -468,6 +495,31 @@ def verify_ledger(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
 		return
 	typer.secho(f"BROKEN at entry {chain.broken_at}: {chain.reason}", fg="red")
 	raise typer.Exit(code=1)
+
+
+@app.command(name="rollback")
+def rollback(
+	ctx: typer.Context,
+	to: int = _TO_OPTION,
+	by: str = _CUT_BY_OPTION,
+	reason: str = _REASON_OPTION,
+	home: Path | None = _HOME_OPTION,
+) -> None:
+	"""Read the project as of entry ``--to``, and record why (FR-094, FR-003)."""
+	asyncio.run(_rollback(_service(_home_of(ctx, home)), to=to, by=by, reason=reason))
+
+
+async def _rollback(svc: FactoryService, *, to: int, by: str, reason: str) -> None:
+	before = await svc.entries()
+	try:
+		record = await svc.cut(to, by=by, reason=reason)
+	except ValueError as exc:
+		typer.secho(str(exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	hidden = before[-1].index - to
+	typer.secho(f"rolled back to entry {to}", fg="cyan", bold=True)
+	typer.echo(f"  {hidden} entr{'y' if hidden == 1 else 'ies'} hidden, none deleted")
+	typer.secho(f"  by {record.by}: {record.reason}", fg="bright_black")
 
 
 @app.command()

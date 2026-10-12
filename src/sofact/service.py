@@ -75,6 +75,7 @@ from sofact.views import (
 	ClauseVerdict,
 	CompletionClaim,
 	Contract,
+	Cut,
 	DeclarationPrecision,
 	Decomposition,
 	DecompositionGate,
@@ -295,6 +296,49 @@ class FactoryService:
 	async def entries(self) -> tuple[LedgerEntry, ...]:
 		"""The raw log, oldest first."""
 		return self.ledger.entries()
+
+	async def cut(self, target_index: int, *, by: str, reason: str) -> Cut:
+		"""Read the project as of ``target_index``, and record that decision (FR-094, FR-003).
+
+		The operator's rollback verb, and a *reading rule* rather than a deletion: FR-003
+		makes the log append-only, so nothing is removed. What changes is how
+		:func:`~sofact.state.fold` reads it — entries after the target and before this row
+		are skipped, and everything appended afterwards folds normally. A second cut to a
+		later entry therefore un-does the first.
+
+		Three refusals. ``target_index`` must be a real entry index — a cut past the end
+		would hide nothing while looking like it hid something, which is the one failure
+		mode a rollback must not have — it must not be the present, which rolls nothing
+		back, and the log must not be empty, because then there is nothing to cut to. The
+		"strictly behind the row being written" invariant is enforced again in
+		:func:`~sofact.state.fold` rather than trusted from here: the log is a file, and
+		the fold is what has to hold when someone edits it.
+		"""
+		assert by.strip(), "a cut needs an operator to attribute it to"
+		assert reason.strip(), "a cut needs a reason: an unexplained gap reads as a bug"
+		entries = self.ledger.entries()
+		if not entries:
+			raise ValueError("the log is empty, so there is no entry to roll back to")
+		last = entries[-1].index
+		if not 0 <= target_index <= last:
+			raise ValueError(
+				f"entry {target_index} does not exist: the log holds 0..{last}, and a cut "
+				"that names an entry the log does not have would hide nothing while "
+				"looking like it hid something (FR-003)"
+			)
+		if target_index == last:
+			raise ValueError(
+				f"entry {last} is the present, so cutting to it would roll nothing back; "
+				"a cut names an entry in the past (FR-094)"
+			)
+		record = Cut(
+			target_index=target_index,
+			at=now(),
+			by=by.strip(),
+			reason=reason.strip(),
+		)
+		self._commit(LedgerKind.CUT_RECORDED, {"cut": record.model_dump(mode="json")})
+		return record
 
 	def _commit(self, kind: LedgerKind, payload: dict[str, Any]) -> LedgerEntry:
 		"""Append an event and invalidate the derived-state cache."""

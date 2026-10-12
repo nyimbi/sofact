@@ -17,7 +17,7 @@ configuration under which the factory proceeds past an unapproved gate." That is
 statement about reachability, and it is not satisfiable by a check that a caller is
 trusted to run.
 
-The precedent for the shape is [`DecompositionGate`](../src/sofact/views.py), which
+The precedent for the shape is `DecompositionGate` (`src/sofact/views.py`), which
 splits a gate into a machine half (`checks`) and a human half (`approved_by`), and whose
 `is_satisfied` requires both.
 

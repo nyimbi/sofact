@@ -39,6 +39,7 @@ uv run sofact status              # where am I
 uv run sofact phase               # which pipeline phase, and is a gate open
 uv run sofact ledger              # the append-only event log
 uv run sofact verify-ledger       # re-check the hash chain
+uv run sofact rollback --to 12 --reason "the decomposition was wrong"
 ```
 
 State lives in `./.sofact` by default, or `$SOFACT_HOME`. Nothing is written outside
@@ -66,6 +67,12 @@ uv run sofact gate --approve P2 --by you   # the human half, recorded with who a
 
 A clause without an oracle cannot exist, which is the type-level enforcement of the
 spec's first rule: **no oracle, no autonomy** (FR-001).
+
+`sofact rollback` reads the project as of an earlier entry and records why
+([ADR-0034](docs/adr/0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md)).
+It is a reading rule rather than a deletion: the log grows, the chain still verifies, and
+the work the rollback hides is still there to be read — a rollback that truncated would
+destroy the evidence it was taken on. Cutting again to a later entry un-does the first.
 
 P2 turns the contract into a **specification**
 ([ADR-0031](docs/adr/0031-a-specification-derives-what-the-contract-says-and-declares-what-it-does-not.md)):

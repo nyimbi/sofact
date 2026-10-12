@@ -1805,8 +1805,8 @@ v0.1's lane and oracle definition formats are retained. New surface:
 **Running in v0.1** — the subset of the above that exists as executable code today:
 `sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
-`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `run`. The planned verbs
-remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
+`dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `run`. The planned
+verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
 FR-142's wave scheduler (and FR-163's trigger: **a completed session** is checked against the
 contract,
 and the command exits non-zero when nothing was verified, when a step was refuted, or when

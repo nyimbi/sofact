@@ -50,6 +50,7 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.INTEGRATION_CHECKED: "integrations",
 	LedgerKind.REPAIR_ATTEMPTED: "repairs",
 	LedgerKind.PHASE_ADVANCED: "phases",
+	LedgerKind.CUT_RECORDED: "cuts",
 }
 """Which event kind lands in which state field. Transcribed from ``fold``'s arms so
 that adding a kind without a field (or a field without a kind) fails a test."""
@@ -85,11 +86,12 @@ def test_every_event_kind_lands_in_a_field_and_every_field_has_a_kind() -> None:
 def test_an_empty_log_folds_to_a_state_with_every_field_empty() -> None:
 	state = fold(())
 
-	assert len(ProjectState.model_fields) == 20, "a new state field must be folded too"
+	assert len(ProjectState.model_fields) == 21, "a new state field must be folded too"
 	for name in ProjectState.model_fields:
 		value = getattr(state, name)
 		assert value == (), f"{name} should be empty, got {value!r}"
 		assert isinstance(value, tuple), f"{name} must be immutable, got {type(value)}"
+	assert state.cut is None, "an uncut project reads under no rollback"
 
 
 # --------------------------------------------------------------------------- #
@@ -189,6 +191,85 @@ async def test_the_answers_field_holds_only_answers_for_the_goal(
 
 	assert goal is not None, "the run must have left a current goal"
 	assert {answer.goal_id for answer in state.answers} == {goal.id}
+
+
+# --------------------------------------------------------------------------- #
+# rollback: a reading rule, not a deletion
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_cut_hides_the_entries_after_its_target(home: Path, tmp_path: Path) -> None:
+	"""The state is what it was at the target, and the hidden work is still in the log."""
+	service, plan = await plan_and_service(home, tmp_path, "complete")
+	await service.dispatch_plan(plan.id)
+	before = service.ledger.entries()
+	target = next(entry.index for entry in before if entry.kind is LedgerKind.PLAN_COMPILED)
+
+	record = await service.cut(target, by="operator", reason="the plan was wrong")
+	state = fold(service.ledger.entries())
+
+	assert state.cut == record, "the state must name the rollback it was read under"
+	assert state.plans == (plan,), "the plan itself is at the target, so it survives"
+	assert state.dispatches == (), "every dispatch happened after the target"
+	assert state.goals == fold(before[: target + 1]).goals, "the goal is untouched"
+	after = service.ledger.entries()
+	assert len(after) == len(before) + 1, "nothing was deleted: the log grew by one row"
+	assert after[-1].kind is LedgerKind.CUT_RECORDED
+	assert service.ledger.verify_chain().ok is True
+
+
+async def test_the_project_resumes_after_a_cut(home: Path, tmp_path: Path) -> None:
+	"""A cut is not a dead end: what is appended next folds normally."""
+	service, plan = await plan_and_service(home, tmp_path, "complete")
+	await service.dispatch_plan(plan.id)
+	target = next(
+		entry.index for entry in service.ledger.entries() if entry.kind is LedgerKind.PLAN_COMPILED
+	)
+	await service.cut(target, by="operator", reason="re-dispatch from a clean line")
+
+	before_resume = fold(service.ledger.entries())
+	assert before_resume.dispatches == ()
+
+	service.ledger.append(LedgerKind.ADVISOR_NOTE, {"text": "noted after the cut"})
+	resumed = fold(service.ledger.entries())
+
+	assert resumed.plans == (plan,), "the rollback still applies to the hidden range"
+	assert resumed.dispatches == ()
+	assert resumed.notes == ("noted after the cut",), "work after the cut folds normally"
+
+
+async def test_a_later_cut_supersedes_an_earlier_one(home: Path, tmp_path: Path) -> None:
+	"""Cutting again to a later entry un-does the first, rather than stacking on it."""
+	service = FactoryService(home=home, llm=None)
+	for index in range(4):
+		service.ledger.append(LedgerKind.ADVISOR_NOTE, {"text": f"note {index}"})
+	first = await service.cut(1, by="operator", reason="too far")
+	second = await service.cut(3, by="operator", reason="not far enough")
+
+	state = fold(service.ledger.entries())
+
+	assert state.cut == second, "the latest cut is the one the state is read under"
+	assert state.cuts == (first, second), "both decisions are still in the log"
+	assert state.notes == ("note 0", "note 1", "note 2", "note 3")
+
+
+def test_a_cut_that_targets_itself_or_the_future_is_refused(tmp_path: Path) -> None:
+	"""The invariant the fold asserts, tested where the fold is the thing being tested.
+
+	``FactoryService.cut`` refuses both before it writes, so a log this fold can see
+	should never hold such a row — but the log is a file, and the fold is what has to
+	hold when someone edits it.
+	"""
+	ledger = Ledger(tmp_path / "log.jsonl")
+	for index in range(3):
+		ledger.append(LedgerKind.ADVISOR_NOTE, {"text": f"note {index}"})
+	ledger.append(
+		LedgerKind.CUT_RECORDED,
+		{"cut": {"target_index": 9, "at": "2026-10-12T00:00:00Z", "by": "x", "reason": "y"}},
+	)
+
+	with pytest.raises(AssertionError, match="not before it"):
+		fold(ledger.entries())
 
 
 # --------------------------------------------------------------------------- #
