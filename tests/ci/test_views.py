@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 from sofact._uuid7 import uuid7str
+from sofact.contract import suggest_oracle
 from sofact.views import (
 	GENESIS_HASH,
 	AutonomyLevel,
@@ -143,6 +144,80 @@ class TestAnOracleCoversItsClause:
 		assert not OracleDeclaration(
 			oracle_class=OracleClass.EXAMPLE, description="d", command_hint="true"
 		).covers
+
+
+class TestAnOracleIsHeldOutOrNot:
+	"""FR-106: the operator's example is withheld, and the class is the provenance."""
+
+	def test_an_example_is_held_out(self) -> None:
+		"""FR-103's source column reads "operator-supplied cases" for rank 6."""
+		assert OracleDeclaration(
+			oracle_class=OracleClass.EXAMPLE,
+			description="the report shows TOTAL 42",
+			command_hint="pytest tests/test_report.py",
+		).held_out
+
+	def test_a_golden_oracle_is_not_held_out(self) -> None:
+		"""A golden file is the producer's own recording, not the operator's case.
+
+		Withholding it would hide the artefact the producer is being asked to
+		reproduce, which is the opposite of FR-106's intent.
+		"""
+		assert not OracleDeclaration(
+			oracle_class=OracleClass.GOLDEN,
+			description="the rendered report matches the recorded one",
+			command_hint="diff -u golden.txt out.txt",
+		).held_out
+
+	@pytest.mark.parametrize(
+		"oracle_class",
+		[
+			OracleClass.PROPERTY,
+			OracleClass.STATE_MACHINE,
+			OracleClass.CONTRACT,
+			OracleClass.METAMORPHIC,
+			OracleClass.SCHEMA,
+		],
+	)
+	def test_a_derived_oracle_is_not_held_out(self, oracle_class: OracleClass) -> None:
+		"""Ranks 1-5 derive their check from the contract, so there is no operator case."""
+		assert not OracleDeclaration(
+			oracle_class=oracle_class, description="d", command_hint="true"
+		).held_out
+
+	def test_the_holdout_is_not_an_executability_question(self) -> None:
+		"""A held-out example with a command is still runnable by the verifier.
+
+		The holdout is about who may *read* the payload, not about whether it runs:
+		collapsing the two would either stop running the operator's own cases or
+		hand their expected output to the producer.
+		"""
+		held = OracleDeclaration(
+			oracle_class=OracleClass.EXAMPLE, description="d", command_hint="true"
+		)
+
+		assert held.held_out
+		assert held.is_executable
+
+	def test_the_factory_refuses_to_manufacture_a_held_out_oracle(self) -> None:
+		"""The premise ``held_out`` rests on, asserted rather than assumed.
+
+		``suggest_oracle`` returns PROPERTY or CONTRACT, never EXAMPLE, so a suggested
+		oracle is never held out. If that ever changed, the factory would be withholding
+		its own words from its own producer, and this is where that would be caught.
+		"""
+		positive = suggest_oracle(_stem())
+		negative = suggest_oracle(
+			ClauseStem(
+				id=uuid7str(),
+				statement="the process never writes outside its workspace",
+				kind=ClauseKind.NEGATIVE,
+				derived_from=ElicitationDimension.BOUNDARY,
+			)
+		)
+
+		assert not positive.held_out
+		assert not negative.held_out
 
 
 def _stem(statement: str = "the dashboard shows the reminder") -> ClauseStem:

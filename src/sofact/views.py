@@ -897,6 +897,39 @@ class OracleDeclaration(View):
 		"""
 		return self.is_executable and self.rank <= COVERING_ORACLE_MAX_RANK
 
+	@property
+	def held_out(self) -> bool:
+		"""Whether this oracle's payload is withheld from the producer (FR-106).
+
+		The class *is* the provenance, and that is FR-103's own table rather than an
+		inference drawn here: row 6's source column reads "operator-supplied cases", so
+		an example oracle is the operator's by definition. FR-106 turns on exactly that
+		— "operator examples are the operator's intent and therefore the best available
+		proxy for correctness; they are wasted if the builder can read them" — and
+		FR-017 makes reading one a lane-halting defect rather than a quality problem.
+
+		What is withheld is the *scenario*: the description, the command and the
+		expected output, which together are the operator's case. What is not withheld
+		is the obligation, which is the clause's own statement, nor the class and rank,
+		which say how strong the check is without saying what it checks. A producer
+		told the obligation and the strength can build to the intent; one told the
+		expected output builds to the sample, and FR-103 calls rank 6 "sample, not
+		coverage" for the same reason.
+
+		Ranks 6 and 7 are both weak and only 6 is held out. FR-103's source column is
+		why: a golden file is "output of a reference run", usually the producer's own
+		recording, and withholding it would hide the thing the producer is being asked
+		to reproduce. FR-106 says "example-based" and means it.
+
+		This is a property rather than a stored flag on purpose. A field defaulting to
+		``False`` would leave the leak open on every oracle built without it — a control
+		that exists and is never applied — whereas a derivation from the class is
+		correct at every site that reads it. The premise it rests on, that the factory
+		manufactures no example oracle, is asserted in :func:`sofact.contract.suggest_oracle`
+		rather than left as a comment here.
+		"""
+		return self.oracle_class is OracleClass.EXAMPLE
+
 
 class Clause(View):
 	"""A falsifiable unit of the contract.

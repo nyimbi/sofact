@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1162 passed, 0 failed** (2026-10-13, after ADR-0051).
+`tests/ci` at the last refresh: **1181 passed, 0 failed** (2026-10-13, after ADR-0052).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -83,11 +83,11 @@ closed since carry their date.
 | FR-102 attempt telemetry | **Partly** | Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`); `test_a_step_runs_and_is_recorded` (`test_service.py:525`). **No attempt-level aggregation.** |
 | FR-103 oracle manufacturing from contract structure | **Partly** | `suggest_oracle` (`contract.py:46`) proposes a class and a command from clause polarity; `test_negative_clauses_suggest_a_property_and_positive_ones_a_contract` (`test_contract.py:64`). No test *generation*, no rank ordering, no mutation. |
 | FR-104 ranks 1–2 mandatory above L2 | **Partly, and it conflicts with §14** | `STRONG_ORACLE_MAX_RANK` (`views.py:269`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. **The code is right and the requirement is the outlier:** FR-104 says ranks 1–2 are mandatory above L2, but §14's own module-class table puts **G3 (API/service) and G4 (persistence) at L3 with rank-3 contract tests** — the same L3 `ceiling_for_rank(3)` grants. Read literally, FR-104 would make §14's G3 and G4 unreachable. Resolving it needs a spec decision (narrow FR-104 to G7-class modules, or lower §14's G3/G4), not a code change; recorded here so the conflict is not mistaken for a missing cap. |
-| FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:957`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
-| FR-106 operator examples held out | **Not built** | No holdout mechanism. |
+| FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:990`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
+| FR-106 operator examples held out | **Implemented for the context-assembly half (2026-10-13, ADR-0052); the holdout-existence half is not built** | `OracleDeclaration.held_out` (`views.py:901`) derives the holdout from the oracle class, because FR-103's rank-6 source column reads "operator-supplied cases" — so the class *is* the provenance and no `supplied_by` field was added. The factory had the defect FR-106 exists to prevent, reachable twice: `_oracle_lines` (`planner.py:248`) rendered the operator's `description`, `command_hint` and `expect_stdout_contains` into the producer's `verification_surface`, so the goal text printed the answer the *same goal's* boundaries forbade reading (FR-059); and `_command_output` (`verification.py:130`) built the violated reason as `f"stdout did not contain {required!r}"`, which `refutation_diagnosis` joins into the repair goal — so closing the planning door alone left the value arriving one phase later. Both doors are closed and tested independently: `TestAHeldOutOracleIsNamedAndNotDescribed` (6) and `TestTheHoldoutSurvivesTheRepairDoor` (2) in `test_planner.py`, `TestAnOracleIsHeldOutOrNot` (7) in `test_views.py`, 2 in `test_verification.py`. **Still not built:** holdouts *existing* for every lane above L2 and being versioned — nothing manufactures an oracle yet (FR-103, blocked on D5's target language). FR-016 (no read access to holdouts) and FR-019 (isolation by deployment boundary) remain blocked on ADR-0005. |
 | FR-107 adversarial audit of oracles | **Not built** | No code. |
-| FR-108 per-module ground-truth debt | **Implemented** | One measure, `Contract.uncovered_clauses` (`views.py:962`), read by `Contract.ground_truth_debt` and by the cap; `contract.ground_truth_debt` delegates to it. The set is FR-108's own: **executable *and* rank ≤ 5** (`COVERING_ORACLE_MAX_RANK`), because FR-103's table calls rank 6–7 "sample, not coverage". `test_debt_counts_a_weak_oracle_even_when_it_runs` (`test_contract.py`). |
-| FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:982`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
+| FR-108 per-module ground-truth debt | **Implemented** | One measure, `Contract.uncovered_clauses` (`views.py:995`), read by `Contract.ground_truth_debt` and by the cap; `contract.ground_truth_debt` delegates to it. The set is FR-108's own: **executable *and* rank ≤ 5** (`COVERING_ORACLE_MAX_RANK`), because FR-103's table calls rank 6–7 "sample, not coverage". `test_debt_counts_a_weak_oracle_even_when_it_runs` (`test_contract.py`). |
+| FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:1015`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
 | FR-110 O8 Integration oracle class | **Implemented (2026-10-13, ADR-0051) — as a P7 check, not an enum member** | `check_boundary_contracts` (`integration.py`), reported as the `boundary_contracts` row; `IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT`; FR-110 in `INTEGRATION_REQUIREMENTS`. `OracleClass` keeps its **7** members deliberately: every member is a *per-clause* shape (a `Clause` field, ranked, mapped by `_STEP_FOR_ORACLE` to the P5 session that discharges that one clause), and FR-110's own premise is that per-module verification "structurally cannot detect cross-module incoherence" — so O8 cannot be one of them. The gap was real and it was at P7: a consumer could import a **declared** dependency and call a name the producer never declared, and FR-113 (edge declared) and FR-112 (producer matches *its own* declaration) both passed. `test_the_neighbours_pass_while_the_boundary_fails` (`test_integration.py`). |
 | FR-111 P7 build order | **Implemented** | `check_build_order` (`integration.py:650`); `test_a_module_built_before_its_dependency_is_a_finding` (`test_integration.py:331`). |
 | FR-112 empty public-API diff | **Implemented** (2026-10-12, ADR-0027) | `check_interface_conformance` (`integration.py:754`), `public_surface` (`:700`), `Module.surface` (`views.py:510`); `test_a_declared_name_the_build_does_not_expose_is_a_finding` (`test_integration.py:422`), `test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it` (`:513`). Discharged **only when a module declares a surface** — a proposal derives none, so the default report still names FR-112. |
@@ -235,6 +235,20 @@ bound) is **partly** (per-step only).
    producer ever declared. FR-113 and FR-112 each held half of that question and
    neither asked it, so a system could pass both and not run. O8 needs no target
    language, which is why it came out of the blocked set.
+   **Narrowed a third time 2026-10-13 (ADR-0052).** FR-106 was listed here as "Not
+   built — no holdout mechanism", which was true and understated it: the factory had
+   the defect FR-106 exists to prevent, and it had it twice. `_oracle_lines` rendered
+   the operator's example oracle — description, command and expected output — into the
+   producer's `verification_surface`, while the *same goal's* boundaries said "Do not
+   read the oracle corpus, holdout scenarios, or factory credentials (FR-059)": the
+   prompt printed the answer it forbade reading. And the repair door leaked it again,
+   because `_command_output` builds the violated reason as `stdout did not contain
+   {value!r}` and `refutation_diagnosis` joins that reason into the repair goal. Both
+   are closed by one derived predicate, `OracleDeclaration.held_out`, applied at both
+   renderers. This is the context-assembly half of R8 — "a permission boundary, not a
+   prompt instruction" — and it needed no target language, which is why it too came out
+   of the blocked set. FR-106's other half, holdouts *existing* and versioned, is still
+   blocked on the same thing as FR-103: nothing manufactures an oracle to hold out.
 4. ~~**No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).**~~
    **Closed 2026-10-13 (ADR-0040), except FR-120's delivered-system half.** The report, the deploy gate and the
    Mode M handover are built: `DeliveryReport`'s five FR-118 statements are five required

@@ -24,12 +24,18 @@ from sofact.planner import (
 	GOAL_PLAN_TIERS,
 	check_integrity,
 	compile_plan,
+	refutation_diagnosis,
+	repair_goal,
 	step_kind_for,
 )
+from sofact.verification import verify
 from sofact.views import (
 	Clause,
 	Contract,
+	Evidence,
+	EvidenceKind,
 	GoalPlan,
+	GoalStep,
 	GoalStyle,
 	IntegrityOutcome,
 	IntegritySubject,
@@ -37,6 +43,7 @@ from sofact.views import (
 	OracleDeclaration,
 	PlanStepKind,
 	StepBudget,
+	VerdictOutcome,
 	content_hash,
 )
 
@@ -442,6 +449,218 @@ def _empty_contract() -> Contract:
 		},
 	)
 	return full.model_copy(update={"clauses": ()})
+
+
+# --------------------------------------------------------------------------- #
+# held-out operator examples (FR-106)
+# --------------------------------------------------------------------------- #
+
+_HELD_OUT_COMMAND = "pytest tests/test_report.py"
+_HELD_OUT_EXPECTED = "TOTAL 42"
+
+
+def _held_out_contract(make_contract: MakeContract) -> Contract:
+	"""One clause whose oracle is the operator's own example, payload and all."""
+	return make_contract(
+		(
+			"the report totals every line item.",
+			OracleDeclaration(
+				oracle_class=OracleClass.EXAMPLE,
+				description=f"the report shows {_HELD_OUT_EXPECTED}",
+				command_hint=_HELD_OUT_COMMAND,
+				expect_stdout_contains=_HELD_OUT_EXPECTED,
+			),
+		)
+	)
+
+
+def _steps_covering(plan: GoalPlan, contract: Contract) -> tuple[GoalStep, ...]:
+	"""Every step that renders this contract's clause, bootstrap excluded.
+
+	Bootstrap covers no clause and so renders no oracle line at all. Asserting the
+	holdout against it would pass without the fix, which is a canary that never ran —
+	so the tests below select the steps that actually carry the clause.
+	"""
+	ids = {clause.id for clause in contract.clauses}
+	covering = tuple(step for step in plan.steps if ids & set(step.clause_ids))
+	assert covering, "no step covers the contract's clause, so the assertion is vacuous"
+	return covering
+
+
+class TestAHeldOutOracleIsNamedAndNotDescribed:
+	"""FR-106: the operator's example reaches no producer context (FR-017)."""
+
+	def test_the_expected_output_is_not_in_any_goal(self, make_contract: MakeContract) -> None:
+		"""The leak this closes: the prompt printed the answer it forbade reading."""
+		contract = _held_out_contract(make_contract)
+		plan = compile_plan(contract)
+
+		for step in _steps_covering(plan, contract):
+			text = step.goal.render(plan.goal_style)
+			assert _HELD_OUT_EXPECTED not in text, (
+				f"{step.kind.value} goal hands the producer the expected output"
+			)
+			assert _HELD_OUT_COMMAND not in text, (
+				f"{step.kind.value} goal hands the producer the operator's command"
+			)
+
+	def test_the_control_arm_prints_the_payload_it_would_otherwise_withhold(
+		self, make_contract: MakeContract
+	) -> None:
+		"""Proves the assertion above can fail: the same payload in a non-held-out class.
+
+		Without this, "the expected output is absent" is indistinguishable from a
+		renderer that prints no oracle line for any class.
+		"""
+		contract = make_contract(
+			(
+				"the report totals every line item.",
+				OracleDeclaration(
+					oracle_class=OracleClass.GOLDEN,
+					description=f"the report shows {_HELD_OUT_EXPECTED}",
+					command_hint=_HELD_OUT_COMMAND,
+					expect_stdout_contains=_HELD_OUT_EXPECTED,
+				),
+			)
+		)
+		plan = compile_plan(contract)
+		text = " ".join(
+			step.goal.render(plan.goal_style) for step in _steps_covering(plan, contract)
+		)
+
+		assert _HELD_OUT_EXPECTED in text
+		assert _HELD_OUT_COMMAND in text
+
+	def test_the_operator_case_is_not_in_the_outcome_either(
+		self, make_contract: MakeContract
+	) -> None:
+		"""``_oracle_lines`` feeds the verification surface, but the description is the
+		operator's prose and must not surface through any other part of the goal."""
+		contract = _held_out_contract(make_contract)
+		plan = compile_plan(contract)
+		parts = tuple(
+			part
+			for step in _steps_covering(plan, contract)
+			for part in (
+				step.goal.outcome,
+				*step.goal.verification_surface,
+				*step.goal.constraints,
+				*step.goal.boundaries,
+				step.goal.iteration_policy,
+				step.goal.blocked_stop_condition,
+			)
+		)
+
+		assert not any("the report shows" in part for part in parts)
+
+	def test_the_holdout_is_stated_rather_than_silent(self, make_contract: MakeContract) -> None:
+		"""A producer told only "example oracle" would read a check it cannot see.
+
+		Naming the holdout is the difference between a bounded producer and one that
+		concludes the factory lost the detail.
+		"""
+		contract = _held_out_contract(make_contract)
+		plan = compile_plan(contract)
+		text = " ".join(
+			step.goal.render(plan.goal_style) for step in _steps_covering(plan, contract)
+		)
+
+		assert "held out" in text
+		assert "FR-106" in text
+
+	def test_the_obligation_and_the_strength_still_reach_the_producer(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The holdout withholds the case, not the obligation.
+
+		A producer that cannot see *what* is required cannot build to the intent, and
+		FR-106's whole premise is that the intent is what the example proxies.
+		"""
+		contract = _held_out_contract(make_contract)
+		plan = compile_plan(contract)
+		text = " ".join(
+			step.goal.render(plan.goal_style) for step in _steps_covering(plan, contract)
+		)
+
+		assert "the report totals every line item" in text
+		assert "example oracle (rank 6)" in text
+
+	def test_a_non_held_out_oracle_still_prints_its_payload(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The holdout is scoped to FR-106's class, not applied to every oracle.
+
+		A golden oracle's command is the thing the producer is asked to reproduce, so
+		suppressing it would be the opposite repair.
+		"""
+		contract = make_contract(
+			(
+				"the report matches the recording.",
+				OracleDeclaration(
+					oracle_class=OracleClass.GOLDEN,
+					description="the rendered report matches the recorded one",
+					command_hint="diff -u golden.txt out.txt",
+				),
+			),
+		)
+		plan = compile_plan(contract)
+		text = " ".join(
+			step.goal.render(plan.goal_style) for step in _steps_covering(plan, contract)
+		)
+
+		assert "diff -u golden.txt out.txt" in text
+		assert "held out" not in text
+
+
+class TestTheHoldoutSurvivesTheRepairDoor:
+	"""The second route: a violated verdict's reason is joined into the repair goal.
+
+	``_oracle_lines`` is the planning door; this is the repair one. Both carry the
+	oracle's payload into producer context, and FR-106 is a claim about the payload
+	rather than about a function — so the check has to hold at each door, and the
+	composition is asserted here rather than inferred from two unit tests.
+	"""
+
+	def _violated_reason(self, contract: Contract) -> str:
+		clause = contract.clauses[0]
+		report = verify(
+			contract,
+			[
+				Evidence.record(
+					clause_id=clause.id,
+					kind=EvidenceKind.COMMAND_OUTPUT,
+					produced_by="test-verifier",
+					payload={"exit_code": 0, "stdout": "nothing like the operator's case"},
+				),
+			],
+		)
+		assert report.outcome is VerdictOutcome.VIOLATED, "the fixture must refute the clause"
+		return refutation_diagnosis(tuple(report.violated))
+
+	def test_the_repair_goal_does_not_carry_the_expected_output(
+		self, make_contract: MakeContract
+	) -> None:
+		contract = _held_out_contract(make_contract)
+		diagnosis = self._violated_reason(contract)
+		goal = repair_goal(contract.clauses, diagnosis, attempt=1, max_attempts=2)
+		text = goal.render()
+
+		assert _HELD_OUT_EXPECTED not in text, "the repair goal re-opens the planning holdout"
+		assert _HELD_OUT_COMMAND not in text
+		assert "held out" in text
+
+	def test_the_diagnosis_still_says_what_failed(self, make_contract: MakeContract) -> None:
+		"""A holdout that also silences the *fact* of the failure would be a worse defect.
+
+		The producer has to be able to act, so the reason names the clause and the kind
+		of failure while withholding the value.
+		"""
+		contract = _held_out_contract(make_contract)
+		diagnosis = self._violated_reason(contract)
+
+		assert "the report totals every line item" in diagnosis
+		assert "stdout did not contain" in diagnosis
+		assert "held out" in diagnosis
 
 
 # --------------------------------------------------------------------------- #

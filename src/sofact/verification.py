@@ -127,6 +127,21 @@ def _command_output(
 	stdout = _as_str(payload.get("stdout")) or ""
 	required = oracle.expect_stdout_contains
 	if required is not None and required not in stdout:
+		# A held-out oracle's expected output is the operator's case, and this reason
+		# is the one string that crosses from the verdict into producer context:
+		# ``refutation_diagnosis`` joins it into the repair goal, so quoting the value
+		# here would re-open by the repair door what ``_oracle_lines`` closed by the
+		# planning one (FR-106, FR-017). The operator does not lose it — the oracle is
+		# in the contract and the raw stdout is in this clause's evidence — so the
+		# reason stays actionable without being readable by the party it is withheld
+		# from. Every other oracle class quotes the value as before.
+		if oracle.held_out:
+			return (
+				VerdictOutcome.VIOLATED,
+				"stdout did not contain the operator's required output, which is held "
+				"out from this report (FR-106); the expected value is on the clause's "
+				"oracle and the observed stdout is in this clause's evidence",
+			)
 		return VerdictOutcome.VIOLATED, f"stdout did not contain {required!r}"
 	if exit_code != oracle.expect_exit_code:
 		return (

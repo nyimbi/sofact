@@ -234,6 +234,60 @@ def test_required_stdout_must_appear(make_contract: MakeContract, make_oracle: M
 	assert present.outcome is VerdictOutcome.SATISFIED
 
 
+def test_a_held_out_oracles_reason_does_not_quote_the_expected_output(
+	make_contract: MakeContract,
+) -> None:
+	"""FR-106 through the repair door: the reason is producer context.
+
+	``refutation_diagnosis`` joins each violated verdict's reason into the repair goal,
+	so a reason quoting the operator's expected output would hand the producer exactly
+	what ``_oracle_lines`` withholds. The verdict itself is unchanged — still VIOLATED,
+	still scoped to this clause — and the value stays readable on the contract.
+	"""
+	contract = make_contract(
+		(
+			"the report totals every line item.",
+			OracleDeclaration(
+				oracle_class=OracleClass.EXAMPLE,
+				description="the report shows TOTAL 42",
+				command_hint="pytest tests/test_report.py",
+				expect_stdout_contains="TOTAL 42",
+			),
+		)
+	)
+	clause = only(contract)
+	report = verify(
+		contract,
+		[observe(clause, EvidenceKind.COMMAND_OUTPUT, {"exit_code": 0, "stdout": "nothing here"})],
+	)
+
+	assert report.outcome is VerdictOutcome.VIOLATED
+	reason = report.verdicts[0].reason
+	assert "TOTAL 42" not in reason, "the reason hands the producer the held-out value"
+	assert "held out" in reason
+	assert "FR-106" in reason
+
+
+def test_a_non_held_out_reason_still_quotes_the_expected_output(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""The control arm: the suppression is scoped to the held-out class.
+
+	Without this, a reason that never quotes anything would satisfy the test above
+	while making every other verdict less actionable.
+	"""
+	contract = make_contract(
+		("the CLI prints the version", make_oracle("echo ok", expect_stdout_contains="v1.2.3"))
+	)
+	clause = only(contract)
+	report = verify(
+		contract,
+		[observe(clause, EvidenceKind.COMMAND_OUTPUT, {"exit_code": 0, "stdout": "ok"})],
+	)
+
+	assert "v1.2.3" in report.verdicts[0].reason
+
+
 def test_timeout_is_insufficient_not_violated(
 	make_contract: MakeContract, make_oracle: MakeOracle
 ) -> None:

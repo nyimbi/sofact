@@ -251,10 +251,30 @@ def _oracle_lines(clauses: Sequence[Clause]) -> tuple[str, ...]:
 	Strength is stated because it is the thing the producer most needs to know and is
 	least likely to infer: a rank-6 oracle and a rank-1 oracle can carry identical
 	prose, and only one of them can support an autonomous build.
+
+	**A held-out oracle is named and not described (FR-106).** This function is the one
+	place an oracle's payload reaches a producer's goal text, and every goal builder
+	renders through it, so the holdout is applied here rather than at six call sites —
+	the same argument ADR-0050 made for stating coverage once. What a held-out clause
+	still says is the obligation, its class and its rank: enough to build to the intent,
+	and deliberately not the expected output, which is the operator's case and the thing
+	FR-017 calls a lane-halting defect to reveal.
+
+	The line is *not* silent about being held out. A producer told only "example oracle
+	(rank 6)" would read a check it cannot see, and might reasonably conclude the factory
+	had lost the detail rather than withheld it; naming the holdout is the difference
+	between a bounded producer and a confused one.
 	"""
 	lines: list[str] = []
 	for clause in clauses:
 		oracle = clause.oracle
+		if oracle.held_out:
+			lines.append(
+				f"{oracle.oracle_class.value} oracle (rank {oracle.rank}), held out: "
+				f"checked against the operator's own case, which is not shown here "
+				f"(FR-106). Satisfy the obligation above, not a guessed example."
+			)
+			continue
 		line = f"{oracle.oracle_class.value} oracle (rank {oracle.rank}): {oracle.description}"
 		if oracle.command_hint is not None:
 			line += f" — run `{oracle.command_hint}`, expect exit {oracle.expect_exit_code}"

@@ -52,12 +52,24 @@ def suggest_oracle(stem: ClauseStem) -> OracleDeclaration:
 	command, because SoFact does not know how to run the operator's system.
 	"""
 	assert stem.statement.strip(), "cannot suggest an oracle for an empty stem"
-	return OracleDeclaration(
+	suggested = OracleDeclaration(
 		oracle_class=OracleClass.PROPERTY
 		if stem.kind is ClauseKind.NEGATIVE
 		else OracleClass.CONTRACT,
 		description=stem.statement,
 	)
+	# FR-106 holds an EXAMPLE oracle's payload back from the producer, because FR-103's
+	# table says an example is the *operator's* case. That reading is only sound while
+	# the factory manufactures none: a suggested example would be the factory's own
+	# scenario, withheld from the producer for no reason and unreadable by the operator
+	# who is supposed to have supplied it. The assertion is what keeps the property's
+	# premise true rather than assumed.
+	assert not suggested.held_out, (
+		"the factory must not manufacture a held-out oracle; FR-106's holdout is the "
+		"operator's example, and a suggestion carrying one would withhold the factory's "
+		"own words from the factory's own producer"
+	)
+	return suggested
 
 
 def executable_clauses(contract: Contract) -> tuple[Clause, ...]:
