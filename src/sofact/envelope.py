@@ -16,12 +16,20 @@ refuses, and a delivery under a floor is a small project — a legitimate thing 
 A gate that failed on the floor would refuse to build anything smaller than a platform,
 which is the opposite of what a factory that must earn trust should do.
 
-Three of the eight dimensions are **unmeasured**, and that is reported rather than
+Four of the eight dimensions are **unmeasured at P3**, and that is reported rather than
 papered over. Nothing in the log declares a *system* (§7.2's decomposition maps clauses
 to modules, and §1.3 counts systems), nothing reads the delivered source to count lines
 (ADR-0025 leaves the target language open, so SoFact does not know what a source file
-is), and wall-clock and human-minutes are outcomes of a build rather than facts about a
-plan. Each unmeasured dimension names what would have to exist before anything could be
+is), and wall-clock is an outcome of a build rather than a fact about a plan.
+
+``human_minutes`` is the one that moved (FR-160, ADR-0043). It is still not a fact about
+a plan, so it is not in :data:`MEASURED_AT_P3` — but it is now measured at P8 whenever a
+gate recorded what it cost, which is why :func:`measure` takes it as an argument rather
+than reading it from the decomposition. Nothing observes a person reading, so the number
+is *declared* by the operator; every other derivation here is a count of declarations
+the log already holds.
+
+Each unmeasured dimension names what would have to exist before anything could be
 counted, which is a work item rather than a gap in the arithmetic.
 """
 
@@ -59,9 +67,11 @@ MEASURED_AT_P3: tuple[EnvelopeDimension, ...] = (
 
 Five of §1.3's eight are not here, and none of the five is an omission: ``systems``
 needs a tier the decomposition does not have, ``delivered_loc`` needs a declared
-artefact root, and ``human_minutes``/``wall_clock_days`` are outcomes of the build. The
-set is a constant rather than a computed thing so that :func:`measure` cannot silently
-start reporting a dimension by accident.
+artefact root, and ``wall_clock_days`` is an outcome of the build. ``human_minutes`` is
+the fifth and is measured elsewhere — at P8, from the gate costs the operator recorded
+(FR-160), which is why it is absent from this set and still measured by :func:`measure`.
+The set is a constant rather than a computed thing so that :func:`measure` cannot
+silently start reporting a dimension by accident.
 """
 
 UNMEASURED_AT_P3: tuple[EnvelopeDimension, ...] = tuple(
@@ -137,6 +147,7 @@ def measure(
 	decomposition: Decomposition | None,
 	*,
 	value_hypothesis_declared: bool | None = None,
+	human_minutes: float | None = None,
 ) -> EnvelopeActuals:
 	"""Every dimension's actual, from what the log holds (NFR-025, FR-118).
 
@@ -150,9 +161,18 @@ def measure(
 	so a two-state flag would make every P3 run report a missing value hypothesis — a
 	measurement of the caller's silence, printed as a fact about the project.
 
+	``human_minutes`` is the same three-state shape for the same reason (FR-160): it is
+	the sum of what the gates recorded, and ``None`` means no gate has recorded a cost
+	rather than that the gates were free. §1.3's 180-600 is a *budget*; the actual is
+	what the humans spent, and the whole point of FR-160 is that this number is the one
+	the factory is otherwise blind to.
+
 	Every derivation here is a *count of declarations*, never a reading of code. SoFact
 	holds no build, and ADR-0025 leaves the language open, so a number obtained by
 	looking at a workspace would be a number about something the factory did not decide.
+	``human_minutes`` is the one exception and is *declared by the operator*, which is
+	what makes it admissible: nothing in the log observes a person reading, so a derived
+	number would be an invention rather than a measurement.
 	"""
 	if decomposition is None:
 		unrun = tuple(
@@ -199,6 +219,13 @@ def measure(
 			else "the approved specification declares none, which FR-085 makes a P2 gate "
 			"failure — reaching P3 in this state means the gate was bypassed",
 		)
+	if human_minutes is not None:
+		actuals[EnvelopeDimension.HUMAN_MINUTES] = (
+			human_minutes,
+			f"{human_minutes:g} human-minute(s) recorded across the gates that were "
+			"measured (FR-160). §1.3's figure is a budget; this is what the humans spent, "
+			"declared by the operator because nothing in the log observes a person reading",
+		)
 
 	reasons: dict[EnvelopeDimension, str] = {
 		EnvelopeDimension.SYSTEMS: (
@@ -212,8 +239,9 @@ def measure(
 			"declared artefact root first"
 		),
 		EnvelopeDimension.HUMAN_MINUTES: (
-			"gate cost is an outcome of the build, not a fact about a plan (FR-160 makes "
-			"it a measurement each gate records, and no gate records one yet)"
+			"no gate has recorded what it cost (FR-160). §1.3's 180-600 is a budget and "
+			"this is the actual; `sofact gate --cost` is what records one, and a factory "
+			"that reported zero here would be reporting that its gates were free"
 		),
 		EnvelopeDimension.WALL_CLOCK_DAYS: (
 			"wall clock is spent by dispatch, not planned by decomposition. Per-step "

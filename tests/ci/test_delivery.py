@@ -53,18 +53,23 @@ from sofact.views import (
 	Contract,
 	DeliveryArtifact,
 	DeliveryArtifactKind,
+	DeliveryEnvelope,
 	DeliveryGate,
 	DeliveryReport,
 	DeployRecord,
 	ElicitationDimension,
 	EnvelopeDimension,
 	GateCheck,
+	GateCost,
 	Handover,
 	InheritedOracle,
 	MaintenanceLane,
 	ModuleClass,
 	OracleClass,
 	OracleDeclaration,
+	Phase,
+	PhaseGate,
+	PhaseStatus,
 	SpecificationDraft,
 	TraceLink,
 	UnverifiedClause,
@@ -671,6 +676,127 @@ class TestTheModeGCap:
 		check = next(c for c in report.checks if c.name == "autonomy_capped_for_mode_g")
 		assert check.passed is True
 		assert report.module_autonomy.name in check.detail
+
+
+async def _walk_to_the_specification_gate(service: FactoryService) -> None:
+	"""Complete P0 and P1, present P2's gate and pass it (FR-061).
+
+	Written out rather than imported from ``test_phase``, which is a test module and not
+	a shared fixture: a suite that imported another suite's helper would break the moment
+	that helper changed shape for its own reasons.
+	"""
+	await service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE)
+	await service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
+	await service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE)
+	await service.approve_gate(Phase.SPECIFY, by="operator")
+
+
+# --------------------------------------------------------------------------- #
+# FR-160 — the gate cost travels with the report, and unmeasured is not zero
+# --------------------------------------------------------------------------- #
+
+
+class TestTheGateCostIsReported:
+	"""FR-160 says both numbers "must appear in the delivery report" (§20.2).
+
+	The report is the last artefact a human reads before the deploy gate, so a cost
+	recorded but not carried there would be a measurement nobody acts on. What is under
+	test is that the pair survives the trip *and* that the empty case reads as
+	unmeasured: a report printing an empty table is the same shape as a report printing
+	zero, and only one of those is true.
+	"""
+
+	def a_cost(self, minutes: float = 90.0, rework: float = 0.25) -> GateCost:
+		return GateCost(
+			gate=PhaseGate.SPECIFICATION,
+			human_minutes=minutes,
+			rework_fraction=rework,
+			recorded_by="operator",
+			recorded_at=now(),
+		)
+
+	def test_the_mean_rework_fraction_is_a_mean_and_not_a_sum(self) -> None:
+		"""Rework is a share of each gated slice, so two gates at a quarter each are a
+		quarter on average -- not a half. Summing shares is the arithmetic that would
+		report more rework the more gates a project has."""
+		two = a_report(gate_costs=(self.a_cost(90.0, 0.25), self.a_cost(30.0, 0.75)))
+
+		assert two.rework_fraction == pytest.approx(0.5)
+
+	def test_no_recorded_cost_is_none_rather_than_zero(self) -> None:
+		assert a_report().gate_costs == ()
+		assert a_report().rework_fraction is None
+
+	async def test_an_unmeasured_project_reports_unmeasured_rather_than_failing(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A gate check that *failed* on an unmeasured project would block a deploy for a
+		measurement the operator has not been asked for yet -- FR-160 asks for the number
+		to be reported, not for the gate to depend on it. And the detail has to say
+		*unmeasured*, because an empty table and a zero are the same shape on a terminal
+		and only one of them is true."""
+		# NFR-025 makes the envelope configuration, so the fixture names one: an
+		# unconfigured service reports no actuals at all, which is a different claim
+		# from a configured envelope with an unmeasured dimension.
+		service = synthetic_service(home, tmp_path, "complete", envelope=DeliveryEnvelope())
+		await service.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(service, commands="true")
+		await specify_and_approve(service, contract_id)
+		await decompose_and_approve(service, contract_id)
+		plan = await service.compile_plan(contract_id)
+
+		rendered = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+
+		assert rendered.gate_costs == ()
+		assert rendered.rework_fraction is None
+		check = next(c for c in rendered.checks if c.name == "gate_cost_reported")
+		assert check.passed is True
+		assert "unmeasured rather than zero" in check.detail
+		assert rendered.envelope_actuals is not None
+		minutes = next(
+			m
+			for m in rendered.envelope_actuals.measurements
+			if m.dimension is EnvelopeDimension.HUMAN_MINUTES
+		)
+		assert minutes.actual is None
+		assert "sofact gate --cost" in (minutes.detail or "")
+
+	async def test_a_recorded_cost_reaches_the_report_the_deploy_gate_presents(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The pair has to survive the trip to the report, because the report is the last
+		artefact a human reads before the deploy gate: a cost recorded but not carried
+		there is a measurement nobody acts on."""
+		# NFR-025 makes the envelope configuration, so the fixture names one: an
+		# unconfigured service reports no actuals at all, which is a different claim
+		# from a configured envelope with an unmeasured dimension.
+		service = synthetic_service(home, tmp_path, "complete", envelope=DeliveryEnvelope())
+		await service.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(service, commands="true")
+		await specify_and_approve(service, contract_id)
+		await decompose_and_approve(service, contract_id)
+		plan = await service.compile_plan(contract_id)
+
+		# FR-160 refuses a cost for a gate nobody sat at, so the approval comes first --
+		# which is the requirement's own ordering rather than a test convenience.
+		await _walk_to_the_specification_gate(service)
+		cost = await service.record_gate_cost(
+			PhaseGate.SPECIFICATION, human_minutes=90.0, rework_fraction=0.25, by="operator"
+		)
+		rendered = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+
+		assert rendered.gate_costs == (cost,)
+		assert rendered.rework_fraction == pytest.approx(0.25)
+		check = next(c for c in rendered.checks if c.name == "gate_cost_reported")
+		assert check.passed is True
+		assert "specification 90min/0.25 by operator" in check.detail
+		assert rendered.envelope_actuals is not None
+		minutes = next(
+			m
+			for m in rendered.envelope_actuals.measurements
+			if m.dimension is EnvelopeDimension.HUMAN_MINUTES
+		)
+		assert minutes.actual == 90.0
 
 
 # --------------------------------------------------------------------------- #

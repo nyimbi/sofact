@@ -55,6 +55,7 @@ KIND_TO_FIELD: dict[LedgerKind, str] = {
 	LedgerKind.CUT_RECORDED: "cuts",
 	LedgerKind.DELIVERY_RENDERED: "deliveries",
 	LedgerKind.DEPLOY_RECORDED: "deploys",
+	LedgerKind.GATE_COST_RECORDED: "gate_costs",
 }
 """Which event kind lands in which state field. Transcribed from ``fold``'s arms so
 that adding a kind without a field (or a field without a kind) fails a test."""
@@ -90,7 +91,7 @@ def test_every_event_kind_lands_in_a_field_and_every_field_has_a_kind() -> None:
 def test_an_empty_log_folds_to_a_state_with_every_field_empty() -> None:
 	state = fold(())
 
-	assert len(ProjectState.model_fields) == 25, "a new state field must be folded too"
+	assert len(ProjectState.model_fields) == 26, "a new state field must be folded too"
 	for name in ProjectState.model_fields:
 		value = getattr(state, name)
 		assert value == (), f"{name} should be empty, got {value!r}"

@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **989 passed, 0 failed**. The table below was written
+`tests/ci` at the last refresh: **1003 passed, 0 failed**. The table below was written
 at 725; the verdicts are the part that matters and the ones closed since carry their
 date.
 
@@ -134,7 +134,7 @@ date.
 | FR-157 deployment-scoped autonomy target | **Not built** | No deployment scope type; the θ gate (FR-024–035) is absent so nothing can be scoped. |
 | FR-158 evolvability debt reported as first-class, Mode M L1 | **Not built** | No code. ADR-0011 Decision 1 says it "must be reported" — see §3. |
 | FR-159 differential change-cost oracle | **Not built** | ADR-0011 records it as "specified and **unbuilt**". |
-| FR-160 gate-cost measurement | **Not built** | No code. |
+| FR-160 gate-cost measurement | **Implemented** | `GateCost` (`views.py`) carries the pair FR-160 names — `human_minutes` and `rework_fraction` — and `FactoryService.record_gate_cost` refuses a cost for a gate whose phase is not complete, because the approval is the evidence a human was there. `ProjectState.gate_cost` reads the latest per gate so `total_human_minutes` cannot double-count a re-measure, and `None` means unmeasured rather than free. `envelope.measure(human_minutes=...)` now measures §1.3's `HUMAN_MINUTES` (one fewer unmeasured dimension), the pair travels into `DeliveryReport.gate_costs` with a mean `rework_fraction`, and the `gate_cost_reported` check reports without failing on an unmeasured project. `sofact gate --cost P2:90:0.25` records one; `sofact deliver` prints the pair under its own heading (ADR-0043). 4 + 4 + 6 tests; canaried three times. |
 | FR-161 adapter table is data, not code | **Implemented** | `HarnessSpec.from_mapping` refuses unknown/missing fields by name (`harness.py:236`); `test_a_malformed_field_is_refused_by_name` (`test_harness.py:640`), `test_an_unknown_field_is_refused` (`:662`). |
 | FR-162 verdict describes one attempt | **Implemented** | `verify` run-scoped (`verification.py:232`); `test_a_verdict_can_be_scoped_to_one_run` (`test_verification.py:114`), `test_scoping_to_a_run_that_observed_nothing_is_insufficient` (`:135`). |
 | FR-163 completed session triggers the check | **Implemented** | `check_dispatch` returns `None` unless `outcome == COMPLETED` (`service.py:523`); `test_a_completed_dispatch_is_checked_without_a_declaration` (`test_service.py:1127`), `test_a_failed_session_is_not_checked` (`:1148`). |
@@ -160,10 +160,10 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 75 |
+| Implemented | 76 |
 | Partly | 26 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 18 |
+| Not built | 17 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so

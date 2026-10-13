@@ -67,6 +67,7 @@ __all__ = [
 	"Evidence",
 	"EvidenceKind",
 	"GateCheck",
+	"GateCost",
 	"Goal",
 	"GoalEntry",
 	"GoalPlan",
@@ -1490,6 +1491,12 @@ diagram draws P2 and P3 as gates and P4's is sampled rather than blocking, so a
 reader of the picture alone would place three."""
 
 
+PHASE_GATE_INVERSE: dict[PhaseGate, Phase] = {gate: phase for phase, gate in PHASE_GATE.items()}
+"""The phase a gate belongs to. Derived from :data:`PHASE_GATE`, so the two cannot
+disagree — and derived rather than written out because a second hand-maintained table
+is a second place for a gate to be attached to the wrong phase."""
+
+
 class PhaseStatus(StrEnum):
 	"""Where a phase is. ``AWAITING_GATE`` is the one that carries FR-061.
 
@@ -1571,6 +1578,57 @@ class PhaseAdvance(View):
 	def is_blocking(self) -> bool:
 		"""Whether this transition leaves the pipeline stopped at a gate (FR-061)."""
 		return self.status is PhaseStatus.AWAITING_GATE
+
+
+class GateCost(View):
+	"""FR-160's measurement: what one human gate actually cost.
+
+	§1.3's 180-600 human-minute figure is a **budget**, and FR-160's argument for
+	recording against it is that a factory measuring the producer's budget and not the
+	reviewer's is optimising its cheapest step. So every gate records two numbers: the
+	human-minutes it took, and the share of the slice the operator sent back.
+
+	Both are **declared**, and the instrument being the human is not a weakness to be
+	designed around — it is the measurement. Nothing in SoFact observes a person
+	reading, and the log holds no clock on human attention, so a *derived* number here
+	would be an invention wearing a measurement's clothes. This is the one operator-
+	supplied value in SoFact that is not a restatement of something the log already
+	holds, which is why it is admissible at all: FR-093's Definition of Done is derived
+	because the oracle already states it, and this is recorded because nothing does.
+
+	``recorded_by`` names the declarer for the same reason every gate names its
+	approver: an unattributed number is one nobody is accountable for. The report marks
+	these as declared rather than observed (NFR-024), so a reader is never told the
+	factory measured something it was told.
+
+	``rework_fraction`` is a share of the *slice* — the requirements or modules put in
+	front of the operator — not of the time. §20.2's claim is about attention, and a
+	gate that cost 40 minutes and sent 60% of the artefact back is a different datum
+	from one that cost 40 and sent nothing back, which is why the two are separate
+	fields rather than one "cost" number.
+	"""
+
+	gate: PhaseGate
+	human_minutes: float
+	rework_fraction: float
+	recorded_by: NonEmptyStr
+	recorded_at: datetime
+
+	@model_validator(mode="after")
+	def _a_cost_is_a_measurement(self) -> Self:
+		if self.human_minutes < 0:
+			raise ValueError(
+				f"a gate cannot cost {self.human_minutes:g} human-minutes; a negative "
+				"cost would lower §1.3's total, which is the one direction a measurement "
+				"of the binding constraint must not be able to move (FR-160)"
+			)
+		if not 0.0 <= self.rework_fraction <= 1.0:
+			raise ValueError(
+				f"the rework fraction of {self.rework_fraction:g} is not a share; 0.0 is "
+				"a slice the operator accepted whole and 1.0 is one returned entire, and "
+				"nothing outside that range is a fraction of a slice (FR-160)"
+			)
+		return self
 
 
 # --------------------------------------------------------------------------- #
@@ -2594,7 +2652,41 @@ class DeliveryReport(View):
 	``None`` when the deployment configured no envelope, which is a different statement
 	from "every dimension is within bounds" — the report says which it is rather than
 	printing an empty table that reads as compliance.
+
+	Carries FR-160's human-minutes when any gate recorded a cost, because §1.3's
+	``human_minutes`` is one of the eight dimensions. The rework fraction is not a
+	dimension and is carried separately in :attr:`gate_costs`.
 	"""
+
+	gate_costs: tuple[GateCost, ...] = ()
+	"""FR-160's measurement, carried by the report rather than computed beside it.
+
+	FR-160 says both numbers "must appear in the delivery report", and the requirement's
+	argument is §20.2's: if review is the binding constraint once implementation is
+	agent-driven, a factory that measures the producer's budget but not the reviewer's is
+	optimising its cheapest step. So the per-gate costs travel with the report the deploy
+	gate presents, and a report over a project whose gates recorded nothing says so
+	instead of printing an empty table.
+
+	Empty is a real state and means *unmeasured*, not *free*. The sum of these is
+	:attr:`sofact.views.ProjectState.total_human_minutes`, and it reaches the report
+	through ``envelope_actuals``; this field is what makes the per-gate detail — including
+	the rework fraction, which no envelope dimension holds — readable at the gate.
+	"""
+
+	@property
+	def rework_fraction(self) -> float | None:
+		"""The mean share of each gated slice returned to the producer (FR-160).
+
+		``None`` when no gate recorded a cost, for the reason every unmeasured dimension
+		gives: zero would be the claim that nothing was ever sent back, which is a
+		different and flattering statement. A mean rather than a sum because a fraction of
+		a slice does not add across gates — four gates each returning a quarter is a
+		quarter, not one.
+		"""
+		if not self.gate_costs:
+			return None
+		return sum(c.rework_fraction for c in self.gate_costs) / len(self.gate_costs)
 
 	autonomy: AutonomyLevel
 	"""The lowest ceiling anything in the delivery carries (FR-122), capped at L2 (FR-123).
@@ -3990,6 +4082,7 @@ class LedgerKind(StrEnum):
 	CUT_RECORDED = "cut.recorded"
 	DELIVERY_RENDERED = "delivery.rendered"
 	DEPLOY_RECORDED = "deploy.recorded"
+	GATE_COST_RECORDED = "gate_cost.recorded"
 
 
 class LedgerEntry(View):
@@ -4153,6 +4246,39 @@ class ProjectState(View):
 	"""Every deploy decision, oldest first (FR-119). Appended, never superseded: §1.5
 	makes deploy a permanent human act, and a second deploy is a second act rather than
 	an amendment of the first."""
+
+	gate_costs: tuple[GateCost, ...] = ()
+	"""What each human gate cost, oldest first (FR-160). Appended and never keyed.
+
+	Two recordings of one gate are two measurements, not an edit: the second is either a
+	correction — in which case the history of what was first claimed is itself the
+	datum §20.3 wants — or a re-measurement after rework, which is a different cost.
+	:meth:`gate_cost` reads the latest, and the sum over all of them would be wrong, so
+	the accessor is the only intended reader.
+	"""
+
+	def gate_cost(self, gate: PhaseGate) -> GateCost | None:
+		"""The most recent recorded cost for one gate, if any (FR-160)."""
+		matching = [c for c in self.gate_costs if c.gate is gate]
+		return matching[-1] if matching else None
+
+	@property
+	def total_human_minutes(self) -> float | None:
+		"""§1.3's human-minutes actual: the sum over gates that were measured (FR-160).
+
+		``None`` when no gate has recorded a cost, which is a different statement from
+		zero — the distinction :func:`sofact.envelope.measure` draws for every other
+		dimension, and the one that matters most here: a factory that reported 0 minutes
+		would be reporting that its gates were free.
+
+		Summed over the *latest* cost per gate rather than over every row, because two
+		rows for one gate are one gate's cost recorded twice, and adding them would
+		inflate the number that decides whether §1.4's economic claim holds.
+		"""
+		latest = [c for gate in PHASE_GATE.values() if (c := self.gate_cost(gate)) is not None]
+		if not latest:
+			return None
+		return sum(c.human_minutes for c in latest)
 
 	@property
 	def delivery(self) -> DeliveryReport | None:

@@ -30,6 +30,7 @@ from sofact.views import (
 	DispatchRecord,
 	ElicitationAnswer,
 	Evidence,
+	GateCost,
 	Goal,
 	GoalPlan,
 	HarnessProfile,
@@ -140,6 +141,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	cuts: list[Cut] = []
 	deliveries: list[DeliveryReport] = []
 	deploys: list[DeployRecord] = []
+	gate_costs: list[GateCost] = []
 
 	for entry in ordered:
 		if entry.index in hidden:
@@ -223,6 +225,12 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# second deploy is a second act rather than an amendment of the first, and
 				# the history of who deployed what is the point of recording it.
 				deploys.append(DeployRecord.model_validate(payload["deploy"]))
+			case LedgerKind.GATE_COST_RECORDED:
+				# Appended for the same reason: FR-160 measures a human act, and two
+				# recordings of one gate are two measurements rather than an edit.
+				# `ProjectState.gate_cost` reads the latest per gate, so the sum cannot
+				# double-count a gate that was measured twice.
+				gate_costs.append(GateCost.model_validate(payload["cost"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -250,6 +258,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		cuts=tuple(cuts),
 		deliveries=tuple(deliveries),
 		deploys=tuple(deploys),
+		gate_costs=tuple(gate_costs),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

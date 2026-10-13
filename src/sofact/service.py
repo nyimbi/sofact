@@ -78,6 +78,7 @@ from sofact.state import fold
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	PHASE_GATE,
+	PHASE_GATE_INVERSE,
 	PHASE_SEQUENCE,
 	Advice,
 	Assumption,
@@ -99,6 +100,7 @@ from sofact.views import (
 	ElicitationDimension,
 	Evidence,
 	GateCheck,
+	GateCost,
 	Goal,
 	GoalPlan,
 	GoalStep,
@@ -111,6 +113,7 @@ from sofact.views import (
 	OracleDeclaration,
 	Phase,
 	PhaseAdvance,
+	PhaseGate,
 	PhaseStatus,
 	ProjectState,
 	Readiness,
@@ -596,6 +599,55 @@ class FactoryService:
 		)
 		self._commit(LedgerKind.PHASE_ADVANCED, {"advance": approved.model_dump(mode="json")})
 		return approved
+
+	async def record_gate_cost(
+		self,
+		gate: PhaseGate,
+		*,
+		human_minutes: float,
+		rework_fraction: float,
+		by: str,
+	) -> GateCost:
+		"""Record what a human gate cost (FR-160).
+
+		The one operator-supplied measurement in SoFact that is not a restatement of
+		something the log already holds, and that is exactly why it exists: §20.2's
+		central claim is that human attention per delivered platform is sub-linear in
+		module count, and nothing in the log observes a person reading. A derived number
+		would be an invention, so the number is asked for.
+
+		It refuses to record a cost for a gate that has not been passed. A cost for a
+		gate nobody sat at is not a measurement of anything — and it would let §1.3's
+		actual be built from gates that never happened, which is the failure mode of
+		every self-reported metric. The gate's own approval is the evidence that a human
+		was there.
+		"""
+		assert by.strip(), "a recorded cost names who recorded it"
+		state = await self.state()
+		if state.phase_status(PHASE_GATE_INVERSE[gate]) is not PhaseStatus.COMPLETE:
+			raise ValueError(
+				f"the {gate.value} gate has not been passed, so a cost for it would be a "
+				"measurement of a gate nobody sat at (FR-160). Record the cost after the "
+				"approval, which is the evidence that a human was there"
+			)
+		cost = GateCost(
+			gate=gate,
+			human_minutes=human_minutes,
+			rework_fraction=rework_fraction,
+			recorded_by=by,
+			recorded_at=now(),
+		)
+		self._commit(LedgerKind.GATE_COST_RECORDED, {"cost": cost.model_dump(mode="json")})
+		return cost
+
+	async def gate_costs(self) -> tuple[GateCost, ...]:
+		"""What every measured gate cost, and ``None``-free: unmeasured gates are absent.
+
+		The report states the *sum over measured gates* rather than a number per gate,
+		because §1.3's dimension is the platform's total human-minutes. The per-gate
+		values stay readable from the log for §20.3's baseline work.
+		"""
+		return (await self.state()).gate_costs
 
 	# --------------------------------------------------------------- P0: goals
 
@@ -2441,6 +2493,9 @@ class FactoryService:
 				value_hypothesis_declared=(
 					None if specification is None else specification.value_hypothesis is not None
 				),
+				# FR-160: the sum over gates that recorded a cost, and `None` when none
+				# did — which the report states as unmeasured rather than as zero.
+				human_minutes=state.total_human_minutes,
 			)
 		)
 		# The dispatches are read from the log rather than passed, because "was this
@@ -2454,6 +2509,7 @@ class FactoryService:
 			specification=specification,
 			verdicts=self._worst_verdict_per_clause(state),
 			envelope_actuals=actuals,
+			gate_costs=state.gate_costs,
 			root=root,
 			system=system or (goal.statement[:80] if goal is not None else contract.id),
 			entry_point=entry_point or str(root or self.home),

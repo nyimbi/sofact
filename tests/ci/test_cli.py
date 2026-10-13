@@ -29,7 +29,7 @@ from sofact.cli import app
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import SPECS, HarnessSpec, load_specs
 from sofact.service import FactoryService
-from sofact.views import GateCheck, Phase, PhaseStatus
+from sofact.views import GateCheck, Phase, PhaseGate, PhaseStatus
 
 RUNNER = CliRunner()
 
@@ -1973,3 +1973,108 @@ class TestTheDeployVerb:
 		assert result.exit_code == 1, result.output
 		assert "cannot find that report" in result.output
 		assert "Traceback" not in result.output
+
+
+class TestTheGateCostVerb:
+	"""FR-160: ``sofact gate --cost`` is what records what a human gate cost.
+
+	The verb is the only place the number can enter the log -- nothing observes a person
+	reading -- so what is under test is that it parses a plausible spelling, refuses an
+	implausible one with a sentence rather than a traceback, and refuses a cost for a
+	gate nobody has passed.
+	"""
+
+	def test_a_cost_needs_a_gate_that_was_passed(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--cost", "P2:90:0.25"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot record cost" in result.output
+		assert "has not been passed" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_recorded_cost_prints_both_numbers_and_the_budget_it_is_measured_against(
+		self, home: Path
+	) -> None:
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE))
+		asyncio.run(service.approve_gate(Phase.SPECIFY, by="operator"))
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "gate", "--cost", "P2:90:0.25", "--by", "nyimbi"],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "90 human-minute(s)" in result.output
+		assert "25% of the slice returned to the producer" in result.output
+		assert "180-600 is a budget" in result.output
+
+	def test_a_cost_with_no_rework_defaults_to_a_slice_accepted_whole(self, home: Path) -> None:
+		"""The common case is a gate that cost time and sent nothing back, and a verb
+		that made an operator type ``0`` every time is one they stop using."""
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE))
+		asyncio.run(service.approve_gate(Phase.SPECIFY, by="operator"))
+
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--cost", "P2:45"])
+
+		assert result.exit_code == 0, result.output
+		assert "45 human-minute(s)" in result.output
+		assert "0% of the slice" in result.output
+
+	def test_a_malformed_cost_names_the_shape_it_wanted(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "gate", "--cost", "P2:ninety"])
+
+		assert result.exit_code == 1, result.output
+		assert "not a cost" in result.output
+		assert "MINUTES[:REWORK]" in result.output
+		assert "Traceback" not in result.output
+
+	def test_the_cost_flag_is_one_of_the_three_exclusive_modes(self, home: Path) -> None:
+		result = RUNNER.invoke(
+			app, ["--home", str(home), "gate", "--cost", "P2:90", "--approve", "P2"]
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "exactly one of" in result.output
+
+	def test_the_delivery_report_prints_the_pair_beside_the_envelope(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-160 puts the numbers in the delivery report (§20.2), and the report is the
+		last artefact a human reads before the deploy gate: a cost recorded but not
+		printed there is a measurement nobody acts on."""
+		delivered = _delivered(home, tmp_path, monkeypatch)
+
+		assert delivered.exit_code == 0, delivered.output
+		assert "gate cost (FR-160)" in delivered.output
+		assert "unmeasured rather than zero" in delivered.output
+
+		# The measured arm, over the same log: P2's gate is passed and its cost
+		# recorded, then the report re-rendered. Re-rendering supersedes rather than
+		# erases (FR-070), so the earlier report stays readable and this one is current.
+		async def record() -> None:
+			service = FactoryService(home)
+			await service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE)
+			await service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
+			await service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE)
+			await service.approve_gate(Phase.SPECIFY, by="operator")
+			await service.record_gate_cost(
+				PhaseGate.SPECIFICATION, human_minutes=90.0, rework_fraction=0.25, by="operator"
+			)
+
+		asyncio.run(record())
+		# `_delivered` already made the root; re-rendering reuses it rather than
+		# re-creating it, because the artefacts FR-117 names are the same two files.
+		again = RUNNER.invoke(
+			app, ["--home", str(home), "deliver", "--root", str(tmp_path / "delivery")]
+		)
+
+		assert again.exit_code == 0, again.output
+		assert "specification: 90 human-minute(s), 25% of the slice" in again.output
+		assert "total 90 human-minute(s)" in again.output
+		assert "mean rework fraction 0.250" in again.output

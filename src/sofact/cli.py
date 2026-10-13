@@ -652,22 +652,80 @@ def gate(
 	present: str | None = typer.Option(
 		None, "--present", help="Record that a phase's machine checks are ready, e.g. P2."
 	),
+	cost: str | None = typer.Option(
+		None,
+		"--cost",
+		help="Record what a gate cost, as MINUTES[:REWORK], e.g. 90:0.25 (FR-160).",
+	),
 	by: str = typer.Option("operator", help="Who is deciding. Recorded, not verified."),
 ) -> None:
-	"""Present or approve a gate (FR-061). Approval is the human half and names who."""
-	asyncio.run(_gate(_service(_home_of(ctx, home)), approve, present, by))
+	"""Present or approve a gate, or record what one cost (FR-061, FR-160).
+
+	``--cost`` takes ``MINUTES[:REWORK]``, where the rework fraction is the share of the
+	slice the operator sent back — ``90:0.25`` is ninety minutes and a quarter of the
+	artefact returned. It is recorded against the phase's gate, which must already have
+	been passed: a cost for a gate nobody sat at is a measurement of nothing.
+	"""
+	asyncio.run(_gate(_service(_home_of(ctx, home)), approve, present, cost, by))
 
 
-async def _gate(svc: FactoryService, approve: str | None, present: str | None, by: str) -> None:
-	if (approve is None) == (present is None):
-		typer.secho("name exactly one of --present or --approve.", fg="yellow")
-		raise typer.Exit(code=1)
+def _gate_cost(cost: str, phase: Phase) -> tuple[float, float]:
+	"""Parse ``MINUTES[:REWORK]``, naming the gate in any refusal (FR-160).
+
+	The fraction defaults to ``0.0`` — a slice accepted whole — rather than being
+	required, because the common case is a gate that cost time and sent nothing back,
+	and a verb that made an operator type ``0`` every time would be one they stop using.
+	"""
+	minutes_text, _, rework_text = cost.partition(":")
 	try:
-		named = Phase(approve if approve is not None else present)
+		minutes = float(minutes_text)
+		rework = float(rework_text) if rework_text else 0.0
+	except ValueError as exc:
+		raise ValueError(f"not a cost: {cost!r}. Expected MINUTES[:REWORK], e.g. 90:0.25") from exc
+	if phase not in PHASE_GATE:
+		raise ValueError(f"{phase.value} has no gate to cost (FR-061)")
+	return minutes, rework
+
+
+async def _gate(
+	svc: FactoryService,
+	approve: str | None,
+	present: str | None,
+	cost: str | None,
+	by: str,
+) -> None:
+	if len([x for x in (approve, present, cost) if x is not None]) != 1:
+		typer.secho("name exactly one of --present, --approve or --cost.", fg="yellow")
+		raise typer.Exit(code=1)
+	named_text = approve or present or cost
+	assert named_text is not None, "exactly one of the three was named, checked above"
+	try:
+		named = Phase(named_text.split(":", 1)[0])
 	except ValueError as exc:
 		choices = ", ".join(p.value for p in PHASE_SEQUENCE)
-		typer.secho(f"not a phase: {approve or present!r}. One of: {choices}", fg="yellow")
+		typer.secho(f"not a phase: {named_text!r}. One of: {choices}", fg="yellow")
 		raise typer.Exit(code=1) from exc
+
+	if cost is not None:
+		# FR-160. The phase is named first and the measurement second, so
+		# ``--cost P2:90:0.25`` reads as "what P2's gate cost", which is the order an
+		# operator would say it in.
+		_, _, measurement = cost.partition(":")
+		try:
+			minutes, rework = _gate_cost(measurement, named)
+			recorded = await svc.record_gate_cost(
+				PHASE_GATE[named], human_minutes=minutes, rework_fraction=rework, by=by
+			)
+		except (ValueError, KeyError) as exc:
+			typer.secho(f"cannot record cost: {exc}", fg="red")
+			raise typer.Exit(code=1) from exc
+		typer.secho(
+			f"\n{recorded.gate.value} cost {recorded.human_minutes:g} human-minute(s), "
+			f"{recorded.rework_fraction:.0%} of the slice returned to the producer "
+			f"(FR-160). §1.3's 180-600 is a budget; this is what the humans spent.",
+			fg="cyan",
+		)
+		return
 
 	if present is not None:
 		# The machine half. Checks are empty here because this verb records that the
@@ -2243,6 +2301,8 @@ async def _envelope(svc: FactoryService, *, defaults: bool) -> None:
 		value_hypothesis_declared=(
 			None if specification is None else specification.value_hypothesis is not None
 		),
+		# FR-160: what the gates cost, summed over the ones that were measured.
+		human_minutes=(await svc.state()).total_human_minutes,
 	)
 	typer.secho("\n  actuals (NFR-025)", fg="cyan", bold=True)
 	for measurement in actuals.measurements:
@@ -2387,6 +2447,30 @@ async def _deliver(
 				else ("green" if measurement.within else "red")
 			)
 			typer.secho(f"    {measurement.statement}", fg=colour)
+
+	typer.secho("\n  gate cost (FR-160)", fg="cyan")
+	if not report.gate_costs:
+		typer.secho(
+			"    no gate has recorded what it cost, so the reviewer's budget is "
+			"unmeasured rather than zero. `sofact gate --cost P2:MINUTES[:REWORK]` "
+			"records one.",
+			fg="yellow",
+		)
+	else:
+		for cost in report.gate_costs:
+			typer.secho(
+				f"    {cost.gate.value}: {cost.human_minutes:g} human-minute(s), "
+				f"{cost.rework_fraction:.0%} of the slice returned to the producer "
+				f"(recorded by {cost.recorded_by})",
+				fg="bright_black",
+			)
+		typer.secho(
+			f"    total {sum(c.human_minutes for c in report.gate_costs):g} human-minute(s) "
+			f"across {len(report.gate_costs)} measured gate(s); mean rework fraction "
+			f"{report.rework_fraction:.3f}. §1.3's 180-600 is the budget this is measured "
+			"against.",
+			fg="cyan",
+		)
 
 	typer.secho("\n  checks", fg="cyan")
 	for check in report.checks:

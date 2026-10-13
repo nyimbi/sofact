@@ -387,3 +387,76 @@ async def test_an_approval_replaces_the_pending_row_and_keeps_the_checks(
 	kinds = [e.kind for e in service.ledger.entries()]
 	walked = PHASE_SEQUENCE.index(Phase.SPECIFY)
 	assert kinds.count(LedgerKind.PHASE_ADVANCED) == walked + 2
+
+
+# --------------------------------------------------------------------------- #
+# FR-160 -- what a gate cost is measured, not assumed
+# --------------------------------------------------------------------------- #
+
+
+class TestTheGateCostIsMeasured:
+	"""FR-160: §1.3's human-minute envelope is a budget, so the actual is recorded.
+
+	The requirement's argument is §20.2's: if review is the binding constraint once
+	implementation is agent-driven, a factory that measures the producer's budget but
+	not the reviewer's is optimising its cheapest step. Nothing in the log observes a
+	person reading, so the number is *asked for* -- and the tests below hold the two
+	things that follow: a cost attaches to a gate that was actually passed, and an
+	unmeasured project reports unmeasured rather than free.
+	"""
+
+	async def test_a_cost_records_against_the_gate_that_was_passed(
+		self, service: FactoryService
+	) -> None:
+		await walk_to(service, Phase.SPECIFY)
+		await service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE)
+		await service.approve_gate(Phase.SPECIFY, by="operator")
+
+		cost = await service.record_gate_cost(
+			PHASE_GATE[Phase.SPECIFY], human_minutes=90.0, rework_fraction=0.25, by="operator"
+		)
+
+		assert cost.gate is PHASE_GATE[Phase.SPECIFY]
+		assert cost.human_minutes == 90.0
+		assert cost.rework_fraction == 0.25
+		assert await service.gate_costs() == (cost,)
+
+	async def test_a_cost_for_a_gate_nobody_sat_at_is_refused(
+		self, service: FactoryService
+	) -> None:
+		"""A cost for an unpassed gate is a measurement of nothing, and it would let
+		§1.3's actual be assembled from gates that never happened -- the failure mode of
+		every self-reported metric."""
+		with pytest.raises(ValueError, match="has not been passed"):
+			await service.record_gate_cost(
+				PHASE_GATE[Phase.SPECIFY], human_minutes=90.0, rework_fraction=0.25, by="op"
+			)
+
+		assert await service.gate_costs() == ()
+
+	async def test_the_total_is_the_latest_measurement_of_each_gate(
+		self, service: FactoryService
+	) -> None:
+		"""Two recordings of one gate are two measurements, and the sum must not count a
+		gate twice -- re-measuring P2 after a second sitting replaces its figure rather
+		than adding to it."""
+		await walk_to(service, Phase.SPECIFY)
+		await service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE)
+		await service.approve_gate(Phase.SPECIFY, by="operator")
+		await service.record_gate_cost(
+			PHASE_GATE[Phase.SPECIFY], human_minutes=90.0, rework_fraction=0.25, by="operator"
+		)
+		await service.record_gate_cost(
+			PHASE_GATE[Phase.SPECIFY], human_minutes=30.0, rework_fraction=0.0, by="operator"
+		)
+
+		state = await service.state()
+		assert len(state.gate_costs) == 2, "both measurements stay in the log"
+		assert state.total_human_minutes == 30.0
+		assert state.gate_cost(PHASE_GATE[Phase.SPECIFY]) is not None
+
+	async def test_no_measurement_is_none_rather_than_zero(self, service: FactoryService) -> None:
+		"""The three-state shape, and the state that matters: a project whose gates
+		recorded nothing reports *unmeasured*. Reporting zero would be reporting that its
+		gates were free."""
+		assert (await service.state()).total_human_minutes is None

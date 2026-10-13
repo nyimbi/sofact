@@ -49,6 +49,7 @@ from sofact.views import (
 	DeliveryReport,
 	EnvelopeActuals,
 	GateCheck,
+	GateCost,
 	GoalPlan,
 	Handover,
 	InheritedOracle,
@@ -385,6 +386,7 @@ def report(
 	specification: Specification | None,
 	verdicts: Mapping[str, VerdictOutcome],
 	envelope_actuals: EnvelopeActuals | None,
+	gate_costs: tuple[GateCost, ...] = (),
 	root: Path | None = None,
 	system: str,
 	entry_point: str,
@@ -516,6 +518,32 @@ def report(
 			),
 		),
 		GateCheck(
+			name="gate_cost_reported",
+			passed=True,
+			detail=(
+				"FR-160's measurement is reported beside the producer's budget: "
+				+ (
+					f"{len(gate_costs)} gate(s) measured, "
+					f"{sum(c.human_minutes for c in gate_costs):g} human-minute(s) total, "
+					"mean rework fraction "
+					f"{sum(c.rework_fraction for c in gate_costs) / len(gate_costs):.3f} "
+					"(the share of each gated slice returned to the producer). "
+					"Per gate: "
+					+ ", ".join(
+						f"{c.gate.value} {c.human_minutes:g}min/"
+						f"{c.rework_fraction:.2f} by {c.recorded_by}"
+						for c in gate_costs
+					)
+					if gate_costs
+					else "no gate has recorded what it cost, so the reviewer's budget is "
+					"unmeasured rather than zero. FR-160's argument is §20.2's: if review "
+					"is the binding constraint once implementation is agent-driven, a "
+					"factory that measures the producer's budget but not the reviewer's "
+					"is optimising its cheapest step. `sofact gate --cost` records one"
+				)
+			),
+		),
+		GateCheck(
 			name="autonomy_capped_for_mode_g",
 			passed=delivered_autonomy <= MODE_G_CEILING,
 			detail=(
@@ -547,6 +575,7 @@ def report(
 		unverified=unverified,
 		unvalidated_assumptions=specification.assumptions if specification is not None else (),
 		envelope_actuals=envelope_actuals,
+		gate_costs=gate_costs,
 		autonomy=delivered_autonomy,
 		module_autonomy=modules_autonomy,
 		handover=handed,
