@@ -34,7 +34,7 @@ Two appends that read the same tail both claim the same `index` and the same
 `prev_hash`. **Measured on this tree**, two processes synchronized so that both read an
 empty log before either appended:
 
-```
+```text
 a: index=0 prev=000000000000
 b: index=0 prev=000000000000
 --- what the file holds ---

@@ -128,103 +128,103 @@ default.**
 
 ## Alternatives refused
 
-* **Fail the gate on a dimension below its floor.** Refused in decision 6. §1.3's
+- **Fail the gate on a dimension below its floor.** Refused in decision 6. §1.3's
   numbers are targets, and §1.4's argument is that the factory's economics improve with
   size *provided the envelope holds* — not that small deliveries are defects. A gate
   that refused to build a three-module service would refuse the work that earns the
   trust to attempt a twenty-five-module one.
-* **Apply §1.3's defaults when no envelope is configured.** Refused in decision 12.
+- **Apply §1.3's defaults when no envelope is configured.** Refused in decision 12.
   NFR-025 calls the envelope a hypothesis under test; applying it without adoption would
   report actuals against numbers nobody chose and refuse goals against them.
-* **Report an unmeasured dimension as within.** Refused in decision 7. It is the default
+- **Report an unmeasured dimension as within.** Refused in decision 7. It is the default
   that fails open, and the one a delivery report can least afford — four of the eight
   dimensions are unmeasured today, so the report would be mostly assertion.
-* **Invent a system count from the module classes.** Refused in decision 15 and the
+- **Invent a system count from the module classes.** Refused in decision 15 and the
   Context. §14's classes are module *types*, not system boundaries, and a G1/G2/G3 split
   read as three systems would be the factory drawing a boundary the operator never drew
   — which FR-087 makes the operator's act.
-* **Count delivered LOC by reading the workspace.** Refused: ADR-0025 leaves the target
+- **Count delivered LOC by reading the workspace.** Refused: ADR-0025 leaves the target
   language open, so SoFact does not know what a source file is, and any count would be a
   number about a tree it did not choose. The dimension names the missing artefact root
   instead.
-* **A mapping field instead of eight fixed fields.** Refused in decision 1. A mapping
+- **A mapping field instead of eight fixed fields.** Refused in decision 1. A mapping
   accepts a dimension this build does not know, and the report then omits a dimension
   §1.3 bounds while reading as complete.
-* **Merge a partial override per field, letting an omitted floor be dropped.** Refused
+- **Merge a partial override per field, letting an omitted floor be dropped.** Refused
   in decision 10: it widens the envelope by omission.
-* **A `minimum`/`maximum` pair collapsed into one `admits`.** Refused in decision 3.
+- **A `minimum`/`maximum` pair collapsed into one `admits`.** Refused in decision 3.
   The refusal and the measurement are different answers to different questions, and one
   predicate would force a caller to re-derive which it meant.
-* **Store the actuals in the ledger.** Refused: actuals are derived from the log, like
+- **Store the actuals in the ledger.** Refused: actuals are derived from the log, like
   every other fact about it. A stored row could disagree with the log it claims to have
   read.
 
 ## Consequences
 
-* **FR-057 and NFR-025 move from Not built to Implemented**, and FR-118's fifth
+- **FR-057 and NFR-025 move from Not built to Implemented**, and FR-118's fifth
   statement now has an artefact to report from. P8's remaining work — the delivery
   report, the deploy gate, the handover — is unblocked on the envelope half.
-* **P3's gate gains a check that can fail for a reason the decomposition cannot fix.**
+- **P3's gate gains a check that can fail for a reason the decomposition cannot fix.**
   The repair is to split the goal, which is the operator's act, and the check says so.
   A project run with no envelope configured is unaffected: the check passes and reports
   that it measured nothing.
-* **The delivery report will be mostly unmeasured, and says so.** Four of eight
+- **The delivery report will be mostly unmeasured, and says so.** Four of eight
   dimensions name what would have to exist. That is the honest state and it is a work
   list: FR-160's gate-cost measurement, a declared artefact root, and a system tier.
-* **`sofact envelope` is a new verb**, and `SOFACT_ENVELOPE` a new configuration seam
+- **`sofact envelope` is a new verb**, and `SOFACT_ENVELOPE` a new configuration seam
   following `SOFACT_HARNESS_SPECS`.
-* **`tests/ci/synthetic.py`'s `synthetic_service` gains an `envelope` parameter
+- **`tests/ci/synthetic.py`'s `synthetic_service` gains an `envelope` parameter
   defaulting to `None`**, so the suite's default remains the unconfigured path rather
   than silently adopting §1.3's numbers.
 
 ## Evidence
 
-* `src/sofact/views.py` — `EnvelopeDimension`, `DimensionBound` (with
+- `src/sofact/views.py` — `EnvelopeDimension`, `DimensionBound` (with
   `_a_bound_bounds_something`), `DeliveryEnvelope`, `EnvelopeMeasurement` (with
   `_an_unmeasured_dimension_is_never_within`), `EnvelopeActuals`; the five new `__all__`
   entries.
-* `src/sofact/envelope.py` (new) — `load_envelope`, `measure`, `MEASURED_AT_P3`,
+- `src/sofact/envelope.py` (new) — `load_envelope`, `measure`, `MEASURED_AT_P3`,
   `UNMEASURED_AT_P3`.
-* `src/sofact/decomposition.py` — `gate`'s two new keyword parameters and
+- `src/sofact/decomposition.py` — `gate`'s two new keyword parameters and
   `_envelope_check`.
-* `src/sofact/service.py` — `envelope=`, `envelope()`, `_gate_decomposition`, and the
+- `src/sofact/service.py` — `envelope=`, `envelope()`, `_gate_decomposition`, and the
   two call sites that now share it.
-* `src/sofact/cli.py` — `_configured_envelope`, the `envelope` verb, `_print`-style
+- `src/sofact/cli.py` — `_configured_envelope`, the `envelope` verb, `_print`-style
   actuals output, and `SOFACT_ENVELOPE`.
-* `tests/ci/test_envelope.py` — 31 tests across four classes: the bounds, the
+- `tests/ci/test_envelope.py` — 31 tests across four classes: the bounds, the
   measurements, the configuration seam, and FR-057's refusal.
-* `tests/ci/test_cli.py::TestTheEnvelopeVerb` — 7 tests, including the one that found
+- `tests/ci/test_cli.py::TestTheEnvelopeVerb` — 7 tests, including the one that found
   the bypass: `test_the_p3_gate_refuses_an_over_scoped_decomposition` failed with
   `assert 0 == 1` because `approve_decomposition` recomputed the gate without the
   envelope and approved a decomposition `decompose` had just refused. Decision 14 is
   that finding.
-* **Canaries**, each with the target string asserted present before the patch and the
+- **Canaries**, each with the target string asserted present before the patch and the
   file restored from `/tmp/envelope.py.bak` / `/tmp/decomposition.py.bak` rather than
   from git:
-  * `measure`'s unmeasured branch given `actual=0.0` — three tests failed, including
+  - `measure`'s unmeasured branch given `actual=0.0` — three tests failed, including
     `test_an_unmeasured_dimension_names_what_would_be_needed`, which is the fail-open
     default this ADR exists to refuse.
-  * `_envelope_check`'s `if exceeded` short-circuited with `and False` — three tests
+  - `_envelope_check`'s `if exceeded` short-circuited with `and False` — three tests
     failed, including `test_the_service_refuses_at_p3_when_the_envelope_is_exceeded`.
-* The first canary also exposed a **vacuous assertion** in the test it failed:
+- The first canary also exposed a **vacuous assertion** in the test it failed:
   `test_an_unmeasured_dimension_names_what_would_be_needed` asserted inside a loop over
   `actuals.unmeasured`, so an empty set passed it. It now compares the dimension set
   before the loop. A loop that asserts only over its own iterable is a test that passes
   when the collection is empty, which is exactly when it should fail.
-* `tests/ci` at this commit: **902 passed, 0 failed** (one `git worktree add` flake on
+- `tests/ci` at this commit: **902 passed, 0 failed** (one `git worktree add` flake on
   the first run, passing on rerun and unrelated to this diff). `pyright`: 0 errors.
   `ruff check` and `ruff format --check`: clean.
 
 ## References
 
-* FR-057 (the refusal), NFR-025 (the envelope is configuration and actuals are
+- FR-057 (the refusal), NFR-025 (the envelope is configuration and actuals are
   reported), FR-118 (the delivery report's five statements, the fifth being the
   actuals), FR-160 (gate cost is measured), FR-087 (machine-proposed,
   human-validated), FR-125 (the class distribution as a quality signal), §1.3, §1.4,
   §3.3, §14.
-* [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) —
+- [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) —
   why the target language is open, and therefore why delivered LOC is unmeasured.
-* [ADR-0038](0038-a-system-criterion-spans-clauses-and-its-verdicts-are-the-worst.md) —
+- [ADR-0038](0038-a-system-criterion-spans-clauses-and-its-verdicts-are-the-worst.md) —
   the same "an absent reading is not a satisfied one" rule, applied to verdicts.
-* [ADR-0005](0005-no-container-runtime.md) — the packaging decision P8's deployable
+- [ADR-0005](0005-no-container-runtime.md) — the packaging decision P8's deployable
   artifact still depends on.

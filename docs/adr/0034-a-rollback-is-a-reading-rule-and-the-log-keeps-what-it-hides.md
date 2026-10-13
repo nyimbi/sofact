@@ -91,30 +91,30 @@ cuts, and the fold applies it.**
 
 ## Alternatives refused
 
-* **Truncate the log to the target.** Refused in the Context: it destroys the evidence the
+- **Truncate the log to the target.** Refused in the Context: it destroys the evidence the
   operator needs and breaks every subsequent hash, so the result is an unreadable project
   rather than an older one. This is what FR-003 forbids, and the chain is the reason the
   prohibition is structural rather than stylistic.
-* **Snapshot the state and restore it as a new value.** Refused: it makes the state a
+- **Snapshot the state and restore it as a new value.** Refused: it makes the state a
   stored artefact rather than a derived one, which is the property the whole module exists
   to keep (`state.py`'s own docstring: "if state could be assembled by anything other than
   the log, the log would not be the record of what happened"). It also creates a second
   thing to keep in sync with the log, and a snapshot that drifts from its log is a state
   nobody can date.
-* **Write the cut as a rewritten `ProjectState`.** Refused for the same reason plus
+- **Write the cut as a rewritten `ProjectState`.** Refused for the same reason plus
   FR-003's: a state is derived, and a rewrite of one is an edit to the log's meaning that
   the chain cannot witness.
-* **Compose successive cuts.** Refused in decision 3. Composition makes the current state
+- **Compose successive cuts.** Refused in decision 3. Composition makes the current state
   a function of a decision history, which is strictly harder to reason about than a
   function of one decision, and the operator's mental model ("read as of entry N") is
   already single-valued.
-* **Hide the superseded cut rows too.** Refused in decision 4, and it was the first
+- **Hide the superseded cut rows too.** Refused in decision 4, and it was the first
   implementation. A skip that hides reading rules makes the log's self-description depend
   on its last line.
-* **Refuse a cut to a later entry than an existing cut.** Refused: that is precisely how
+- **Refuse a cut to a later entry than an existing cut.** Refused: that is precisely how
   an operator un-does a rollback they regret, and requiring a second verb for it would
   make the common case the awkward one.
-* **Gate the verb on `--concurrent` or on the tree being isolated.** Refused: FR-141's
+- **Gate the verb on `--concurrent` or on the tree being isolated.** Refused: FR-141's
   worktree is per module and per wave, and a cut is a log operation that touches no tree
   at all. Item 4 unblocked item 5 in the sense that a rollback is *useful* once the tree
   is isolated — the work a cut hides is not sitting in the current tree — not in the sense
@@ -122,24 +122,24 @@ cuts, and the fold applies it.**
 
 ## Consequences
 
-* **A rolled-back project is legible as one.** `ProjectState.cut` is the property that
+- **A rolled-back project is legible as one.** `ProjectState.cut` is the property that
   says so, and the capability map's §2.1 row moves from "Covered, partly — there is no
   operator rollback verb" to "Covered, stronger".
-* **The log grows monotonically, including across rollbacks.** A project that rolls back
+- **The log grows monotonically, including across rollbacks.** A project that rolls back
   ten times has ten more rows than one that did not, and every one of them is a decision
   the next reader can see. This is the intended cost: the alternative is a log that
   cannot say what was decided about it.
-* **`fold` reads the log twice, in effect.** `_cut_rows` walks the entries to find the cut
+- **`fold` reads the log twice, in effect.** `_cut_rows` walks the entries to find the cut
   rows, and the main loop walks them again. Both are O(n) over a tuple already in memory,
   and the fold is called once per append-invalidated state, so the second walk is not a
   cost worth a cache — and a cache of "where the cuts are" is a second copy of a fact the
   log holds.
-* **`ProjectState` gains a field and a property, and `test_state.py`'s census enforces
+- **`ProjectState` gains a field and a property, and `test_state.py`'s census enforces
   the field.** The `KIND_TO_FIELD` mapping is total in both directions, so a new
   `LedgerKind` without a state field fails a test rather than disappearing quietly;
   `CUT_RECORDED: "cuts"` is what keeps that true. The property is not in the census and
   does not need to be: it is derived from the field, so it cannot go stale against it.
-* **A cut to an index that a later append made ambiguous is still well-defined.** The
+- **A cut to an index that a later append made ambiguous is still well-defined.** The
   target names a position in an append-only log, so it never shifts: the entry that was
   index 40 when the cut was taken is index 40 forever. This is a property of the
   append-only design and not of the cut, and it is worth stating because it is what makes
@@ -147,45 +147,45 @@ cuts, and the fold applies it.**
 
 ## Evidence
 
-* `src/sofact/views.py` — `Cut`, `LedgerKind.CUT_RECORDED`, `ProjectState.cuts`, the
+- `src/sofact/views.py` — `Cut`, `LedgerKind.CUT_RECORDED`, `ProjectState.cuts`, the
   `ProjectState.cut` property.
-* `src/sofact/state.py` — `_cut_rows`, `_hidden_by_latest_cut`, the skip at the head of
+- `src/sofact/state.py` — `_cut_rows`, `_hidden_by_latest_cut`, the skip at the head of
   `fold`'s loop, the `CUT_RECORDED` arm.
-* `src/sofact/service.py` — `FactoryService.cut` and its three refusals.
-* `src/sofact/cli.py` — the `rollback` verb, and the `status` line that reports a cut in
+- `src/sofact/service.py` — `FactoryService.cut` and its three refusals.
+- `src/sofact/cli.py` — the `rollback` verb, and the `status` line that reports a cut in
   force.
-* `tests/ci/test_state.py` — 4 tests: a cut hides the entries after its target and leaves
+- `tests/ci/test_state.py` — 4 tests: a cut hides the entries after its target and leaves
   the log longer; the project resumes after a cut; a later cut supersedes an earlier one;
   a cut that targets its own row or the future is refused by the fold's assertion.
-* `tests/ci/test_service.py::TestRollback` — 5 tests: a cut hides work and keeps the log;
+- `tests/ci/test_service.py::TestRollback` — 5 tests: a cut hides work and keeps the log;
   a cut to the present is refused; a cut past the end is refused; a cut on an empty log is
   refused; a cut needs an operator and a reason.
-* `tests/ci/test_cli.py::TestTheRollbackVerb` — 5 tests: the verb hides the work and says
+- `tests/ci/test_cli.py::TestTheRollbackVerb` — 5 tests: the verb hides the work and says
   "none deleted"; the log keeps what the rollback hid and the chain still verifies; a
   target in the future is refused with exit 1 and no traceback; `--reason` is required;
   `status` reports the cut it is reading under.
-* **Canaries**, each with the target string asserted present before the patch and the file
+- **Canaries**, each with the target string asserted present before the patch and the file
   restored from a backup rather than from git:
-  * `FactoryService.cut`'s bounds check replaced with `if False:` — both
+  - `FactoryService.cut`'s bounds check replaced with `if False:` — both
     `test_a_cut_past_the_end_is_refused` and the CLI's
     `test_a_target_in_the_future_is_refused` failed, at both layers.
-  * `_hidden_by_latest_cut`'s assertion replaced with `assert True or ...` —
+  - `_hidden_by_latest_cut`'s assertion replaced with `assert True or ...` —
     `test_a_cut_that_targets_itself_or_the_future_is_refused` failed.
-  * `_status`'s `cut = state.cut` replaced with `cut = None` —
+  - `_status`'s `cut = state.cut` replaced with `cut = None` —
     `test_status_says_the_project_is_read_under_a_cut` failed.
-* Measured: after a cut, `verify_chain().ok is True` and the log holds exactly one more
+- Measured: after a cut, `verify_chain().ok is True` and the log holds exactly one more
   row than before it.
-* `tests/ci` at this commit: **753 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **753 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-003 (append-only, hash-chained log), FR-094 (a decomposition is revisable), FR-099 (a
+- FR-003 (append-only, hash-chained log), FR-094 (a decomposition is revisable), FR-099 (a
   re-dispatch finds what the last one left), FR-060 and FR-061 (the phase machine and its
   gates).
-* [ADR-0007](0007-the-elicitation-gate-is-deterministic.md) — the supersede-don't-
+- [ADR-0007](0007-the-elicitation-gate-is-deterministic.md) — the supersede-don't-
   append shape this record applies to the log's reading rule.
-* [ADR-0015](0015-a-verdict-describes-one-run.md) — the same question asked of verdicts.
-* [ADR-0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md)
+- [ADR-0015](0015-a-verdict-describes-one-run.md) — the same question asked of verdicts.
+- [ADR-0033](0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md)
   — item 4, which made item 5 useful.
-* `docs/research/orchestrator-capabilities/README.md` §2.1 — the row this closes.
+- `docs/research/orchestrator-capabilities/README.md` §2.1 — the row this closes.

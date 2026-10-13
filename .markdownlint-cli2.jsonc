@@ -1,0 +1,7 @@
+{
+	// markdownlint-cli2's own config: which files it looks at, and which it does not.
+	// The rules live in .markdownlint.json next to this file; this one exists because
+	// `ignores` is a cli2-level key and is silently ignored inside a rules config.
+	"globs": ["docs/**/*.md", "README.md"],
+	"ignores": ["docs/sources/archive/**"]
+}

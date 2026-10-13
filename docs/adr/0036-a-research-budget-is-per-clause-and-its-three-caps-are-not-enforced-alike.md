@@ -97,92 +97,92 @@ record carries, with the wall-clock cap enforced and the other two observed.**
 
 ## Alternatives refused
 
-* **A single flat ceiling per run.** Refused in the Context: FR-072 says per intent
+- **A single flat ceiling per run.** Refused in the Context: FR-072 says per intent
   clause, and a flat bound gives a one-clause goal the same allowance as an eight-clause
   one — which is a bound on the goal, not on the research.
-* **Enforce all three inside SoFact.** Refused: two of the three are only knowable from
+- **Enforce all three inside SoFact.** Refused: two of the three are only knowable from
   artefacts written *after* the work. A cap enforced before the artefact exists is a cap
   on a guess.
-* **Enforce the call cap by counting the producer's turns live.** Refused for the same
+- **Enforce the call cap by counting the producer's turns live.** Refused for the same
   reason ADR-0021 refuses to grade the report: the count comes from the loop's own meta,
   which is the producer's word. Reading it as a *measurement* is honest; enforcing
   against it would make a producer's arithmetic authoritative.
-* **A cap of zero as an explicit "no research" setting.** Refused in decision 2: it
+- **A cap of zero as an explicit "no research" setting.** Refused in decision 2: it
   makes every run violate its budget, which destroys the signal the violation carries.
   "Do not research" is expressed by not dispatching a research run.
-* **Fail the run when a cap is exceeded.** Refused in decision 8, and this is the
+- **Fail the run when a cap is exceeded.** Refused in decision 8, and this is the
   tempting one — it would make FR-072 look enforced end to end. But the artefact is
   already written by then, and discarding a usable ledger to punish a spend overrun
   loses the evidence the phase exists to produce. The spend is recorded; the ledger is
   read; the operator decides what an overspend means.
-* **Default `allowance` to a scaled budget so the field is never `None`.** Refused: it
+- **Default `allowance` to a scaled budget so the field is never `None`.** Refused: it
   would make "this run was measured against 5 sources" and "this row predates budgets"
   the same value, which is the collapse decision 3 exists to prevent.
 
 ## Consequences
 
-* **FR-072 moves from Partly to Implemented**, and the roadmap's last P1 gap closes. P1
+- **FR-072 moves from Partly to Implemented**, and the roadmap's last P1 gap closes. P1
   now has a bound, an artefact (ADR-0035), and a per-clause declaration; FR-068's
   per-clause *verdict* remains the phase's open requirement and is a different artefact.
-* **`--timeout` changes meaning.** It was the only bound; it is now an override of the
+- **`--timeout` changes meaning.** It was the only bound; it is now an override of the
   scaled one. Its default changes from `RESEARCH_TIMEOUT_SECONDS` (900 s) to `None`,
   which is a behaviour change for a caller that passed nothing — the run is now bounded
   by `300 s × clauses` instead of 900 s flat. For a one-clause goal that is *tighter*
   (300 < 900), and that is the intended direction: the flat default was three times the
   per-clause bound for the commonest case.
-* **Three new flags**: `--max-sources`, `--max-calls`, `--seconds`, all per clause, all
+- **Three new flags**: `--max-sources`, `--max-calls`, `--seconds`, all per clause, all
   defaulting to the declared budget. A bad one exits 1 with the field named rather than
   raising through typer.
-* **`ResearchRecord` gains three fields and a property.** `test_state.py`'s census does
+- **`ResearchRecord` gains three fields and a property.** `test_state.py`'s census does
   not count record fields, so the field-count assertion is unaffected; `budget`,
   `allowance`, `model_calls_observed` and `budget_violations` all have defaults, so an
   older row folds.
-* **The synthetic harness now writes `turns` in its meta**, which is what makes the call
+- **The synthetic harness now writes `turns` in its meta**, which is what makes the call
   cap measurable in tests at all — and its `research-stub` variant deliberately omits it,
   so the unmeasured branch is exercised rather than assumed.
-* **`RESEARCH_TIMEOUT_SECONDS` survives as the flag's default only.** The per-clause
+- **`RESEARCH_TIMEOUT_SECONDS` survives as the flag's default only.** The per-clause
   constant is what bounds a run; the old constant is what a caller gets when it says
   "ignore that for this one", and its docstring now says so.
 
 ## Evidence
 
-* `src/sofact/views.py` — `ResearchBudget` (with `_every_cap_bounds_something` and
+- `src/sofact/views.py` — `ResearchBudget` (with `_every_cap_bounds_something` and
   `scaled`), `ResearchAllowance`, `DEFAULT_RESEARCH_{SOURCES,SECONDS,CALLS}_PER_CLAUSE`,
   `ResearchRecord.budget`/`allowance`/`model_calls_observed`/`budget_violations` and
   `is_within_budget`.
-* `src/sofact/service.py` — `research` (the clause count, the scaled allowance, the
+- `src/sofact/service.py` — `research` (the clause count, the scaled allowance, the
   override), `_research_violations`, and `research_goal`'s budget paragraph.
-* `src/sofact/cli.py` — `--max-sources`, `--max-calls`, `--seconds`, the budget line,
+- `src/sofact/cli.py` — `--max-sources`, `--max-calls`, `--seconds`, the budget line,
   the violation lines and the `calls    unmeasured` branch.
-* `tests/ci/test_service.py::TestTheResearchRun` — 7 new tests: the allowance on the
+- `tests/ci/test_service.py::TestTheResearchRun` — 7 new tests: the allowance on the
   record, scaling with the clause count, an overspend recorded as a violation and not a
   failure, an unmeasured count producing no violation, the timeout override leaving the
   declared budget intact, the zero-cap refusals, and `scaled(0)`.
-* `tests/ci/test_cli.py::TestTheResearchVerb` — 4 new tests: the budget line, the
+- `tests/ci/test_cli.py::TestTheResearchVerb` — 4 new tests: the budget line, the
   overspent line, the unmeasured line, and a zero flag refused without a traceback.
-* `tests/ci/synthetic.py` — `turns` in the meta, the `research-greedy` overspend
+- `tests/ci/synthetic.py` — `turns` in the meta, the `research-greedy` overspend
   variant, and the stub's deliberate omission.
-* **Canaries**, each with the target string asserted present before the patch and the
+- **Canaries**, each with the target string asserted present before the patch and the
   file restored from a `/tmp` backup rather than from git. The first attempt's patch did
   **not** apply — the indentation in the target differed — and the `assert` is what
   caught it; a canary whose patch silently no-ops is a canary that did not run.
-  * `ResearchBudget._every_cap_bounds_something` replaced with `if False:` —
+  - `ResearchBudget._every_cap_bounds_something` replaced with `if False:` —
     `test_a_zero_cap_is_refused_rather_than_read_as_a_tight_budget` failed.
-  * `_research_violations`' model-call branch replaced with `if False and ...` —
+  - `_research_violations`' model-call branch replaced with `if False and ...` —
     `test_an_overspent_run_records_the_cap_it_broke` failed.
-  * `research`'s clause count hardcoded to `1` —
+  - `research`'s clause count hardcoded to `1` —
     `test_the_allowance_scales_with_the_clause_count` failed.
-* `tests/ci` at this commit: **815 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **815 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-072 (bounded research), FR-140 (budgets are SoFact's), FR-167 (research is
+- FR-072 (bounded research), FR-140 (budgets are SoFact's), FR-167 (research is
   dispatched), FR-138 (a declaration is not a finding), NFR-024 (record what was
   observed), NFR-009 (reproducibility).
-* [S25] — the delegated loop measured: its five-search floor, its 240 s/360 s ceilings,
+- [S25] — the delegated loop measured: its five-search floor, its 240 s/360 s ceilings,
   and the local-model truncation that sets the wall-clock cap above them.
-* [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
+- [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
   its spend is observable and not controllable.
-* [ADR-0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) — the artefact
+- [ADR-0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) — the artefact
   this budget bounds.

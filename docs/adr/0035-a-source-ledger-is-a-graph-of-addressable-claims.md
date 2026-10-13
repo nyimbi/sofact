@@ -37,8 +37,8 @@ lessons. So the parser had to fail closed: unreadable line, refusal; missing cri
 section, refusal; unparseable date, refusal rather than a dropped field.
 
 **Two spellings of every list already exist in the reference ledger.** `tags:
-[harness, research]` and a `key:` line followed by `  - item` lines both occur across
-the 28 documents. A parser for one of them is a parser that silently drops the other,
+[harness, research]` and a `key:` line followed by two-space-indented `- item` lines both
+occur across the 28 documents. A parser for one of them is a parser that silently drops the other,
 which is the same failure as above with a longer fuse.
 
 **One thing the spec's structure invites, and it is a trap.** The obvious use for a
@@ -130,56 +130,56 @@ artefacts rather than inferred from its prose.**
 
 ## Alternatives refused
 
-* **A claim list inside each source entry.** Refused in the Context: FR-070's
+- **A claim list inside each source entry.** Refused in the Context: FR-070's
   requirement is that invalidating a source invalidates the claims resting on it, and
   claims nested in a source cannot outlive it — invalidating the source deletes them,
   which is not the same operation and loses the record of what was believed.
-* **Derive `supports` by walking the spec for citations.** Refused in decision 13, on a
+- **Derive `supports` by walking the spec for citations.** Refused in decision 13, on a
   measurement rather than a principle: 5 of 21 sources cite only in prose, so the
   derivation would be wrong and would report itself complete.
-* **Read the ledger out of the research report's prose.** Refused: a markdown reader
+- **Read the ledger out of the research report's prose.** Refused: a markdown reader
   over free-form model output is a parser whose failure mode is a plausible-looking
   wrong ledger. The artefact protocol is what makes the run observable (ADR-0021), and
   a structured ledger is the same discipline applied to P1's output.
-* **A `verified: bool` instead of `VerificationStatus`.** Refused: the five-status
+- **A `verified: bool` instead of `VerificationStatus`.** Refused: the five-status
   legend exists because *content read*, *URL resolved*, and *seen but not captured* are
   different provenance claims, and a boolean collapses them — letting a source that
   merely resolved be cited as one that was read.
-* **Fail the disconfirming count as a gate check.** Refused in decision 6: it pays for
+- **Fail the disconfirming count as a gate check.** Refused in decision 6: it pays for
   fabrication. The count is a measurement, and the operator reads it.
-* **Resolve a contradiction by preferring the more-verified source.** Refused in
+- **Resolve a contradiction by preferring the more-verified source.** Refused in
   decision 9, and it is tempting precisely because it is mechanical. The spec puts the
   decision with the operator; a ranking would silently answer it, and the disagreement
   would then never reach them.
-* **Keep the ledger in a file beside the log.** Refused for the reason ADR-0034 gives
+- **Keep the ledger in a file beside the log.** Refused for the reason ADR-0034 gives
   about snapshots: state assembled by anything other than the log is not the record of
   what happened. The ledger is a row, the fold replays it, and `ProjectState.ledger`
   derives the operative one.
-* **Skip the front-matter lines the parser cannot read.** Refused in decision 3: this
+- **Skip the front-matter lines the parser cannot read.** Refused in decision 3: this
   is the subset-predicate-fails-toward-clean failure that has bitten this project
   repeatedly, and here it would report a complete ledger over dropped documents.
 
 ## Consequences
 
-* **The capability map's build order is complete.** All six items are built; §2.4's
+- **The capability map's build order is complete.** All six items are built; §2.4's
   "Context library" row moves from "Covered, weaker" to "Covered, stronger", and the
   vendor's directory of documents is now the weaker of the two.
-* **The roadmap audit's FR-069/070/071/073/074/075 rows move together**, which is
+- **The roadmap audit's FR-069/070/071/073/074/075 rows move together**, which is
   expected: they are one artefact's requirements, and building the artefact is what
   closes them. FR-068 stays open — a per-clause classification is a different artefact
   (a verdict on each intent clause) and the ledger holds claims *about* the premise, not
   attributed to clauses.
-* **`ProjectState` gains a field and a property, and `test_state.py`'s census enforces
+- **`ProjectState` gains a field and a property, and `test_state.py`'s census enforces
   the field.** The field count moves 21 → 22 and the `KIND_TO_FIELD` mapping stays total
   in both directions, so a new `LedgerKind` without a state field fails a test.
-* **A producer can now fail P1 in three checkable ways** — an uncited claim, a claim
+- **A producer can now fail P1 in three checkable ways** — an uncited claim, a claim
   resting only on positioning, an expired entry — where before the phase's output was
   measured only by the report's size and URL count.
-* **`research_goal`'s text is longer, and that is a cost.** The prompt is authored with
+- **`research_goal`'s text is longer, and that is a cost.** The prompt is authored with
   zero model involvement (ADR-0021), so every field the ledger needs is a sentence the
   producer must be given. The alternative — inferring the fields from a prose report —
   is the refused alternative above.
-* **The parser is stricter than the reference ledger's loosest documents.** Where a
+- **The parser is stricter than the reference ledger's loosest documents.** Where a
   hand-written entry would have been read by a person and understood, this refuses.
   That is the intended direction: the reference ledger's own "Verification queue"
   section exists because hand-written entries accumulate debt a reader has to notice,
@@ -187,52 +187,52 @@ artefacts rather than inferred from its prose.**
 
 ## Evidence
 
-* `src/sofact/views.py` — `VerificationStatus`, `SourcePosture`, `ClaimKind`, `Claim`,
-* `Contradiction`, `Source`, `SourceLedger` (with `resting_on`, `unbacked_decisions`,
+- `src/sofact/views.py` — `VerificationStatus`, `SourcePosture`, `ClaimKind`, `Claim`,
+- `Contradiction`, `Source`, `SourceLedger` (with `resting_on`, `unbacked_decisions`,
   `disconfirming`, `expired`), `LedgerKind.SOURCE_LEDGER_RECORDED`, `ProjectState.ledgers`
   and the derived `ProjectState.ledger`.
-* `src/sofact/research.py` — the front-matter reader, `parse_source_document`,
+- `src/sofact/research.py` — the front-matter reader, `parse_source_document`,
   `parse_claim_document`, `parse_ledger`, `ledger_checks`.
-* `src/sofact/service.py` — `research_goal`'s ledger protocol, `ledger_from`,
+- `src/sofact/service.py` — `research_goal`'s ledger protocol, `ledger_from`,
   `record_ledger`, `current_ledger`, `ledger_gate`.
-* `src/sofact/cli.py` — `sofact sources`, with `--from-run`.
-* `tests/ci/test_research.py` — 36 tests over the parser and the checks, including both
+- `src/sofact/cli.py` — `sofact sources`, with `--from-run`.
+- `tests/ci/test_research.py` — 36 tests over the parser and the checks, including both
   list spellings, the qualified heading, every refusal, and the dangling edge.
-* `tests/ci/test_service.py::TestTheSourceLedger` — 11 tests: the artefact read into a
+- `tests/ci/test_service.py::TestTheSourceLedger` — 11 tests: the artefact read into a
   ledger and replayed by the fold, the edge navigable, positioning recorded and refused
   as grounds, a contradiction left unresolved, expiry read, the versioned second ledger,
   and the goal text asking for the artefacts.
-* `tests/ci/test_cli.py::TestTheSourcesVerb` — 5 tests: reachability, the disconfirming
+- `tests/ci/test_cli.py::TestTheSourcesVerb` — 5 tests: reachability, the disconfirming
   count printed, the failed check exiting non-zero, the recorded ledger read back
   without the workspace, and the two refusals.
-* **Canaries**, each with the target string asserted present before the patch and the
+- **Canaries**, each with the target string asserted present before the patch and the
   file restored from a `/tmp` backup rather than from git:
-  * `_scalar`'s block-scalar guard replaced with `if False:` —
+  - `_scalar`'s block-scalar guard replaced with `if False:` —
     `test_a_block_scalar_is_refused_rather_than_misread` failed.
-  * `Source`'s posture/verification refusal replaced with `if False and ...` —
+  - `Source`'s posture/verification refusal replaced with `if False and ...` —
     `test_a_positioning_source_cannot_be_content_verified` failed.
-  * `SourceLedger._every_link_resolves`'s missing-source set replaced with `[]` —
+  - `SourceLedger._every_link_resolves`'s missing-source set replaced with `[]` —
     `test_a_claim_citing_a_source_the_ledger_lacks_is_refused` failed.
-  * `FactoryService.ledger_from`'s directory check replaced with `if False:` —
+  - `FactoryService.ledger_from`'s directory check replaced with `if False:` —
     both the service test and the CLI test failed, at both layers.
-  * `SourceLedger.unbacked_decisions`'s positioning branch replaced with `if False:` —
+  - `SourceLedger.unbacked_decisions`'s positioning branch replaced with `if False:` —
     `test_a_positioning_only_claim_fails_the_evidence_check` and the service test failed.
-* `tests/ci` at this commit: **804 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **804 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-070 (versioned source ledger), FR-069 (provenance), FR-071 (disconfirming
+- FR-070 (versioned source ledger), FR-069 (provenance), FR-071 (disconfirming
   evidence), FR-073 (contradiction detection), FR-074 (evidence versus positioning),
   FR-075 (self-staleness), FR-062 (a durable artefact per phase), NFR-024 (record what
   was observed).
-* `docs/sources/README.md` — the reference implementation this transcribes, and the
+- `docs/sources/README.md` — the reference implementation this transcribes, and the
   verification legend `VerificationStatus` promotes to a type.
-* [ADR-0007](0007-the-elicitation-gate-is-deterministic.md) — the supersede-don't-edit
+- [ADR-0007](0007-the-elicitation-gate-is-deterministic.md) — the supersede-don't-edit
   shape the versioned ledger follows.
-* [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
+- [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
   its output is an artefact protocol rather than a model's prose.
-* [ADR-0034](0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md) — why
+- [ADR-0034](0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md) — why
   the version counts through the fold.
-* `docs/research/orchestrator-capabilities/README.md` §2.4 and §5 item 6 — the rows this
+- `docs/research/orchestrator-capabilities/README.md` §2.4 and §5 item 6 — the rows this
   closes.

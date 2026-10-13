@@ -65,12 +65,12 @@ cache and take no lock.
 
 ## Consequences
 
-- **Two SoFact processes appending to one log is now safe.** `sofact --home <shared>`
+* **Two SoFact processes appending to one log is now safe.** `sofact --home <shared>`
   from two shells produces a chain that verifies, with the second appender chained
   onto the first rather than onto the log both of them read.
-- **Every append costs one `open` and one `flock`.** Measurable but small against a
+* **Every append costs one `open` and one `flock`.** Measurable but small against a
   write; the correctness it buys is a property the tool cannot do without.
-- **A second file now exists in the home directory.** It is a synchronisation
+* **A second file now exists in the home directory.** It is a synchronisation
   primitive, not an account of the run, so it is added to `_unowned_paths` (it must
   not be sealed into a module being built) and to the exclusion list in
   `test_the_service_writes_exactly_one_file` — where the exclusion is paired with an
@@ -78,25 +78,25 @@ cache and take no lock.
   That test is the reason the exclusion is stated rather than merely applied: an
   exclusion list that grows silently is how a "one file" invariant stops meaning
   anything.
-- **The lock does not make the log tamper-proof**, and does not change ADR-0003's
+* **The lock does not make the log tamper-proof**, and does not change ADR-0003's
   conclusion about an external anchor. It closes a fork, not a rewrite.
-- **A `NFS`-mounted home is outside this guarantee.** `flock` over NFS has
+* **A `NFS`-mounted home is outside this guarantee.** `flock` over NFS has
   historically been unreliable; the deployment envelope (spec §1.3) is a local home
   directory, so this is recorded rather than solved.
 
 ## Alternatives refused
 
-- **Re-read the tail without a lock.** Narrows the window; does not close it. Two
+* **Re-read the tail without a lock.** Narrows the window; does not close it. Two
   writers can still both read, both build, both write.
-- **Lock the log file itself.** Correct today and fragile tomorrow, for the reason in
+* **Lock the log file itself.** Correct today and fragile tomorrow, for the reason in
   decision 1.
-- **An in-process `threading.Lock`.** Does nothing for the multi-process case, which
+* **An in-process `threading.Lock`.** Does nothing for the multi-process case, which
   is the case that was measured. It would have passed a test written from the
   in-process symptom.
-- **Detect and repair the fork on read.** This is the failure mode restated as a
+* **Detect and repair the fork on read.** This is the failure mode restated as a
   feature. A store that can fork and then reconciles is a store whose history is
   negotiable, which is exactly what the chain exists to deny.
-- **Make the ledger a database.** A defensible direction, and not this one: the
+* **Make the ledger a database.** A defensible direction, and not this one: the
   ledger's value is that it is a file a human can read and diff. A lock is the smaller
   change that keeps it one.
 
@@ -108,9 +108,9 @@ marker, and waits for the go marker — so both have read the tail before either
 appends. The synchronisation is on the filesystem, not on `sleep`: a test that races
 on timing passes for the wrong reason.
 
-- `test_two_writers_do_not_fork_the_chain` — the chain verifies, length 2, both
+* `test_two_writers_do_not_fork_the_chain` — the chain verifies, length 2, both
   payloads present.
-- `test_a_writer_sees_the_other_writers_entry` — indices are `[0, 1]` and the second
+* `test_a_writer_sees_the_other_writers_entry` — indices are `[0, 1]` and the second
   entry's `prev_hash` is the first's `entry_hash`.
 
 Both fail on the unpatched code with the transcript above, and were re-canaried after

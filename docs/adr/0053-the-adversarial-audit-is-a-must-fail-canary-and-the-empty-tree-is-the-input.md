@@ -16,7 +16,7 @@ The roadmap row read "Not built — no code", which was true and understated the
 The factory had the defect, and a probe demonstrated it rather than argued it: a contract
 whose clause carried a rank-1 `PROPERTY` oracle with `command_hint="true"` reported
 
-```
+```text
 debt: 0.0     ceiling: L4     covers: True     verdict: satisfied
 ```
 

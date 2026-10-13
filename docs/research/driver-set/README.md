@@ -9,7 +9,7 @@ all witnessed; only generation is not.
 Installed:
 
 | harness | path | version |
-|---|---|---|
+| --- | --- | --- |
 | `pi` | `/opt/homebrew/bin/pi` | 1.1.0 |
 | `omp` | `~/.local/bin/omp`, `/opt/homebrew/bin/omp` | 18.8.6 |
 | `omc` | `/opt/homebrew/bin/omc` | 4.10.2 |
@@ -24,6 +24,7 @@ three have moved:
 1. **"`session_glob` is a filesystem glob and a row is not a path."** Still true — the
    record is in `~/.local/share/opencode/opencode.db`, a **68 GB** SQLite file. But
    `opencode session export <id>` now exists and prints the whole session as JSON:
+
    ```console
    $ opencode session export ses_f07f78a71ffe22oD4YTvhzC1w0 | head -c 200
    {
@@ -33,6 +34,7 @@ three have moved:
        "tokens": { "input": 3223920, "output": 283814, "reasoning": 47658, ... },
        "outcome": "succeeded",
    ```
+
    This is the "shell out to a command" seam ADR-0023 priced as *real machinery* and
    declined "as a first move". It is now one command that returns JSON — no SQL, no
    schema to track, which was the objection the ADR actually made.
@@ -40,12 +42,14 @@ three have moved:
 2. **"Give it a private store via an env var, as `claude` gets `CLAUDE_CONFIG_DIR` —
    refused for lack of evidence."** The variable exists: **`OPENCODE_DB`**, and with
    `--standalone` it works.
+
    ```console
    $ OPENCODE_DB=/tmp/oc_priv2/priv.db OPENCODE_TEST_HOME=/tmp/oc_priv2/home \
        opencode run --standalone -s ses_sofactpriv000000000000002 --format json "…"
    $ ls /tmp/oc_priv2/
    priv.db  priv.db-shm  priv.db-wal
    ```
+
    Without `--standalone` the run goes to the background service and `OPENCODE_DB` is
    ignored — the store stayed empty. So the pair is the isolation unit, not the variable
    alone.
@@ -56,7 +60,7 @@ three have moved:
 ### What the spec would say
 
 | field | value | evidence |
-|---|---|---|
+| --- | --- | --- |
 | `argv` | `("opencode","run","--standalone","-s","{session_id}","--format","json","--model","{model}")` | `run --help` lists `-s/--session`, `--format json`, `--standalone`, `-m/--model` |
 | `session_id_style` | **`token`, but prefixed `ses`** | `-s plain-token-id` → `Expected a string starting with "ses"`; `-s ses_abc` → accepted; `-s ses_01234567890123456789012345` → accepted and streamed events |
 | record access | **a command, not a glob** | `session export <id>` → JSON |
@@ -82,7 +86,7 @@ text|json|rpc|rpc-ui`, `--session-dir`, `--tools`, `--no-extensions`, `--max-tim
 
 Its record is **exactly pi's shape** — measured over a real record:
 
-```
+```text
 types: {'title': 1, 'session': 1, 'model_change': 1, 'thinking_level_change': 1, 'message': 2, 'custom': 1}
 usage keys: ['cacheRead', 'cacheWrite', 'cost', 'input', 'output', 'totalTokens']
 ```

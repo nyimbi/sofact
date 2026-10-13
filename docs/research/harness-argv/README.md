@@ -7,7 +7,7 @@ marked **unverified** where no non-paying invocation could decide it. Nothing in
 Installed on this machine:
 
 | harness | path | version |
-|---|---|---|
+| --- | --- | --- |
 | `pi` | `/opt/homebrew/bin/pi` | `1.1.0` |
 | `dsh` | `/opt/homebrew/bin/dsh` → `@deepseek-ai/dsh` (npm) | `0.1.0-rc.6` |
 | `claude` | `/Users/nyimbiodero/.local/bin/claude` | `2.1.296 (Claude Code)` |
@@ -25,7 +25,7 @@ invoke the binary by path, not by name.
 re-verified against 1.1.0.
 
 | spec field | value | verdict | evidence |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `argv` flags | `--mode`, `--print`/`-p`, `--offline`, `--no-context-files`, `--no-extensions`, `--model`, `--session-dir`, `--session-id`, `--tools`, `--` | **confirmed** | `pi --help` lists each: `--mode <mode>`, `--print, -p`, `--offline`, `--no-context-files, -nc`, `--no-extensions, -ne`, `--model <pattern>`, `--session-dir <dir>`, `--session-id <id>`, `--tools, -t <tools>`, `--` ("End option parsing") |
 | `session_glob` `**/*{session_id}*.jsonl` | plain JSONL, name embeds id | **confirmed** | real record `/Users/nyimbiodero/.pi/agent/sessions/--Users-nyimbiodero-src-pjs--/2026-10-09T06-01-42-430Z_01a11f40-cb1d-73b5-8246-1bb82a87e6f7.jsonl`; header `id` = `01a11f40-…` |
 | `session_is_zstd` `False` | | **confirmed** | file is plain text JSONL |
@@ -44,12 +44,12 @@ pi is otherwise **not refuted**: the argv and record shape still hold at 1.1.0.
 recorded against. `DSH_SPEC.argv` is refuted on three independent counts.
 
 | spec field | value | verdict | evidence |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `argv` `--profile sdk` | | **refuted** | `DSH_HOME=/tmp/x dsh --profile sdk --help` → exit 1, `Error: dsh: profile "sdk" does not exist; create it with 'dsh plugin --profile sdk add <package>'`. The shipped profiles are `headless` and `web`. |
 | `argv` `--print` | | **refuted** | `dsh --profile headless --print hi` → exit 1, `error: unknown option '--print'`. `headless` has no `--print`; running with no task → exit 1, `error: a task is required, for example: dsh --profile headless "run the tests"`. |
 | `argv` `--model {model}` | | **refuted** | `dsh --profile headless --model m` → exit 1, `error: unknown option '--model m'`. |
 | `argv` `--cwd {workspace}` | | **refuted** | `dsh --profile headless --cwd /tmp` → exit 1, `error: unknown option '--cwd /tmp'`. The headless runner sets `meta: { cwd: process.cwd() }`, so cwd is the **process cwd**, which SoFact already sets via `create_subprocess_exec(cwd=self.workspace)`. |
-| session id flag | (spec passes none) | **confirmed** | `headless` generates its own id: `SessionId(\`session-${randomUUID()}\`)` (`dsh-headless/lib/index.js:71`). SoFact cannot pin it, so `session_glob` cannot key on a SoFact-chosen id — see below. |
+| session id flag | (spec passes none) | **confirmed** | `headless` generates its own id: ``SessionId(`session-${randomUUID()}`)`` (`dsh-headless/lib/index.js:71`). SoFact cannot pin it, so `session_glob` cannot key on a SoFact-chosen id — see below. |
 | `env` `DSH_HOME={session_dir}` | explicit home | **confirmed** | with `DSH_HOME` unset the SDK still resolves `~/.dsh`; the headless runner materializes a `headless` profile into `$DSH_HOME/profiles` on first use. Keeping it explicit still isolates the operator's real `~/.dsh`. |
 | `session_glob` `**/session-{session_id}/session.v3.jsonl.zstd` | | **refuted** | real files are `session.jsonl.zstd` (no `v3`). Layout (`dsh-session-persistence-jsonl/README.md`): `<root>/--<normalized-cwd>--/<encoded-id>/session.jsonl.zstd`. `--profile headless` always stamps `session-` (line 71); **`web` does not** — a real `web` session dir is `--Users-nyimbiodero-src-pjs-eel--/2507cf75-…/`. And `{session_id}` cannot match, because the id is generated inside the runner. |
 | `session_is_zstd` `True` | | **confirmed** | `zstd -dc <file>` decompresses cleanly |
@@ -71,7 +71,7 @@ witnessed end to end, because a real run needs a model call and that was out of 
 as measured, so the spec is re-confirmed rather than merely consistent.
 
 | spec field | value | verdict | evidence |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `argv` flags | `--print`, `--model`, `--output-format`, `--session-id`, `--tools`, `--` | **confirmed** | `claude --help`: `-p, --print`, `--model <model>`, `--output-format <format>`, `--session-id <uuid>` ("Use a specific session ID"), `--tools <tools...>` |
 | `--` terminator | | **confirmed** | `--tools <tools...>` is variadic (help shows `"Bash,Edit,Read"`), so the terminator is still needed; the spec comment's rationale stands |
 | `session_id_style` `uuid` | | **confirmed** | `--session-id <uuid>` — the help names the type |

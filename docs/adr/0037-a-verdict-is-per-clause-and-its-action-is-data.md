@@ -94,106 +94,106 @@ own action, with the evidence checked against the ledger.**
 
 ## Alternatives refused
 
-* **Record the verdict and print the action in the CLI only.** Refused in decision 2: the
+- **Record the verdict and print the action in the CLI only.** Refused in decision 2: the
   action would then exist in a printout and not in the state machine, so a `sofact phase`
   advance would not see it — which is exactly the "a control that exists is not a control
   that is applied" failure.
-* **Let the producer supply the clause list.** Refused in decision 6. It would make
+- **Let the producer supply the clause list.** Refused in decision 6. It would make
   "every clause is classified" trivially true and the check would measure nothing.
-* **Default an unknown verdict to Unverifiable.** Refused in decision 7: Unverifiable is
+- **Default an unknown verdict to Unverifiable.** Refused in decision 7: Unverifiable is
   the only verdict whose action is *proceed*, so the default would be the one that fails
   open.
-* **Make Unverifiable's action "stop and gather more evidence".** Refused: FR-068's table
+- **Make Unverifiable's action "stop and gather more evidence".** Refused: FR-068's table
   says proceed-as-a-flagged-assumption, and inventing a stop the requirement does not ask
   for would block the pipeline on questions research structurally cannot answer. The
   honesty is carried by the assumption's `refuted_by`, not by halting.
-* **A single `ResearchClassification` with a `clauses: dict[str, str]` verdict map.**
+- **A single `ResearchClassification` with a `clauses: dict[str, str]` verdict map.**
   Refused: a dict cannot carry the rationale, the evidence, or `settled_by` per clause,
   and those are the parts a reader needs to act on the verdict.
-* **A check for "no Unverifiable clauses".** Refused in decision 10: unverifiable
+- **A check for "no Unverifiable clauses".** Refused in decision 10: unverifiable
   premises are a normal research outcome, and a gate that fails on a normal outcome
   teaches its operator to bypass it.
-* **Let `evidence` name a claim id instead of a source id.** Refused: ADR-0035's claims
+- **Let `evidence` name a claim id instead of a source id.** Refused: ADR-0035's claims
   are addressable and the ledger already resolves source→claims, so the source is the
   coarser and checkable reference. A claim-level citation is a refinement to make when a
   producer can be relied on to name claims correctly.
 
 ## Consequences
 
-* **FR-068 moves from Not built to Implemented, and FR-062's remaining half closes.** P1
+- **FR-068 moves from Not built to Implemented, and FR-062's remaining half closes.** P1
   now emits three artefacts: the research record (bounded, FR-072), the source ledger
   (addressable, FR-070), and the per-clause classification (FR-068). A resume lands on a
   phase whose output is an artefact in every phase P0–P3.
-* **`advance_phase` gains a refusal at P1 completion.** A project with an invalidated or
+- **`advance_phase` gains a refusal at P1 completion.** A project with an invalidated or
   deepened clause cannot advance out of P1 through the service or the CLI; the way
   forward is a new elicitation, which is FR-068's own action.
-* **`research_goal` gains a `clauses` parameter**, defaulting to empty. A goal with no
+- **`research_goal` gains a `clauses` parameter**, defaulting to empty. A goal with no
   clauses still runs — the budget path (ADR-0036) depends on that — and the
   classification's own check is what reports the empty case.
-* **`ProjectState` gains `classifications` and `classification`**, mirroring
+- **`ProjectState` gains `classifications` and `classification`**, mirroring
   `ledger`/`ledgers`. `test_state.py`'s census counts record *kinds*; the new kind is
   added to the enum, so the census assertion grows by one and its diff is the change.
-* **A new verb**, `sofact classify [--from-run <id>]`, which reads a run's
+- **A new verb**, `sofact classify [--from-run <id>]`, which reads a run's
   `research-classification.json` into the log and prints each verdict with its action,
   its rationale and its evidence, plus the flagged assumptions and a red block naming the
   clauses that return to P0. A failed check exits 1.
 
 ## Evidence
 
-* `src/sofact/views.py` — `ResearchVerdict`, `VERDICT_ACTION`, `ClauseClassification`
+- `src/sofact/views.py` — `ResearchVerdict`, `VERDICT_ACTION`, `ClauseClassification`
   (with `_the_evidence_matches_the_verdict`, `action`, `returns_to_p0`,
   `flagged_assumption`), `ResearchClassification` (with `_every_clause_is_classified_once`,
   `invalidated`/`deepened`/`unverifiable`/`returns_to_p0`/`flagged_assumptions`/
   `unclassified`/`classification`), `LedgerKind.RESEARCH_CLASSIFIED`, and
   `ProjectState.classifications`/`classification`.
-* `src/sofact/research.py` — `LEDGER_CLASSIFICATION_FILENAME`, `parse_classification`
+- `src/sofact/research.py` — `LEDGER_CLASSIFICATION_FILENAME`, `parse_classification`
   (fails closed on an unknown key, a missing field and an unknown verdict),
   `classification_checks` (the three checks).
-* `src/sofact/service.py` — `research_goal`'s clause block, the P1 refusal in
+- `src/sofact/service.py` — `research_goal`'s clause block, the P1 refusal in
   `advance_phase`, `classification_from`, `record_classification`,
   `current_classification`, `classification_gate`.
-* `src/sofact/state.py` — the `RESEARCH_CLASSIFIED` arm.
-* `src/sofact/cli.py` — the `classify` verb, `_VERDICT_COLOUR` and
+- `src/sofact/state.py` — the `RESEARCH_CLASSIFIED` arm.
+- `src/sofact/cli.py` — the `classify` verb, `_VERDICT_COLOUR` and
   `_print_classification`.
-* `tests/ci/test_service.py::TestTheClauseClassification` — 21 tests: the fold replay,
+- `tests/ci/test_service.py::TestTheClauseClassification` — 21 tests: the fold replay,
   the action per verdict, the P1 refusal on Invalidated and on Deepened, the flagged
   assumption and its refuter, the dangling citation, the partial classification, the
   goal text, the missing artefact, the versioning, the other-goal refusal, the unknown
   verdict, the unknown key, and the four type-level refusals.
-* `tests/ci/test_cli.py::TestTheClassifyVerb` — 8 tests: the empty-project message, the
+- `tests/ci/test_cli.py::TestTheClassifyVerb` — 8 tests: the empty-project message, the
   five verdicts with their actions, the non-zero exit on a stop, the flagged assumption
   block, the dangling citation, the partial classification naming the missing clauses,
   the missing artefact, and the unknown run.
-* `tests/ci/synthetic.py` — the `research-classification.json` branch, which reads the
+- `tests/ci/synthetic.py` — the `research-classification.json` branch, which reads the
   clause ids *back out of the goal text* rather than inventing them, plus five mode
   variants (`-invalidated`, `-deepened`, `-unverifiable`, `-dangling`, `-partial`).
-* **Canaries**, each with the target string asserted present before the patch and the
+- **Canaries**, each with the target string asserted present before the patch and the
   file restored from a `/tmp` backup rather than from git:
-  * `ClauseClassification._the_evidence_matches_the_verdict` short-circuited with an
+  - `ClauseClassification._the_evidence_matches_the_verdict` short-circuited with an
     early `return self` — the four type-level refusal tests failed
     (`test_an_unverifiable_verdict_may_not_cite_evidence`,
     `test_a_validated_verdict_must_cite_something`,
     `test_an_unverifiable_verdict_must_name_what_would_settle_it`,
     `test_settled_by_on_a_decided_verdict_is_refused`).
-  * `advance_phase`'s P1 refusal guarded with `if False and ...` —
+  - `advance_phase`'s P1 refusal guarded with `if False and ...` —
     `test_an_invalidated_clause_stops_the_phase_rather_than_being_reported` and
     `test_a_deepened_clause_stops_the_phase_too` failed.
-  * `parse_classification`'s verdict lookup replaced with a constant
+  - `parse_classification`'s verdict lookup replaced with a constant
     `ResearchVerdict.UNVERIFIABLE` — `test_an_unknown_verdict_is_refused_rather_than_defaulted`
     failed, which is the canary that matters most: it is the one that shows the fail-open
     default is caught rather than silently proceeding.
-* `tests/ci` at this commit: **844 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **844 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-068 (a verdict on every intent clause), FR-062 (every phase emits a durable
+- FR-068 (a verdict on every intent clause), FR-062 (every phase emits a durable
   artefact), FR-079 (an assumption must name its refuter), FR-071 (the disconfirming
   count), FR-073 (contradiction detection), FR-070 (the addressable ledger), NFR-024
   (record what was observed).
-* [ADR-0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) — the ledger a
+- [ADR-0035](0035-a-source-ledger-is-a-graph-of-addressable-claims.md) — the ledger a
   verdict's evidence is checked against.
-* [ADR-0036](0036-a-research-budget-is-per-clause-and-its-three-caps-are-not-enforced-alike.md) —
+- [ADR-0036](0036-a-research-budget-is-per-clause-and-its-three-caps-are-not-enforced-alike.md) —
   the bound on the run that produces the classification.
-* [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
+- [ADR-0021](0021-research-is-dispatched-not-performed.md) — research is dispatched, so
   the classification is a producer artefact SoFact parses and checks.

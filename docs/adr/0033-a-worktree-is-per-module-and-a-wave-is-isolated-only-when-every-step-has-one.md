@@ -100,59 +100,59 @@ a wave is isolated only when every step in it can be given a worktree of its own
 
 ## Alternatives refused
 
-* **Check the branch out in the main tree, then add a worktree for it.** Refused by
+- **Check the branch out in the main tree, then add a worktree for it.** Refused by
   measurement: git refuses a branch checked out twice, so this cannot be built. The
   constraint is what forces the integration-line design, which is also the better one.
-* **Isolate every wave, including the module-less ones.** Refused: a module-less step has
+- **Isolate every wave, including the module-less ones.** Refused: a module-less step has
   no worktree to be given, and inventing a branch-per-step fallback worktree would put the
   *shared* step in a private directory whose work the integration line then has to learn
   about — machinery with no requirement behind it. Sequential is the honest answer, and the
   predicate says which case it is.
-* **Raise on a merge conflict.** Refused in decision 4. A conflict is the decomposition
+- **Raise on a merge conflict.** Refused in decision 4. A conflict is the decomposition
   being wrong, and that is a finding the operator needs; an exception thrown mid-wave
   destroys the record of which branches collided.
-* **Rewrite the dispatch row with the merged checkout.** Refused: it would break FR-003's
+- **Rewrite the dispatch row with the merged checkout.** Refused: it would break FR-003's
   chain, and the chain is what makes the log evidence rather than a claim. The fold keys
   instead.
-* **Leave the worktree in place after integration, as a cache.** Refused: a worktree that
+- **Leave the worktree in place after integration, as a cache.** Refused: a worktree that
   outlives its wave is a leak that compounds per wave, and the branch is the durable
   artefact — the directory is a place a session ran, not a place work is kept. Measured
   after the change: an isolated wave leaves the worktree root empty.
-* **Sell the worktree as a sandbox.** Refused, as in ADR-0024 §4 and ADR-0023: neither
+- **Sell the worktree as a sandbox.** Refused, as in ADR-0024 §4 and ADR-0023: neither
   harness confines its child, so a worktree is not one either. The `store_isolated` row
   (ADR-0032) narrows this hazard without closing it.
 
 ## Consequences
 
-* **A concurrent wave runs in per-module worktrees and lands on one line.** Measured on
+- **A concurrent wave runs in per-module worktrees and lands on one line.** Measured on
   this tree: a wave of three module-owned steps produces three distinct worktree paths,
   none of them the shared workspace; the integration line afterwards holds every step's
   work; and the worktree root is empty when the wave ends.
-* **The module-less bootstrap step still runs in the shared tree.** It is the first wave
+- **The module-less bootstrap step still runs in the shared tree.** It is the first wave
   and it is alone in it, so nothing collides; the predicate refuses a wave that would put
   it beside another step.
-* **The refusal path is not reachable through `dispatch_plan` today.** The compiler emits
+- **The refusal path is not reachable through `dispatch_plan` today.** The compiler emits
   one clause per step and the proposer one module per clause, so no wave it produces
   contains two module-less steps or two steps of one module. `wave_is_isolatable` is
   therefore tested on waves assembled from the plan's own steps, because a guard with no
   test is one nobody notices is broken — and it is what stands between a future compiler
   that emits such a wave and two sessions in one directory.
-* **`dispatch_step` grows an `isolate` parameter that a direct caller must integrate.**
+- **`dispatch_step` grows an `isolate` parameter that a direct caller must integrate.**
   It defaults to off, and its docstring says what a caller that turns it on owes: a record
   whose `checkout.worktree` is set and whose `integrated_commit` is not. `dispatch_plan`
   is the caller that pays it.
-* **`ModuleCheckout` gains `worktree`, `integrated_commit` and `merge_conflict`**, with
+- **`ModuleCheckout` gains `worktree`, `integrated_commit` and `merge_conflict`**, with
   validators that make three impossible states unrepresentable: an integrated commit
   without a worktree, a conflict alongside an integrated commit, and an integrated commit
   that is not the branch tip. `worktree` stays set after integration because it records
   *where the session ran*; whether the work reached the line is `integrated_commit`'s to
   say, and one field answering both questions would have to be wrong about one of them.
-* **The state fold now resolves a keyed dispatch.** `dispatches` is a mapping rather than
+- **The state fold now resolves a keyed dispatch.** `dispatches` is a mapping rather than
   a list, which is a change to how the log is read and not to what may be written to it.
-* **`.sofact-worktrees` is excluded from sealing and from FR-006's artefact digest.** A
+- **`.sofact-worktrees` is excluded from sealing and from FR-006's artefact digest.** A
   sibling module's checkout is not this module's work, and a digest that folded it in would
   key a verdict to another step's files.
-* **The spec's tooling table loses its second false claim about this feature.** The
+- **The spec's tooling table loses its second false claim about this feature.** The
   `dsh-git-worktree` entry said SoFact "drives only `init`, `switch`, `config`, `add`,
   `commit` and `status`" and that FR-141 was deferred; SoFact now drives `worktree add`,
   `worktree list`, `worktree remove` and `merge` as well, and the composition decision is
@@ -160,37 +160,37 @@ a wave is isolated only when every step in it can be given a worktree of its own
 
 ## Evidence
 
-* `src/sofact/git.py` — `ensure_module_worktree`, `integrate_worktree`, `_ensure_repository`,
+- `src/sofact/git.py` — `ensure_module_worktree`, `integrate_worktree`, `_ensure_repository`,
   `_worktree_path`, `_registered_worktrees`, `WORKTREE_DIRNAME`.
-* `tests/ci/test_git.py` — 8 tests under the FR-141 banner: a worktree gives the step its
+- `tests/ci/test_git.py` — 8 tests under the FR-141 banner: a worktree gives the step its
   own directory; two isolated steps cannot see each other's files; re-isolating reuses the
   worktree; a module-less step gets a branch but no worktree; integrating moves the work
   onto the line; a later step branches from the integrated line; a conflicting merge is
   recorded rather than raised; integrating a checkout with no worktree is refused.
   `tests/ci/test_git.py`: **29 passed**.
-* `tests/ci/test_service.py::TestWorktreeIsolation` — 6 tests: a concurrent wave isolates
+- `tests/ci/test_service.py::TestWorktreeIsolation` — 6 tests: a concurrent wave isolates
   every step it can; an isolated wave leaves no worktree behind; the integration line holds
   every isolated step's work; the shared workspace sees what the wave built; a wave with an
   unownable step is not isolated; the merge is recorded as its own row.
-* **Canary**: `wave_is_isolatable`'s predicate was replaced with `return True` (the patch
+- **Canary**: `wave_is_isolatable`'s predicate was replaced with `return True` (the patch
   asserted its target string was present first, and the file was restored from a backup
   rather than from git), and `test_a_wave_with_an_unownable_step_is_not_isolated` failed.
   Restored, it passes.
-* Measured while building, each by running git rather than reading its documentation: a
+- Measured while building, each by running git rather than reading its documentation: a
   branch cannot be checked out twice; `merge --no-ff` refuses an unborn head while
   `--ff-only` does not; `worktree add --orphan` creates an isolated tree on an unborn HEAD;
   six concurrent `worktree add` calls all succeed.
-* `tests/ci` at this commit: **739 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **739 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-141 (worktree per module), FR-100 (branch per module), FR-142 (wave dispatch), FR-136
+- FR-141 (worktree per module), FR-100 (branch per module), FR-142 (wave dispatch), FR-136
   (a module's work spans several steps), FR-003 (append-only chain), FR-006 and FR-138 (a
   verdict describes one run's work), FR-099 (a re-dispatch finds what the last one left),
   FR-140 (session lifecycle is the factory's).
-* [ADR-0023](0023-a-record-is-addressed-by-a-path.md) — containment is not confinement.
-* [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) —
+- [ADR-0023](0023-a-record-is-addressed-by-a-path.md) — containment is not confinement.
+- [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) —
   where the module identity this record needed came from.
-* `docs/research/orchestrator-capabilities/README.md` §3.1 — the measurement that the
+- `docs/research/orchestrator-capabilities/README.md` §3.1 — the measurement that the
   deferral's condition had fired.

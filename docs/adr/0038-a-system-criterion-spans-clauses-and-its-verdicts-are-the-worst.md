@@ -114,94 +114,94 @@ the worst it has received.**
 
 ## Alternatives refused
 
-* **Test entity presence by searching the source for the entity's name.** Refused in
+- **Test entity presence by searching the source for the entity's name.** Refused in
   decision 3. It passes on a specification that implements nothing, for exactly the
   entities whose names are common words — the failure `SystemEntity.clause_ids` was
   introduced to avoid.
-* **Let a criterion span one clause.** Refused in decision 1: FR-116 asks for the criteria
+- **Let a criterion span one clause.** Refused in decision 1: FR-116 asks for the criteria
   *no single module can satisfy*, and a one-clause criterion is a module's own obligation
   that P6 already checks. Accepting it would let a decomposition validate itself against
   criteria it satisfies by construction.
-* **Treat an absent verdict as satisfied.** Refused in decision 7. It is the default that
+- **Treat an absent verdict as satisfied.** Refused in decision 7. It is the default that
   fails open, and the one a check can least afford.
-* **Take the latest verdict per clause.** Refused in decision 8: it makes the answer depend
+- **Take the latest verdict per clause.** Refused in decision 8: it makes the answer depend
   on dispatch order and lets a composition failure be laundered by re-verifying one side.
-* **Fail the P2 gate when no criteria are declared.** Refused in decision 11. An honestly
+- **Fail the P2 gate when no criteria are declared.** Refused in decision 11. An honestly
   modular system has none, and a gate that fails on a legitimate outcome teaches its
   operator to bypass it.
-* **Attribute an unowned entity to the whole plan.** Refused in decision 4. FR-114's whole
+- **Attribute an unowned entity to the whole plan.** Refused in decision 4. FR-114's whole
   content is the size of the repair set, and a missing module is repaired by changing the
   specification — no module exists to blame.
-* **Run the criterion as a command.** Refused: a system-level criterion is not in the
+- **Run the criterion as a command.** Refused: a system-level criterion is not in the
   contract's oracle set, so there is no command to run. The check states this in
   `uncovered` rather than implying it ran something. Wiring an oracle set for criteria is
   a refinement to make when the contract can carry one.
-* **Derive `module_for_clause` from the dispatches.** Refused in decision 3: a module that
+- **Derive `module_for_clause` from the dispatches.** Refused in decision 3: a module that
   was never dispatched is a module the system is missing, and the check would then report a
   plan that skipped half its modules as conforming.
 
 ## Consequences
 
-* **FR-115 and FR-116 move from Not built to Implemented**, and §10 has no unbuilt
+- **FR-115 and FR-116 move from Not built to Implemented**, and §10 has no unbuilt
   requirement. `not_implemented` shrinks to FR-112 for the default project, which is the
   one gap that is a *producer* limitation rather than a specification one — no proposal
   derives a machine-readable surface, because nothing in a clause is a signature.
-* **A project with no approved specification still reports both as unimplemented.** The
+- **A project with no approved specification still reports both as unimplemented.** The
   checks run and discharge nothing; nothing about the default path changes.
-* **`check_integration` reads the approved specification**, and gains
+- **`check_integration` reads the approved specification**, and gains
   `_worst_verdict_per_clause`. A specification declared at P2 is therefore conformed on
   every later integration pass, including passes that follow a repair.
-* **`sofact specify` gains `--criterion` and prints the criteria it accepted**, so the
+- **`sofact specify` gains `--criterion` and prints the criteria it accepted**, so the
   operator sees the span before approving the gate.
-* **`docs/research/system-model/` gains a second reader.** The model was written for P3 to
+- **`docs/research/system-model/` gains a second reader.** The model was written for P3 to
   decompose against; FR-115 makes it something P7 checks, which is the point at which it
   earns its maintenance cost.
 
 ## Evidence
 
-* `src/sofact/views.py` — `SystemCriterion` (with `_spans_more_than_one_module_can_own`),
+- `src/sofact/views.py` — `SystemCriterion` (with `_spans_more_than_one_module_can_own`),
   `Specification.system_criteria` and `_system_criteria_span_declared_clauses`, the three
   `IntegrationFindingKind` members (`MISSING_ENTITY`, `UNOWNED_ENTITY`,
   `UNSATISFIED_SYSTEM_CRITERION`), and the `IntegrationFinding` docstring's account of why
   `modules=()` is an answer.
-* `src/sofact/integration.py` — `check_model_conformance`, `check_system_criteria`,
+- `src/sofact/integration.py` — `check_model_conformance`, `check_system_criteria`,
   `integrate`'s three new parameters, the two new `IntegrationCheck` entries and their
   `uncovered` lines.
-* `src/sofact/specification.py` — the `system_criteria` parameter and the
+- `src/sofact/specification.py` — the `system_criteria` parameter and the
   `system_criteria_reported` gate check.
-* `src/sofact/service.py` — `check_integration`'s read of the approved specification and
+- `src/sofact/service.py` — `check_integration`'s read of the approved specification and
   `_worst_verdict_per_clause`.
-* `src/sofact/cli.py` — `_criterion_option`, `--criterion`, `_NOT_IMPLEMENTED_WHY` (the
+- `src/sofact/cli.py` — `_criterion_option`, `--criterion`, `_NOT_IMPLEMENTED_WHY` (the
   old message said the model "does not exist as a type", which stopped being true), and
   the criterion block in `_print_specification`.
-* `tests/ci/test_integration.py::TestTheSystemModelConformance` — 6 tests; and
+- `tests/ci/test_integration.py::TestTheSystemModelConformance` — 6 tests; and
   `::TestTheSystemCriteria` — 8 tests, including the two type-level refusals and the
   P2 gate's two states.
-* `tests/ci/test_cli.py::TestTheIntegrateVerb` — 5 tests: FR-116 open with no criteria,
+- `tests/ci/test_cli.py::TestTheIntegrateVerb` — 5 tests: FR-116 open with no criteria,
   FR-116 closed once one is declared, the one-clause refusal, the out-of-range index
   refusal, and the printed proposal.
-* **Canaries**, each with the target string asserted present before the patch and the file
+- **Canaries**, each with the target string asserted present before the patch and the file
   restored from `/tmp/integration.py.bak` rather than from git:
-  * `check_model_conformance`'s `if not owners` short-circuited with `and False` — the
+  - `check_model_conformance`'s `if not owners` short-circuited with `and False` — the
     unowned-entity tests failed (`test_an_entity_no_module_owns_is_a_decomposition_defect`,
     `test_a_model_with_an_unowned_entity_fails_the_report`).
-  * `check_system_criteria`'s verdict lookup defaulted to `SATISFIED` — the absent-verdict
+  - `check_system_criteria`'s verdict lookup defaulted to `SATISFIED` — the absent-verdict
     test failed (`test_a_clause_with_no_verdict_is_insufficient_rather_than_satisfied`),
     which is the canary that matters most: it is the one that shows the fail-open default
     is caught rather than silently passing a criterion over unchecked work.
-* `tests/ci` at this commit: **859 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **859 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-115 (the assembled system satisfies the model), FR-116 (system-level criteria),
+- FR-115 (the assembled system satisfies the model), FR-116 (system-level criteria),
   FR-078/FR-083 (the model as the source for interfaces), FR-081 (every entity is
   referenced), FR-084 (specification drift), FR-088 (traceability), FR-111/FR-112/FR-113
   (the other P7 checks), FR-114 (minimum violating set), FR-006 (stale evidence),
   FR-061 (the gates), NFR-024.
-* [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) — why `Module.interface` is prose,
+- [ADR-0025](0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) — why `Module.interface` is prose,
   and therefore why FR-112 remains open.
-* [ADR-0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md) — the check FR-115
+- [ADR-0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md) — the check FR-115
   sits beside, and the `discharged` distinction both use.
-* [ADR-0036](0036-a-research-budget-is-per-clause-and-its-three-caps-are-not-enforced-alike.md) —
+- [ADR-0036](0036-a-research-budget-is-per-clause-and-its-three-caps-are-not-enforced-alike.md) —
   the prior unit, and the same "a measurement is not a failure" rule as decision 11.

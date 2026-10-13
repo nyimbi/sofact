@@ -184,111 +184,111 @@ factory owes.**
 
 ## Alternatives refused
 
-* **FR-118's statements as prose in one rendered document.** Refused in decision 1. A
+- **FR-118's statements as prose in one rendered document.** Refused in decision 1. A
   paragraph can be written without the awkward clause; a required field cannot.
-* **A `value_statement: str` field defaulting to the sentence.** Refused in decision 2:
+- **A `value_statement: str` field defaulting to the sentence.** Refused in decision 2:
   a default is a value a caller may override, and the sentence is the one thing no
   caller may change.
-* **One "missing artefacts" list.** Refused in decision 4: the factory's work and the
+- **One "missing artefacts" list.** Refused in decision 4: the factory's work and the
   operator's open decision would be one indistinguishable set, and the check over them
   would fail forever.
-* **A check over all four FR-117 kinds, failing on the two unproducible ones.** Refused
+- **A check over all four FR-117 kinds, failing on the two unproducible ones.** Refused
   in decision 5. It is the gate that cannot pass, and the fix people reach for is to
   stop running it.
-* **A chain that stops at the first missing hop.** Refused in decision 6: the report
+- **A chain that stops at the first missing hop.** Refused in decision 6: the report
   could not tell a dropped clause from a contract that never had one.
-* **Printing the declared rank under the word "measured".** Refused in decision 8: it is
+- **Printing the declared rank under the word "measured".** Refused in decision 8: it is
   the euphemism FR-118 names.
-* **`measured_strength: float = 0.0`.** Refused: zero is a measurement, and a report
+- **`measured_strength: float = 0.0`.** Refused: zero is a measurement, and a report
   showing `0.00` for every clause would read as measured-and-weak rather than
   unmeasured.
-* **A `MaintenanceLane.inherited_oracles: tuple[str, ...]` of bare statements, with the
+- **A `MaintenanceLane.inherited_oracles: tuple[str, ...]` of bare statements, with the
   handover's own list stored beside it and a validator asserting the two agreed.**
   Refused in decision 14. Two statements of one fact, and a string cannot distinguish an
   executable oracle from prose — so a lane could not report what a maintenance run can
   actually execute. This was written and then rewritten.
-* **Naming §14's module classes in the handover.** Refused in decision 11: the next mode
+- **Naming §14's module classes in the handover.** Refused in decision 11: the next mode
   would get a taxonomy for building rather than for maintaining.
-* **`DeliveryReport.plan_id: UUID7 | None`.** Refused: it forced a `""` into a UUID7
+- **`DeliveryReport.plan_id: UUID7 | None`.** Refused: it forced a `""` into a UUID7
   field, a hole no caller can reach because a report is only ever rendered for a plan.
-* **Deploying.** Refused in decision 17 and by §1.5's "Autonomous production deploy"
+- **Deploying.** Refused in decision 17 and by §1.5's "Autonomous production deploy"
   non-goal: SoFact produces specifications and verifies systems; it does not run
   releases.
 
 ## Consequences
 
-* **FR-117, FR-118, FR-119 and FR-121 move from Not built to Implemented.** FR-120 (a
+- **FR-117, FR-118, FR-119 and FR-121 move from Not built to Implemented.** FR-120 (a
   machine-usable API surface) remains Not built and is named as such in
   `DELIVERY_REQUIREMENTS` rather than dropped from it.
-* **FR-086's delivery half is discharged.** The value statement reaches the deploy gate
+- **FR-086's delivery half is discharged.** The value statement reaches the deploy gate
   as a constant, and the check that reports it cannot fail — which is the point: it is
   not a thing the factory might get right, it is a thing the type does not permit it to
   get wrong.
-* **Two new ledger kinds** (`delivery.rendered`, `deploy.recorded`) and two new
+- **Two new ledger kinds** (`delivery.rendered`, `deploy.recorded`) and two new
   `ProjectState` fields (`deliveries`, `deploys`), taking `ProjectState` to 25 fields.
   Both append rather than key: a re-render and a second deploy are new records rather
   than amendments, because FR-119 makes both permanent.
-* **Two new verbs.** `sofact deliver` renders and prints the report; `sofact deploy`
+- **Two new verbs.** `sofact deliver` renders and prints the report; `sofact deploy`
   presents the gate, and `--approve <id> --by <you>` passes it. Neither deploys
   anything.
-* **The report will be mostly unverified on a project whose oracles are prose, and says
+- **The report will be mostly unverified on a project whose oracles are prose, and says
   so.** That is the honest state of a delivered system with ground-truth debt, and the
   handover counts the same debt again where it reaches Mode M.
-* **A delivery root with nothing in it fails its own report.** The two artefacts the
+- **A delivery root with nothing in it fails its own report.** The two artefacts the
   factory owes are files somebody has to write; `sofact deliver` does not write them,
   and the check says which are missing rather than passing over an empty directory.
 
 ## Evidence
 
-* `src/sofact/views.py` — `DELIVERY_REQUIREMENTS`, `DeliveryArtifactKind`,
+- `src/sofact/views.py` — `DELIVERY_REQUIREMENTS`, `DeliveryArtifactKind`,
   `DELIVERY_ARTIFACTS`, `UNPRODUCIBLE`, `UNPRODUCIBLE_KINDS`, `DeliveryArtifact`,
   `TraceLink`, `VerifiedClause`, `UnverifiedClause`, `InheritedOracle`,
   `MaintenanceLane`, `Handover`, `DeliveryReport` (with `VERIFIED_NOT_VALUE`),
   `DeliveryGate`, `DeployRecord`; the `DELIVERY_RENDERED` and `DEPLOY_RECORDED` ledger
   kinds; `ProjectState.deliveries`/`deploys` with their accessors; ten new `__all__`
   entries.
-* `src/sofact/delivery.py` (new) — `DELIVERY_ARTIFACT_PATHS`, `artifact`, `chain`,
+- `src/sofact/delivery.py` (new) — `DELIVERY_ARTIFACT_PATHS`, `artifact`, `chain`,
   `verified_and_unverified`, `ceiling`, `_lane_oracles`, `LANE_ORACLE_KEYWORDS`,
   `handover`, `report`. `artifact`, `ceiling` and `verified_and_unverified` are public
   because each is the whole of a policy an operator has to be able to audit when it
   looks wrong — the same reason `decomposition.classify` is public.
-* `src/sofact/state.py` — the two fold arms, the two local lists, the two constructor
+- `src/sofact/state.py` — the two fold arms, the two local lists, the two constructor
   arguments.
-* `src/sofact/service.py` — `render_delivery`, `current_delivery`, `delivery_gate`,
+- `src/sofact/service.py` — `render_delivery`, `current_delivery`, `delivery_gate`,
   `approve_deploy`.
-* `src/sofact/cli.py` — the `deliver` and `deploy` verbs, `_deliver`, `_deploy`, and the
+- `src/sofact/cli.py` — the `deliver` and `deploy` verbs, `_deliver`, `_deploy`, and the
   option singletons they share with the other verbs.
-* `tests/ci/test_delivery.py` (new) — 65 tests across ten classes: the five
+- `tests/ci/test_delivery.py` (new) — 65 tests across ten classes: the five
   statements, FR-086's constant, artefact presence, the chain's gaps, the
   verified/unverified split, the ceiling's lower bound, the handover, the gate, and the
   render-from-the-log path.
-* `tests/ci/test_cli.py::TestTheDeliverVerb` and `::TestTheDeployVerb` — 11 tests.
-* `tests/ci/test_state.py` — `KIND_TO_FIELD` gained the two kinds and the field count
+- `tests/ci/test_cli.py::TestTheDeliverVerb` and `::TestTheDeployVerb` — 11 tests.
+- `tests/ci/test_state.py` — `KIND_TO_FIELD` gained the two kinds and the field count
   went 23 → 25. Both are the guards doing their job: a new kind with no field, or a
   field with no kind, fails.
-* **A canary**, with the target string asserted present before the patch and the file
+- **A canary**, with the target string asserted present before the patch and the file
   restored from `/tmp/delivery.py.bak` rather than from git: `owed` widened from
   `not a.present and a.kind not in UNPRODUCIBLE_KINDS` to `not a.present` — the
   artefact check put back over all four kinds. `test_the_artefact_check_is_scoped_to_what_the_factory_owes`
   failed; the empty-root test still passed, which is the distinction the two arms exist
   to draw (a scoped check that still refuses, not a disabled one).
-* `tests/ci` at this commit: **978 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
+- `tests/ci` at this commit: **978 passed, 0 failed**. `pyright`: 0 errors. `ruff check`
   and `ruff format --check`: clean.
 
 ## References
 
-* FR-117 (the four artefacts and the traceability chain), FR-118 (the five statements),
+- FR-117 (the four artefacts and the traceability chain), FR-118 (the five statements),
   FR-119 (the human, permanent deploy gate), FR-120 (the machine-usable surface, not
   built), FR-121 (the Mode M handover), FR-086 (value is not certified), FR-108
   (ground-truth debt), FR-122 and FR-123 (autonomy is the lower bound), FR-124
   (per-deployment topology), FR-126 (G7 is human-authored), FR-082 (an oracle with no
   command), FR-007 (the weakest oracle sets the ceiling), §1.3, §1.5, §11, §13, §14.
-* [ADR-0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md) — FR-118's
+- [ADR-0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md) — FR-118's
   fifth statement, and the envelope the report measures against.
-* [ADR-0005](0005-no-container-runtime.md) — why the deployable artifact is a decision
+- [ADR-0005](0005-no-container-runtime.md) — why the deployable artifact is a decision
   rather than an omission.
-* §1.5 ("Autonomous production deploy — blast radius is not machine-bounded for a
+- §1.5 ("Autonomous production deploy — blast radius is not machine-bounded for a
   deploy. Gate P8 is permanent") and decision 17 above — why `approve_deploy` records a
   decision and performs no release.
-* [ADR-0004](0004-delegate-the-coding-loop-to-an-external-harness.md) — why the factory
+- [ADR-0004](0004-delegate-the-coding-loop-to-an-external-harness.md) — why the factory
   holds no coding loop, and so has no mechanism by which to run one.
