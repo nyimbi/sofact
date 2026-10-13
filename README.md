@@ -1,163 +1,257 @@
 # SoFact
 
-**Turn an imagined product into a verifiable one.** SoFact interrogates a goal until
-it is falsifiable, compiles it into a contract whose every clause names the oracle
-that would check it, and then verifies the result *independently of whoever produced
-it*.
+**Describe a product. Get a verified one — or a precise account of why you did not.**
 
-SoFact is not a coding agent. It contains no edit-run-revise loop. It is the control
-plane around one: the part that decides what "done" means, and the part that refuses
-to believe a producer's own claim that it is done.
+SoFact is a software factory for people who want to *imagine* a platform and then
+actually have it built. It interrogates a vague goal until it is falsifiable, compiles
+it into a contract whose every clause names the oracle that would check it, hands the
+building to a coding agent, and then verifies the result **independently of whoever
+produced it**.
 
-## Status
-
-| Phase | State |
-| --- | --- |
-| **P0 — Elicit** | **Working.** Interactive Socratic dialogue with a deterministic resolution gate. |
-| **P2/P4 — Specify & contract** | **Working.** Clause stems are drafted from the conversation; `contract` assigns one oracle to every stem. Without a `--command` it reports **100% ground-truth debt** rather than hiding it. |
-| **P6 — Verify** | **Working.** `run` executes the oracles out-of-process and records observations; `verify` renders the verdict — and takes **no completion claim**, by signature (FR-138). A verdict describes one *run* (FR-006/FR-162), so a repaired clause can turn green. |
-| **P3 — Decompose** | **Working.** `decompose` proposes one module per clause — deterministically, from the contract alone, with no model call — and gates it: traceability both ways (FR-088), acyclicity (FR-089), a build order (FR-092), a declared interface per module (FR-090) and the interface count (FR-091). The gate has **two halves and cannot be passed on one**: the machine checks are facts, and `--approve` records the operator's separate judgement, so an approval cannot waive a failed check (FR-087/FR-061). `plan` **refuses to run** past an unapproved gate. The gate also measures the proposal against **§1.3's delivery envelope** (FR-057/NFR-025): a proposal *over* a ceiling fails and names the dimension, while one *under* a floor is reported and passes — §1.3's numbers are targets, and a gate on the floor would refuse to build anything smaller than a platform. The envelope is configuration (`SOFACT_ENVELOPE`, or `envelope --defaults` to print §1.3's numbers without adopting them), and the four dimensions nothing in the log measures are **named as unmeasured** rather than counted as satisfied. [ADR-0025](docs/adr/0025-the-decomposition-gate-has-two-halves-and-one-module-per-clause.md) records why a module is one clause; [ADR-0039](docs/adr/0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md) records the envelope's refusal/measurement split. |
-| **P5 — Dispatch** | **Working.** `plan` compiles the contract into ordered goal sessions with pinned hashes (FR-136/139); `probe` measures a harness instead of trusting it (FR-148); `dispatch` runs the plan in waves, one out-of-process session per step, on a **branch per module** (FR-100), resolved from the approved decomposition so several steps of one module share its branch — that is how FR-100's "per module" reconciles with FR-136's refusal to dispatch one session per module. The branch is established before the session starts, and SoFact commits the session's work onto it when the session ends, so each step is a commit on its own ref rather than a pile of files the next step inherits; branch and seal are both carried on the dispatch record, so "never in place" is a fact in the log rather than a line in a prompt; it stops at the first **refuted** wave (FR-142/FR-163); `repair` turns that refutation into another session, bounded per clause, with the diagnosis and every attempt recorded (FR-098 diagnostic mode, FR-101, FR-102). **Worktree isolation (FR-141) is built**, and `--concurrent` is the operator's flag for it: each step of a wave gets a worktree of its own on its module's branch, the main tree holds the **integration line**, and each step's branch is merged back onto it before the next wave is judged — so a dependent builds on what its dependency produced rather than on a tree missing it. A wave is isolated only when every step in it is owned by a *distinct* module, because both failure modes are directory collisions: a step no module owns has no worktree to be given, and two steps of one module would share a branch. **A worktree contains a session that stays put; it does not confine one that wanders** — the probe measured that neither `pi` nor `claude` confines its child, so a step that wanders still writes outside its worktree, and `sandboxable` remains absent for both. [ADR-0033](docs/adr/0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md) supersedes ADR-0024's deferral and records what the build cost: git refuses a branch checked out twice, which is why the branch lives only in the worktree. |
-| **P7 — Integrate** | **Working, and the report says which part it exercised.** `integrate` runs six checks over the dispatched work: the **build order** (FR-111) — a module built before a dependency of it sealed anything — **import discipline** (FR-113), which *parses* the files each module's step sealed and reads their `import` statements rather than asking a producer to be careful, **interface conformance** (FR-112), which diffs the public names a module's files actually expose against the surface its module *declared*, **model conformance** (FR-115), which decides an entity is present when a module owns one of the clauses that introduced it, and the **system-level criteria** (FR-116), which are satisfied only when *every* clause a criterion spans carries a satisfied verdict — the worst verdict in the log per clause, never the latest. Every finding carries FR-114's **minimum violating set**, so a repair is scoped to the modules implicated and never to the platform; a model finding carries *no* modules, because the repair is a specification change and FR-114 forbids widening that into a rebuild. **FR-115 and FR-116 are only discharged once the approved specification declares a model and criteria** — a project that described no system still gets a report naming them as `not_implemented`, which is a different thing from passing them. FR-112 and **FR-083** stay open by default for the same reason and are told apart from a pass: a proposal derives no machine-readable surface because nothing in a contract's clauses is a signature, and inventing one would fabricate the contract P5 implements and P7 certifies (ADR-0025). **FR-083's second clause is now built** ([ADR-0049](docs/adr/0049-the-model-declares-an-interface-and-the-module-binds-it.md)): the model *declares* each interface over the clauses it comes from, the module *binds* it, and `propose` **derives** the binding — so a proposal cannot disagree with its own model, and the sixth check, **model interface source**, reports the two ways one does: an interface no module owns, and a module whose surface is not the one the model derives. A green line here is not a claim about the requirements left open. |
-| **P8 — Deliver** | **Working, and it says what it cannot produce.** `deliver` renders FR-118's report: FR-117's four artefacts, the **traceability chain** from intent clause to the module and the step that built it, the verified and **unverified** clauses with what would change each, every P2 assumption, the §1.3 actuals, the autonomy, and FR-121's Mode M handover. FR-118's five statements are five **required fields**, not five paragraphs — a report is read under time pressure, and prose is the easiest place for a qualification to go missing. **FR-086's sentence is a `ClassVar`**, so no code path can produce a report that omits "requirements were verified, not value" or claims otherwise. The chain **draws its gaps** rather than shortening: a clause the decomposition dropped shows `(no module)` and one never dispatched shows `(never dispatched)`, because a chain that stopped at the first missing hop could not be told from a contract with fewer clauses. A declared oracle rank prints as "declared rank N, not measured" — SoFact computes no mutation score, and printing a declaration under the word "measured" is the euphemism FR-118 names. **Two of FR-117's four artefacts are decisions, not omissions**: a deployable artifact needs a packaging decision ADR-0005 refuses to assume and IaC needs a named target environment (FR-124), so they are printed apart from the missing ones and the check is **scoped** to the two the factory owes — a check over all four could never pass, and a gate that cannot pass is one an operator learns to bypass. `deploy` presents FR-119's gate and `--approve <id> --by <you>` passes it: the gate names the report it approved, so an approval cannot stand over checks the approver never saw, and a failed machine check is not waivable by approving. **Nothing here deploys** — §1.5 makes deploy never automatic, so what is recorded is the evidence of a human decision. FR-120's two halves are reported apart: **the factory's own surface is built** — `sofact api <operation>` and `sofact api --list` publish ten read-only operations behind one closed `MachineEnvelope`, and the four §3.3 human gates are absent from the table and refused *by name* with the human verb to use ([ADR-0048](docs/adr/0048-one-dispatch-one-envelope-and-the-gates-are-refused-by-name.md)) — while the **delivered** system's machine-usable surface stays a producer obligation no oracle in O1-O8 observes, so every report names it in a `machine_surface_not_verified` check and `DELIVERY_REQUIREMENTS` keeps it in the list rather than dropping it. [ADR-0040](docs/adr/0040-a-delivery-report-states-five-things-and-its-gate-is-human.md) records the five statements, the constant, the scoped check and the human gate. **The escape oracle is built** (FR-021–023, [ADR-0054](docs/adr/0054-the-escape-rate-is-the-one-number-no-producer-authored.md)): `sofact escape` records a revert, hot-fix or incident against a deployed change, and `sofact escapes` folds the ledger into a per-lane escape rate — the one number in the product **no producer authored**, because the producer writes oracles and modules and does not write deploys or reverts (§2.4: the regress "terminates in exactly one place: reality, after deployment"). A lane over its declared budget (`SOFACT_ESCAPE_BUDGET`) has its ceiling reduced one level automatically until the rate returns (FR-023), the reduction reaching `module_autonomy` so it binds rather than prints; a manual override is a ledger row attributed by name. The reduction **reports** rather than refusing the deploy, because a failing check would block the very deploy that dilutes the rate back to budget — the recovery FR-023 exists to cause. An undeclared budget is *unbudgeted*, never bounded at zero (NFR-024). |
-| **P1 — Research** | **Working.** `research` authors the session's goal with zero model involvement, dispatches it, and records the artefacts it left (FR-167). A report with no cited sources is recorded as a run that found nothing, never rounded into research that happened. |
-
-This is a deliberate vertical slice of the part that survives every argument in
-[`docs/spec`](docs/spec/product-spec.md) and
-[`docs/research/findings.md`](docs/research/findings.md): the intent front end plus
-independent verification. Everything else — including the coding harness — is
-delegated, per [ADR-0004](docs/adr/0004-delegate-the-coding-loop-to-an-external-harness.md) and
-[ADR-0005](docs/adr/0005-no-container-runtime.md).
-
-## Run it
-
-Ollama must be reachable for the advisory model. SoFact degrades gracefully to a
-deterministic questionnaire without it.
+SoFact contains no coding loop. It is the control plane around one: the part that
+decides what "done" means, and the part that refuses to take a producer's word for it.
 
 ```sh
-uv run sofact                     # start (or resume) a conversation
-uv run sofact status              # where am I
-uv run sofact phase               # which pipeline phase, and is a gate open
-uv run sofact ledger              # the append-only event log
-uv run sofact verify-ledger       # re-check the hash chain
-uv run sofact rollback --to 12 --reason "the decomposition was wrong"
-uv run sofact sources --from-run <id>   # read a research run into the source ledger
-uv run sofact classify --from-run <id>  # read its verdicts on every intent clause
+uv tool install git+https://github.com/nyimbi/sofact.git
+sofact
 ```
 
-State lives in `./.sofact` by default, or `$SOFACT_HOME`. Nothing is written outside
-it, no containers are used, and the only network egress is the model you configure.
+That is the whole entry point. It asks you a question and keeps asking until your
+answer can be tested.
+
+---
+
+## The problem
+
+Coding agents are good at writing code and bad at telling you whether it works. Ask one
+to build a feature and you get a diff plus a confident summary; the summary is the part
+that is not evidence. Two failure modes follow, and they are the ones this project
+exists to remove:
+
+- **You cannot tell "done" from "looks done."** A session that ran out of context, hit a
+  refusal, or silently lost its tools still exits `0` and still says it finished. Measured
+  on `claude` 2026-10-12: run with `--tools read,write`, it accepts the flag, reports
+  `terminal_reason: completed`, and gives the producer **no tools at all** — the names are
+  capitalised. Nothing in the exit code says so.
+- **The spec drifts from the build.** By the time there is code, the intent lives in your
+  head, the requirements live in a ticket, and the tests were written by the same process
+  that wrote the code. Nothing connects them.
+
+SoFact's answer is a single rule, enforced by the type system rather than by discipline:
+**no oracle, no autonomy** ([ADR-0009](docs/adr/0009-no-oracle-no-autonomy.md)). A clause
+without a machine-checkable acceptance criterion cannot exist in a contract, so it cannot
+be built, and it cannot be claimed. What you get at the end is not a green checkmark; it is
+a report naming every clause that was verified, every clause that was not, and exactly what
+would change each one.
+
+## See it work
+
+Elicitation is a deterministic questionnaire. The model advises; it does not decide
+([ADR-0008](docs/adr/0008-the-model-is-advisory-only.md)). Answers are checked against
+floors — a length, and for the oracle dimension a requirement that you name a real checking
+mechanism — so a non-answer is refused rather than recorded. Here the goal is stated, three
+dimensions resolve, and then a plausible-sounding answer is rejected because it describes an
+outcome and names no way to check it:
+
+```text
+$ sofact
+What do you want to build?: Every reminder appears in the dashboard within 60 seconds
+of being scheduled.
+
+[1/6] outcome
+  What observable state change tells you this worked?
+  ↳ Without an observable outcome there is nothing to test, so there can be no oracle
+    and no autonomy above L0.
+  :   ✓ resolved
+
+[4/6] oracle
+  How would a machine check the outcome, without asking you?
+  ↳ This is the load-bearing question. An answer must name a real checking mechanism —
+    a test, a property, a query, a digest — because a description of confidence is not
+    an oracle.
+  :   ✗ does not name a checking mechanism; expected something like one of: test,
+      assert, property, invariant, exit code, hash, … (a statement of confidence is
+      not an oracle)
+
+  advisor: What machine-readable signal—DOM selector, API response field, or log
+  event—proves the reminder is displayed, and where is the scheduling timestamp
+  recorded for comparison?
+  (answer again to replace it)
+```
+
+The advisor line is the model's and varies run to run; the `✗` line above it is the floor,
+and it does not. Answer the oracle question properly and the interrogation closes. A
+contract then assigns one oracle to every stem, and reports the ceiling those oracles can
+support:
+
+```text
+$ sofact contract --command 'pytest -q'
+contract 01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f6 v1
+  6 clause(s)
+  weakest oracle rank 3 → ceiling L3
+  ground-truth debt 0%
+```
+
+Run the oracles and the verdict is a fact about a run, not a claim about the code. Here
+the workspace held no test suite, so `pytest -q` exited 5 — and the verdict says so, per
+clause:
+
+```text
+$ sofact run --workspace ./ws && sofact verify
+verdict VIOLATED
+  contract 01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f6 @ e976faedf2d4
+  ceiling L3 from weakest oracle rank 3
+  ✗ The dashboard shows the reminder row within 60 seconds of it being scheduled
+      exit code 5, expected 0
+  ✗ The end user reads the dashboard
+      exit code 5, expected 0
+  ✗ a scheduler calls the store API to enqueue a reminder
+      exit code 5, expected 0
+
+Not verified. Only an all-satisfied report grants autonomy — an unrun oracle is
+not a passing one.
+```
+
+Omit `--command` and the factory does not guess an oracle. It reports **100%
+ground-truth debt** and caps the ceiling, because a clause nothing can check is a clause
+nothing has checked.
+
+## Install
+
+Requires **Python ≥ 3.12** and [uv](https://docs.astral.sh/uv/).
+
+```sh
+uv tool install git+https://github.com/nyimbi/sofact.git   # install the `sofact` command
+```
+
+Or from a checkout, for development:
+
+```sh
+git clone https://github.com/nyimbi/sofact.git
+cd sofact
+uv sync
+uv run sofact
+```
+
+State lives in `./.sofact`, or `$SOFACT_HOME`. Nothing is written outside it, no
+containers are used ([ADR-0005](docs/adr/0005-no-container-runtime.md)), and the only
+network egress is the model you configure.
+
+**The model is optional.** SoFact talks to any OpenAI-compatible endpoint and defaults to
+Ollama on `http://localhost:11434/v1`. If nothing is listening, it degrades to a plain
+deterministic questionnaire — the floors, the gates and the verdicts are not model-driven,
+so the product works without one. Point it elsewhere with `SOFACT_MODEL` / `SOFACT_BASE_URL`.
+
+## The pipeline
+
+Ten phases, four human gates. A gate is placed only where **no oracle can decide** — the
+machine checks run and are reported, and then a person approves, naming themselves:
+
+```text
+P0 Elicit ──▶ P1 Research ──▶ ┌─ GATE: specification ─┐
+                              │      P2 Specify       │
+                              └───────────┬───────────┘
+                                          ▼
+                          ┌─ GATE: decomposition ─┐
+                          │      P3 Decompose     │
+                          └──────────┬────────────┘
+                                     ▼
+                    P4 Contract ──▶ P5 Build ──▶ P6 Verify
+                                     │
+                                     ▼
+                          ┌─ GATE: deploy ─┐
+                          │   P8 Deliver   │◀── P7 Integrate
+                          └───────┬────────┘
+                                  ▼
+                            P9 Evolve
+```
+
+| Phase | What it produces |
+| --- | --- |
+| **P0 Elicit** | Intent clauses, from a Socratic dialogue with a deterministic resolution gate. |
+| **P1 Research** | Cited findings that validate, invalidate or deepen the premise — before you build. |
+| **P2 Specify** | A specification: one requirement per clause, each carrying that clause's oracle. **Gate.** |
+| **P3 Decompose** | Modules, interfaces and a dependency DAG, derived from the contract with no model call. **Gate.** |
+| **P4 Contract** | A per-clause oracle suite with its strength measured. **Gate** (`contract_sample`, sampled). |
+| **P5 Build** | Goal sessions dispatched to a harness, one branch per module. |
+| **P6 Verify** | Oracle results, out of process. The verdict takes no completion claim. |
+| **P7 Integrate** | Build order, import discipline, interface and model conformance, system criteria. |
+| **P8 Deliver** | The delivery report: artefacts, traceability chain, unverified clauses, handover. **Gate.** |
+| **P9 Evolve** | *Not built.* The escape measurement it consumes exists; the scorecard and the lane adjustment do not. |
+
+Every phase's state, and the argument behind it, is in [**`docs/phases.md`**](docs/phases.md).
+That file is the long form of this table, moved there from it rather than rewritten, so the
+detail has one home. A test asserts the two agree on which phases exist and that every gate
+the code defines is named on this page — a reference describing a phase the code lacks, or a
+front page silently dropping one, fails rather than reads.
+
+Two commands make the machine's own position legible:
+
+```sh
+sofact phase    # where the pipeline is; exits non-zero while a gate is open
+sofact status   # the goal, the phase, readiness per dimension, ledger health
+```
+
+A gate cannot be passed by anything except a person naming themselves, and an approval
+cannot waive a failed machine check:
+
+```sh
+sofact gate --present P2            # the machine half: run the checks, report them
+sofact gate --approve P2 --by you   # the human half: recorded with who and when
+```
 
 ## How it works
 
-The ledger is the system. Every fact is an append-only, hash-chained event; all state
-is a pure fold over that log, so any state can be re-derived and any tampering is
-detectable ([ADR-0003](docs/adr/0003-the-ledger-is-append-only-and-hash-chained.md)). Elicitation is gated by
-deterministic floors rather than model judgement
-([ADR-0007](docs/adr/0007-the-elicitation-gate-is-deterministic.md)), and the model is an
-*advisor* whose opinions are recorded but never authoritative
-([ADR-0008](docs/adr/0008-the-model-is-advisory-only.md)).
-
-The pipeline is a phase machine with four human gates
-([ADR-0030](docs/adr/0030-phases-are-a-state-machine-and-a-gate-is-a-type-boundary.md)).
-`sofact phase` exits non-zero while a gate is open, and the gate cannot be passed by
-anything but an operator naming themselves:
+**The ledger is the system.** Every fact is an append-only, hash-chained event. All state
+is a pure fold over that log, so any state can be re-derived from scratch and any tampering
+is detectable ([ADR-0003](docs/adr/0003-the-ledger-is-append-only-and-hash-chained.md)):
 
 ```sh
-uv run sofact gate --present P2            # the phase's machine checks are ready
-uv run sofact gate --approve P2 --by you   # the human half, recorded with who and when
+sofact ledger          # the append-only event log
+sofact verify-ledger   # recompute the hash chain; exit 1 if it does not verify
 ```
 
-A clause without an oracle cannot exist, which is the type-level enforcement of the
-spec's first rule: **no oracle, no autonomy** (FR-001).
-
-`sofact rollback` reads the project as of an earlier entry and records why
+**A rollback is a reading rule, not a deletion.** `sofact rollback --to 12 --reason "…"`
+reads the project as of an earlier entry and records why. The log grows, the chain still
+verifies, and the work the rollback hides is still there to be read
 ([ADR-0034](docs/adr/0034-a-rollback-is-a-reading-rule-and-the-log-keeps-what-it-hides.md)).
-It is a reading rule rather than a deletion: the log grows, the chain still verifies, and
-the work the rollback hides is still there to be read — a rollback that truncated would
-destroy the evidence it was taken on. Cutting again to a later entry un-does the first.
 
-P2 turns the contract into a **specification**
-([ADR-0031](docs/adr/0031-a-specification-derives-what-the-contract-says-and-declares-what-it-does-not.md)):
-one requirement per clause, each carrying that clause's own oracle as its acceptance
-criterion, plus the system model, non-goals, assumptions and value hypothesis. The
-requirements are *derived* and the rest is *yours* — the factory invents none of it,
-because a specification filled with plausible sentences would pass its own gate while you
-had approved nothing. A criterion no command can evaluate is marked `human-verified` and
-counted, not failed: FR-082 permits it and makes its cost visible instead. `--interface`
-declares an interface **in the model** (`NAME:MEMBER,MEMBER:CLAUSE-INDEX`), and
-`decompose` then *derives* each module's surface from the interfaces its clauses introduce
-— so the model is the single source for interface definitions rather than a parallel
-declaration beside the modules ([ADR-0049](docs/adr/0049-the-model-declares-an-interface-and-the-module-binds-it.md)).
+**The report states what it cannot claim.** FR-118's statements are required *fields*, not
+paragraphs, because a report is read under time pressure and prose is where a qualification
+goes missing. "Requirements were verified, not value" is a constant on the type, so no code
+path can produce a report that omits it or claims otherwise. Two of the four delivery
+artefacts are **decisions rather than omissions** — a deployable artifact needs a packaging
+decision the factory refuses to assume — and the check is scoped to the two it actually owes,
+because a gate that can never pass is one an operator learns to bypass.
+
+**The escape rate is the one number no producer authored.** `sofact escape` records a
+revert, hot-fix or incident against a deployed change; `sofact escapes` folds the ledger
+into a per-lane rate. The producer writes oracles and modules — it does not write deploys or
+reverts, which is what makes this the factory's only ground truth. A lane over its declared
+budget has its ceiling reduced automatically until the rate returns
+([ADR-0054](docs/adr/0054-the-escape-rate-is-the-one-number-no-producer-authored.md)).
 
 ## Harness
 
-SoFact contains no coding loop. `dispatch` hands each plan step to a harness as an
-**out-of-process** session, then reads the harness's *own* session record — exit code,
-tokens, continuations, whether goal mode was really entered — instead of asking it.
-Which harness is a **row of data, not a class**:
+SoFact has no coding loop ([ADR-0004](docs/adr/0004-delegate-the-coding-loop-to-an-external-harness.md)).
+`dispatch` hands each plan step to a harness as an **out-of-process** session, then reads
+the harness's *own* session record — exit code, tokens, continuations, whether goal mode was
+really entered — instead of asking it. `pi`, `dsh`, `claude` and `opencode` ship as specs.
 
 ```sh
-uv run sofact contract --command 'pytest -q'   # every stem needs an oracle
-uv run sofact specify                          # contract → requirements, gated but unapproved
-uv run sofact specify --approve --by me \
-  --entity 'Reminder:1' \
-  --assumption 'client schedules | a server scheduler appears' \
-  --value 'fewer missed | the end user | session logs' \
-  --criterion 'every reminder is stored and shown | both agree | 1,2' \
-  --interface 'reminders:store(f,reminder),LIMIT(k):1'
-uv run sofact decompose                        # contract → modules, gated but unapproved
-uv run sofact decompose --approve --by me      # the operator's half of the gate (FR-087)
-uv run sofact envelope --defaults              # §1.3's eight dimensions, without applying them
-uv run sofact envelope                         # the actuals, against a configured envelope
-uv run sofact plan                             # contract → ordered goal sessions
-uv run sofact probe                            # attempt a harness; record observations
-uv run sofact dispatch --all                   # run the plan; stops at the first refuted wave
-uv run sofact repair                           # hand each refuted clause back to the producer
-uv run sofact integrity                        # re-verify the pinned hashes (FR-139)
-uv run sofact integrate                        # P7: build order, imports, surface diff, model, criteria
-uv run sofact deliver --root ./delivery        # P8: the delivery report, its chain, its handover
-uv run sofact deploy                           # present FR-119's gate; nothing deploys
-uv run sofact deploy --approve <report-id> --by me   # pass it, as a person, on the record
-uv run sofact precision                        # did the claims survive verification?
-uv run sofact api --list                       # FR-120: the machine surface, as JSON
-uv run sofact api status                       # one operation, one envelope
+sofact probe                        # attempt a harness; record what was observed
+sofact dispatch --all               # run the plan; stops at the first refuted wave
+sofact repair                       # hand each refuted clause back to the producer
+sofact integrity                    # re-verify the pinned hashes
+sofact integrate                    # P7
+sofact deliver --root ./delivery    # P8: the report, its chain, its handover
+sofact deploy                       # present FR-119's gate; nothing deploys
+sofact deploy --approve <report-id> --by me   # pass it, as a person, on the record
 ```
 
-`dispatch` stops at the first refuted wave, which is correct — a dependent must not build
-on an unverified dependency. `repair` is the next move: a refutation is *information*, and
-a verdict naming which obligation does not hold is exactly what another session needs. It
-authors a **new plan revision** per round (an edited plan would make FR-139 compare the
-plan against itself), hands the producer the verifier's own words as the diagnosis, and
-re-runs the oracles. The loop is bounded twice — `--max-attempts` per clause and the clause
-set itself — and when a clause spends its budget the attempt is recorded `exhausted` rather
-than the run quietly ending, because "ran out of attempts" and "nothing to repair" must not
-look alike. The repair goal forbids editing the oracle and is pinned by hash like any other,
-so the loop cannot become a producer editing its own completion criteria.
-
-`probe` is not optional: dispatching against an assumed capability is exactly what
-FR-148 forbids, so `dispatch` refuses until a profile exists.
-
-Which tools the producer gets is the operator's decision, so it is a flag rather than a
-constant: `--tools read,edit` (or `SOFACT_TOOLS`) narrows the allowlist, and `probe`
-prints the set it resolved before anything is dispatched. An empty set is refused — an
-empty allowlist is a producer with no way to write, and that must not arrive later as a
-failed step.
-
-A producer's declaration is **not evidence, and it is not the trigger either**. Whenever a
-dispatched session **completes**, SoFact runs that contract's oracles in the *session's*
-workspace and records the verdict; when the harness also declares completion, the claim is
-recorded as its own separate row, first (FR-138/FR-163). Gating that check on a declaration
-makes the default harness unverifiable — `pi` has no completion event at all — so a run
-that built working code would record no evidence and still exit `0`. So `dispatch` exits
-**non-zero** when nothing was verified, when a step was refuted by its own check, or when a
-plan that ran to its end left the contract unclean (including *insufficient*: an artefact
-nothing could check is not a verified one). A run you capped with `--max-steps` is progress
-rather than failure and exits `0` unless a step it ran was refuted. `verify` remains the
-command that renders a verdict on demand (P6).
-
-`pi`, `dsh`, `claude` and `opencode` ship as specs. To point SoFact at another harness
-without editing `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
+`probe` is not optional: dispatching against an assumed capability is exactly what the spec
+forbids, so `dispatch` refuses until a profile exists. Which harness is a **row of data, not
+a class** — point SoFact at a new one without touching `src/`:
 
 ```json
 {
@@ -173,206 +267,107 @@ without editing `src/`, write a JSON table and set `SOFACT_HARNESS_SPECS`:
 }
 ```
 
-Omitted fields keep their defaults; unknown fields, wrong types, missing required
-fields and bare strings where a sequence belongs are refused **by name**. A misspelled
-key that silently defaulted would produce a plausible, wrong number rather than an
-error (FR-161). A malformed file, an unknown harness name, or a table holding several
-harnesses with no default all exit non-zero instead of guessing.
-
-`completion_reason_path` and `usage_path` are walked **from the record root**, and the
-envelope is named explicitly when there is one — `dsh` events are
-`{seq, time, type, data}`, so its paths begin `data`; `pi` writes `{type, message}` and
-its usage path begins `message`. Nothing is stripped implicitly, because a fixed
-envelope silently reads nothing on a harness that has no such block, and "no usage" is
-indistinguishable from "wrong path" once that happens.
-
-A record need not be a file the harness wrote. A harness whose history is a database
-declares `session_command` — an argv whose **stdout is the record** — and `record_format`
-(`jsonl` for one object per line, `json` for one document covering the session). SoFact
-runs the command and writes its stdout to a file in the session directory, so every reader
-sees a path and the seam stays single. `opencode` is wired this way:
-
-```json
-{
-	"argv": ["opencode", "run", "--standalone", "-s", "{session_id}", "--format", "json",
-	         "--model", "{model}"],
-	"record_format": "json",
-	"session_command": ["opencode", "session", "export", "--standalone", "{session_id}"],
-	"session_id_prefix": "ses_",
-	"completion_reason_path": ["info", "outcome"],
-	"completion_reason_value": "succeeded"
-}
+```sh
+SOFACT_HARNESS_SPECS=./my-harness.json sofact probe
 ```
 
-Completion is read from the **record**, never the exit code: a measured opencode session
-whose provider refused the request still exported `outcome: "failed"` and exited `0`. A
-`session_command` that exits non-zero or prints nothing yields *no* record, because "the
-harness would not hand it over" and "the session left no record" are different facts.
+Unknown fields, wrong types, missing required fields and bare strings where a sequence
+belongs are refused **by name**. A misspelled key that silently defaulted would produce a
+plausible, wrong number rather than an error. This example is executed by the test suite
+through the real loader, so it cannot rot.
+
+A spec's own reliability is recorded with it, and not every shipped row is equally
+trustworthy. `pi`, `dsh` and `claude` were witnessed end to end; **`opencode`'s spec has
+not been** — every run on the machine where it was written failed after the argv was
+accepted, because the configured account was out of credit. What *is* measured there is
+narrower and stated as such: the session-id format, and that `session export` prints one
+JSON document. It ships because the adapter is data and the seam was cheap, not because it
+was seen to build anything.
+
+The probe's rows are **measured, not assumed**, and the answers are not always flattering.
+Measured live, neither `pi` nor `claude` confines its child: told to escape a workspace with
+a tool allowlist in place, each wrote one directory above it. An allowlist filters which
+tools exist, not where they reach — so `sandboxable` reads `absent` for both, and a worktree
+is recorded as containment rather than confinement. A harness whose help text suggests
+otherwise is exactly the case the probe exists to catch.
 
 ## Model
 
-Default: `deepseek-v4.1-flash:cloud` via Ollama's OpenAI-compatible endpoint — a
-1M-token context model served through Ollama's cloud, not locally. Override with
-`SOFACT_MODEL` / `SOFACT_BASE_URL`. See
-[ADR-0002](docs/adr/0002-model-access-is-one-openai-compatible-interface.md) for what that costs in hermeticity.
+Default: `deepseek-v4.1-flash:cloud` via Ollama's OpenAI-compatible endpoint — a 1M-token
+context model served through Ollama's cloud, not locally. Override with `SOFACT_MODEL` /
+`SOFACT_BASE_URL`. See
+[ADR-0002](docs/adr/0002-model-access-is-one-openai-compatible-interface.md) for what that
+costs in hermeticity.
 
 For a real coding session the model must be one the **harness** can resolve, not merely one
-Ollama serves: `pi` validates `--model` against its own registry and refuses a local tag it
-does not list (`Error: Model "…" not found`, exit 1, no session record). `qwen3.6:35b-mlx`
-is what the end-to-end run used — `SOFACT_MODEL=qwen3.6:35b-mlx sofact probe` before
-dispatching.
+Ollama serves: `pi` validates `--model` against its own registry and refuses a tag it does
+not list. Run `sofact probe` before dispatching, and read its answer — a refused model is
+recorded as a measured capability, in the harness's own words, rather than blamed on the
+producer ([ADR-0018](docs/adr/0018-a-refused-model-is-attributed.md)).
 
-That refusal is **attributed rather than blamed on the producer**. A session that exits
-non-zero having written no record is byte-for-byte what a producer that tried and failed
-looks like, so the probe asks the question directly and records the answer as the
-`model_resolved` row, quoting the harness's own words; a profile that watched a refusal
-makes `probe` and `dispatch` exit non-zero before anything runs, saying so. The refusal
-string is **data on the spec** (`model_error_pattern`), so pointing SoFact at another
-harness teaches the probe that harness's wording rather than requiring a source change
-(FR-161, FR-164). A profile also records *which* model it measured: dispatch against a
-different one is refused, because "this harness works" is a claim about a configuration,
-not about a name.
+## What this does not do
 
-A verdict is **keyed, then reused** (FR-006's second half, FR-166). Every dispatch check
-digests the workspace the session worked in — content hashes over the tree, ignoring VCS
-metadata, caches, dependency installs and build outputs, skipping symlinks — and folds the
-digest with the contract and oracle-set hashes. A previous verdict with the same key holds
-without re-running; the reuse is its own ledger row (`verdict.reused`) naming the verdict
-it stands in for, and `dispatch --fresh` bypasses it. A refuted verdict is reused exactly
-like a satisfied one. `verify` never reuses: it weighs the log, and a log has no tree to
-digest.
+A README that only lists capabilities is a README you have to verify yourself. These are
+structural, decided deliberately, and recorded in the ADRs:
 
-**Research is a dispatch too** (`sofact research [query]`, FR-167). SoFact authors the
-research goal with zero model involvement and hands it to a harness whose research loop
-is an installed `pi` extension ([S25]); the build spec freezes extensions out
-(`--no-extensions`) and the research spec is the one row that names its allowance, with
-`RESEARCH_MODEL` pinned to the operator's model, and the extension's tools named in the
-producer's allowlist — measured, an allowlist without them leaves the producer no way
-to call the loop at all. The verb records what the workspace
-holds — report size, the loop's own search count from `research-meta.json`, cited URLs —
-and never rounds a report with no sources into research that happened: on a local model
-the extension's own timeout binds first, and that fact reads *unmeasured*, not *none
-found* (NFR-024).
+- **It does not write code.** There is no edit-run-revise loop. Building is delegated to a
+  harness, and that delegation is an accepted structural disadvantage
+  ([ADR-0010](docs/adr/0010-delegation-to-a-third-party-harness-is-an-accepted-disadvantage.md)).
+- **It uses no containers.** Confinement is the harness's tool allowlist, and the probe
+  measures that this is weaker than it sounds. A filesystem boundary is not built.
+- **It does not claim maintainability.** The factory has no oracle for change cost, so it
+  says so rather than implying a green suite means maintainable code
+  ([ADR-0011](docs/adr/0011-the-factory-refuses-to-claim-maintainability.md)).
+- **It does not certify value.** Requirements are verified; the value hypothesis is
+  declared and untested, and the report says exactly that in a constant.
+- **It does not deploy.** §1.5 makes deploy permanently manual. What `deploy` records is the
+  evidence of a human decision.
+- **It produces new repositories, not patches.** Mode M (maintenance of an existing repo) is
+  specified and retained, but Mode G (genesis) is what is built.
 
-**And it is bounded before it starts** (FR-072, ADR-0036). The run is measured against a
-budget declared **per intent clause** — `--max-sources`, `--max-calls`, `--seconds`,
-defaulting to 5 sources, 5 model calls and 300 s for each clause the goal's draft has, so
-a five-clause goal gets 25/25/1500 s and the budget line says both figures. Of the three
-only wall clock is *enforced*: SoFact owns the timeout and kills the child. Sources and
-model calls are read off the producer's artefacts afterwards and, when they exceed the
-allowance, recorded in `budget_violations` — a cap enforced inside the producer's runtime
-would be the producer grading its own spend (FR-140). The default wall clock sits *above*
-the extension's own 240 s/360 s ceilings so a truncation is attributed to the extension
-that caused it, and `--timeout` overrides the scaled figure for one run without rewriting
-the declared budget. An overspend is recorded, not fatal: the ledger is still read.
-
-**The ledger is a graph, not a reading list** (`sofact sources`, FR-070, ADR-0035).
-`research_goal` asks the producer for `research-sources/sNN-slug.md` (front-matter
-provenance, a `## Precis`, and a `## Concerns / information quality` critique) plus
-`research-claims.json`; `sources --from-run <id>` reads those into a `SourceLedger` and
-records it. `Source` and `Claim` are separate addressable types joined by
-`Claim.source_ids`, so `resting_on(S03)` answers what invalidating that source takes
-with it — and a claim citing a source the ledger does not hold is refused when the
-ledger is built, because an edge to nothing cannot be invalidated with its source.
-`SourcePosture` makes FR-074 structural: a source cannot be `positioning` *and*
-`content-verified`, since reading vendor content carefully does not make it evidence,
-and `unbacked_decisions` names what may be recorded and may not decide. Contradictions
-are recorded with `resolution` left `None` and printed `UNRESOLVED` — the spec puts
-that decision with the operator, so a machine picking a winner would answer the one
-question the phase exists to hand over. Expiry is evaluated as of a date, so the same
-ledger can be current and then not.
-
-Two refusals are deliberate. The parser **fails closed**: a front-matter line that is
-neither `key: value` nor a list item raises, a block scalar raises rather than parsing
-as the literal `|`, and a document missing either required section raises — because a
-parser that skips what it cannot read reports a clean ledger over the documents it
-dropped, and a clean ledger is indistinguishable from a good one. And the disconfirming
-count FR-071 asks for is **printed, never gated**: a check that failed at zero would pay
-a producer for inventing a disconfirming claim, and a gate that rewards fabrication is
-worse than no gate. `supports:` is likewise not derived by walking the spec — measured,
-5 of the 21 sources it cites appear only in prose outside any requirement, so a citation
-walk would report a complete derivation over an incomplete one.
-
-**And every clause gets a verdict with an action attached** (`sofact classify`, FR-068,
-ADR-0037). `research_goal` writes the draft's clause ids into the producer's goal, so the
-five clauses it was asked about are the five it is measured against — a producer that
-classified one of them fails `every-clause-is-classified` rather than passing by being
-asked about itself. The spec's table gives each verdict a different action, so the action
-is **data**: `VERDICT_ACTION` is read by the type, by the CLI that prints it beside every
-verdict, and by `advance_phase`, which refuses to complete P1 while anything is
-invalidated or deepened, naming the clauses. A verdict that says *do not build* therefore
-cannot be reported as a finding the pipeline walks past. Unverifiable is the one verdict
-whose action is *proceed*, so it becomes a flagged assumption whose `refuted_by` is what
-the producer said would settle it (FR-079) — and an unknown verdict is refused rather
-than defaulted, because defaulting to the one that proceeds is the one default that fails
-open. A verdict citing a source the ledger does not hold fails the check: a conclusion
-resting on a source outside the ledger cannot be invalidated with it.
-
-The probe's remaining rows are **attempted rather than assumed** (FR-165). Five of them
-need more than one child, so each is a *differential*: `sandboxable` hands one child a tool
-set that cannot write outside its directory and tells it to attempt an escape (the escape
-file appearing is the negative, and the finding names the tool set, because confinement is
-SoFact's tool allowlist and not a harness property); `concurrent` runs two children at once
-and compares the record paths they wrote, since a shared path would make a wave destroy its
-own evidence; `budget_control` runs the same goal capped and uncapped and compares the
-artefact, but only when the spec declares a budget flag; `store_isolated` runs the same goal
-twice with `HOME` relocated and the spec's declared containment variables applied in one arm
-and withheld in the other, so the isolated arm's empty `HOME` is evidence only once the
-control arm's filled — the control is what stops a harness the probe cannot see from reading
-as a contained one; `goal_survives_compaction` reads
-the primary run's record and costs no child. The extras run **after** the primary and only
-if it actually did work, because they share one local model and a contention artefact would
-be blamed on the harness. `probe --quick` skips the ones needing a second child and records
-the skip in each row's own reason.
-
-One row was decided against the real harness and the answer is not flattering to it:
-measured live at `pi` 0.85.1, the `--tools read,write,edit` allowlist **does not confine
-the working directory** — a child told to escape wrote one directory up, so `sandboxable`
-reads `absent` for `pi`'s default confinement. An allowlist filters which tools exist, not
-where they reach; real confinement for `pi` needs a filesystem boundary (FR-019), not a
-flag. This is what the matrix is for: the row is a measurement, and a harness whose help
-text suggests otherwise is exactly the case FR-148 exists to catch.
-
-`claude` (Claude Code) was measured the same way on 2026-10-12 and answered the same:
-run with `--tools Read,Write,Edit` and told to escape, the child wrote one directory above
-its workspace, so its `sandboxable` reads `absent` too. Its row also carries a second
-measurement worth more than the flag it describes — `--tools read,write` is *accepted*,
-exits 0, reports `terminal_reason: completed`, and leaves the producer with **no tools at
-all**, because the names are capitalised. A producer that silently loses every tool still
-reports success, which is why the spec carries a `tool_names` table and the adapter
-translates rather than passing names through.
-
-`opencode` is **not** a target, and the reason is worth recording so nobody re-opens it
-blind. Its session history is a SQLite database (`~/.local/share/opencode/opencode.db`),
-not a file. Everything else about it fits: `opencode run --session <id>` accepts an id the
-adapter mints ("to continue, or to create if it does not exist"), `--format json` exists,
-and the `session` table carries `id` as its primary key beside `tokens_input` and
-`tokens_output`. What fails is only the addressing — `session_glob` is a filesystem glob,
-and a row in a database is not a path, so no glob names the record. Reading it would need a
-record *source* seam, the same shape as the zstd case that already shells out to decompress
-rather than pretending the file was plain JSONL. That seam is not worth building for a
-fourth producer when three are wired, so opencode is dropped as a target rather than left
-half-claimed. This is the honest version of a capability gap: not "unmeasured", but
-"measured, and the cost of the seam exceeded the value of the producer".
+The spec's own status section lists every requirement against its implementation, with the
+gaps named rather than omitted:
+[`docs/research/roadmap-gap`](docs/research/roadmap-gap/README.md).
 
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci
+uv run pytest -vxs tests/ci          # 1282 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
 ```
 
-The markdown lint takes explicit paths on purpose: an unanchored `**/*.md` also lints
-`.venv`, which is not this repository's prose and fails on third-party files.
+The paths are explicit on purpose: an unanchored `**/*.md` also lints `.venv`, which is not
+this repository's prose and fails on third-party licences.
 
-Conventions: async throughout, tabs, Pydantic v2 with `extra="forbid"`, UUID7 string
-ids, immutable value objects in `views.py`, orchestration in `service.py`.
+Two config files, because markdownlint splits its settings across two levels and silently
+ignores a key filed at the wrong one:
 
-`.markdownlint.json` disables **MD010 inside code blocks** deliberately. `ruff format`
-also formats fenced Python in Markdown and, honouring `indent-style = "tab"`, rewrites
-it to tabs; leaving MD010 on makes the two tools rewrite each other's bytes forever.
-Python fences belong to `ruff`, prose whitespace to `markdownlint`.
+- **`.markdownlint-cli2.jsonc`** holds the cli2-level keys — which files to lint and what to
+  skip. `docs/sources/archive/` is skipped because it holds verbatim copies of other
+  projects' READMEs, and this repo does not get to restyle text it is quoting. The `globs`
+  list is what makes a bare `markdownlint-cli2` (no arguments, as an editor hook runs it)
+  lint the repository rather than discover `ignores` and stop.
+- **`.markdownlint.json`** holds the rules. **MD010 inside code blocks** is off deliberately:
+  `ruff format` also formats fenced Python in Markdown and rewrites it to tabs, so leaving
+  MD010 on makes the two tools rewrite each other's bytes forever
+  ([ADR-0014](docs/adr/0014-markdown-fence-ownership.md)).
 
-Decisions are recorded in [`docs/adr`](docs/adr/).
+Conventions: async throughout, tabs, Pydantic v2 with `extra="forbid"`, UUID7 string ids,
+immutable value objects in `views.py`, orchestration in `service.py`.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [**`docs/spec/product-spec.md`**](docs/spec/product-spec.md) | The specification: every requirement, the pipeline, the risks. |
+| [**`docs/adr/`**](docs/adr/) | 54 architecture decisions — what was decided, what forced it, what it costs. |
+| [**`docs/phases.md`**](docs/phases.md) | Each phase's state in full. |
+| [**`docs/research/roadmap-gap`**](docs/research/roadmap-gap/README.md) | The spec against the implementation, requirement by requirement. |
+| [**`docs/sources/`**](docs/sources/README.md) | The source ledger: what the design rests on, and how strongly. |
+| [**`docs/research/findings.md`**](docs/research/findings.md) | What the research concluded, and where it is weak. |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
