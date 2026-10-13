@@ -29,6 +29,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, computed_field, mode
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"ATTEMPT_TELEMETRY_REQUIREMENTS",
+	"COMPOSITION_REQUIREMENTS",
 	"ESCAPE_RATE_READING",
 	"ESCAPE_REQUIREMENTS",
 	"EVOLVABILITY_DEBT",
@@ -43,7 +45,10 @@ __all__ = [
 	"ORACLE_RANK",
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
+	"VERDICT_SURFACES",
 	"Assumption",
+	"AttemptTelemetry",
+	"AttemptTelemetryReport",
 	"AutonomyLevel",
 	"CapabilityFinding",
 	"Claim",
@@ -124,6 +129,9 @@ __all__ = [
 	"PhaseGate",
 	"PhaseStatus",
 	"PlanStepKind",
+	"PluginAdmission",
+	"PluginComposition",
+	"PluginVerdict",
 	"ProbeOutcome",
 	"ProjectState",
 	"Readiness",
@@ -5101,6 +5109,22 @@ class DispatchRecord(View):
 	covers the refusals, and a refusal has no branch to report.
 	"""
 
+	composition_hash: str | None = None
+	"""The digest of the plugin composition this session ran under (FR-154, FR-149, R29).
+
+	FR-154's last sentence is "the observed composition hash is recorded with the session",
+	and this is where. It is a *hash* rather than the composition itself for the same reason
+	the ledger chains hashes: the row has to stay small and the freeze has to be checkable,
+	and :meth:`PluginComposition.pinned_content` is reproducible from the log, so a reader
+	can recompute it and compare rather than trusting a copy.
+
+	``None`` means no composition was recorded, which is not the same as an empty one. A
+	session whose record predates FR-154, or one that was refused before a composition could
+	be established, carries the null — and FR-154's requirement that a build *report* its
+	composition is discharged by the composition the dispatch recorded, not by this field
+	being non-null on every row.
+	"""
+
 	@property
 	def is_within_budget(self) -> bool:
 		"""True when no cap was exceeded. A *fact about spend*, not a verdict."""
@@ -5186,6 +5210,344 @@ class RepairAttempt(View):
 		if self.outcome is RepairOutcome.REPAIRED and self.dispatch_id is None:
 			raise ValueError("a repair cannot be repaired without a dispatch that did it")
 		return self
+
+
+# --------------------------------------------------------------------------- #
+# FR-154/155/156 — the composition, and the deletion test that admits into it
+# --------------------------------------------------------------------------- #
+
+COMPOSITION_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-154", "FR-155", "FR-156")
+"""What one composition freeze carries out.
+
+FR-154 freezes and hashes the composition, FR-155 admits a plugin into it only by the
+deletion test, and FR-156 prefers configuration to code. They are one mechanism: a test
+with no frozen composition to admit into is a rule nothing consults, and a freeze with no
+admission test pins whatever was installed.
+"""
+
+VERDICT_SURFACES: Final[tuple[str, ...]] = (
+	"completion",
+	"contract_integrity",
+	"oracle_strength",
+	"budget",
+	"egress",
+)
+"""FR-155's own list, verbatim: "completion, contract integrity, oracle strength, budget,
+egress".
+
+The five are the requirement's, not a taxonomy invented here. The deletion test asks
+whether *every* one comes out the same without the plugin, so the list has to be closed —
+"does SoFact still decide the same way?" over an open set is not a question a machine can
+answer, and an admission whose check could be satisfied by naming four of five surfaces
+would be the subset failure this project keeps finding in its own gates.
+"""
+
+
+class PluginVerdict(StrEnum):
+	"""What FR-155's deletion test concludes about one plugin."""
+
+	ADMISSIBLE = "admissible"
+	"""Below the trust boundary: every verdict surface is SoFact's with or without it."""
+
+	REFUSED = "refused"
+	"""It took over a decision SoFact exists to make. Refused regardless of quality."""
+
+	SUPERSEDED = "superseded"
+	"""FR-156's case: configuration obtains the capability, so the plugin is not installed.
+
+	A separate verdict from REFUSED because the remedy differs — the plugin was not
+	harmful, it was unnecessary, and FR-156's rule is that the cheapest safe composition is
+	the one with the fewest moving parts.
+	"""
+
+	BUILT_HERE = "built_here"
+	"""The capability is SoFact's own, so the plugin is unnecessary rather than harmful.
+
+	§8.7's ``dsh-git-worktree`` row is this verdict: it *passes* the deletion test and is
+	still refused, because FR-141 stopped being deferred and the wrapper would have had to
+	supply the integration line, the per-wave merge order and the conflict record — the
+	parts that make the feature safe. Distinct from :attr:`SUPERSEDED`, which is FR-156's
+	*configuration* remedy: folding the two would record a plugin as replaced by a setting
+	when what replaced it was code, and the next reader would go looking for the setting.
+	"""
+
+
+class PluginAdmission(View):
+	"""FR-155's deletion test, applied to one plugin and recorded as its outcome.
+
+	> Remove the plugin. Does every SoFact verdict — completion, contract integrity,
+	> oracle strength, budget, egress — come out the same?
+
+	``surfaces_held`` is what makes the answer checkable rather than asserted: the verdict
+	surfaces SoFact still decides **without** the plugin. A plugin is admissible exactly when
+	that set covers :data:`VERDICT_SURFACES`, and the type refuses the two ways to write a
+	row that does not mean what it says — an ``ADMISSIBLE`` verdict with a surface missing
+	(which would admit a plugin that took over a decision), and a ``REFUSED`` verdict with
+	every surface held (which would refuse one that took over nothing).
+
+	``superseded_by`` is FR-156's remedy and is required for a ``SUPERSEDED`` verdict: the
+	configuration that obtains the capability instead. Naming it is what distinguishes
+	"this plugin is unnecessary" from "this plugin was not looked at".
+
+	``licence`` is the one check that is neither a verdict nor a measurement: FR-154's
+	composition is pinned by digest, and a digest says what was installed and nothing about
+	whether it may be. It is required on an admitted plugin for the reason the requirement
+	gives — R28's third failure mode is licence-incompatible, and a licence nobody wrote down
+	is a licence nobody checked.
+	"""
+
+	plugin: NonEmptyStr
+	verdict: PluginVerdict
+	surfaces_held: frozenset[str] = frozenset()
+	"""Verdict surfaces SoFact decides without the plugin, from :data:`VERDICT_SURFACES`.
+
+	A ``frozenset`` because the test is set membership and never an ordering — a tuple
+	would invite a reader to compare two admissions positionally, and two rows listing the
+	same surfaces in different orders are the same finding.
+	"""
+
+	superseded_by: NonEmptyStr | None = None
+	licence: NonEmptyStr | None = None
+	"""The licence the plugin ships under, recorded at composition time (FR-154, R28).
+
+	Required exactly when the verdict is :attr:`PluginVerdict.ADMISSIBLE`. That is the only
+	verdict under which the plugin is installed, and it is the only one where the answer
+	has consequences — a refused plugin's licence is a fact about something that is not in
+	the build.
+	"""
+
+	rationale: NonEmptyStr
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		unknown = sorted(self.surfaces_held - set(VERDICT_SURFACES))
+		if unknown:
+			raise ValueError(
+				f"unknown verdict surface(s) {unknown}; FR-155 names exactly "
+				f"{list(VERDICT_SURFACES)}, and a surface outside that list would make the "
+				"deletion test answer a question the requirement does not ask"
+			)
+		held = self.surfaces_held >= set(VERDICT_SURFACES)
+		if self.verdict is PluginVerdict.ADMISSIBLE and not held:
+			missing = sorted(s for s in VERDICT_SURFACES if s not in self.surfaces_held)
+			raise ValueError(
+				f"{self.plugin!r} is admissible but SoFact does not reach the same verdict "
+				f"on {missing} without it; a plugin that holds a decision is refused "
+				"regardless of quality (FR-155)"
+			)
+		if self.verdict is PluginVerdict.REFUSED and held:
+			raise ValueError(
+				f"{self.plugin!r} is refused but every verdict surface is held without it; "
+				"a plugin below the trust boundary is admissible, and refusing one that "
+				"took over nothing is a refusal with no defect behind it"
+			)
+		if self.verdict is PluginVerdict.SUPERSEDED and self.superseded_by is None:
+			raise ValueError(
+				f"{self.plugin!r} is superseded by configuration (FR-156) but names none; "
+				"without the setting this is indistinguishable from a plugin nobody looked at"
+			)
+		if self.verdict is PluginVerdict.ADMISSIBLE and self.licence is None:
+			raise ValueError(
+				f"{self.plugin!r} is admitted with no licence recorded; R28's third failure "
+				"mode is licence-incompatible, and FR-154 checks it at composition time "
+				"because a licence discovered after installation is a licence discovered "
+				"too late"
+			)
+		if self.verdict is not PluginVerdict.ADMISSIBLE and self.licence is not None:
+			raise ValueError(
+				f"{self.plugin!r} is {self.verdict.value} but carries a licence; a plugin "
+				"that is not installed has no licence to record, and the field would read "
+				"as an admission with an odd verdict"
+			)
+		return self
+
+
+class PluginComposition(View):
+	"""FR-154's frozen composition, and FR-155's admission test applied to every member.
+
+	FR-154: the composition "must be **frozen, minimal, pinned, and hash-verified** for the
+	duration of a build, and must never be the operator's own profile". The hazard is
+	specific — a `dsh` composition is mutable *at runtime* by the agent (§8.7), so a
+	producer able to influence its own composition can influence its own verifier.
+
+	``pins`` is the hash-verified half: plugin name to the digest of what was installed. A
+	composition that named plugins without pinning them would freeze a *list* while leaving
+	what the list resolves to free to change, which is the drift FR-154's word "pinned" is
+	for. The hash is computed over :meth:`pinned_content`, so the freeze covers the
+	admissions too: an admission cannot be revised without the composition hash moving, and
+	a build pinned to a hash is therefore pinned to the reasoning that admitted its members.
+
+	``operator_profile`` records whether the composition inherited the operator's own
+	profile. FR-154 says it must never be, and the type refuses it rather than reporting it,
+	because the failure is that a producer reaches the verifier through the operator's
+	installed set — a fact worth refusing at construction rather than counting.
+
+	``argv_frozen`` records the *other* way a composition is frozen, and the two are not
+	alternatives to be chosen between: the argv that ran the harness can refuse to auto-load
+	whatever the operator has installed (``pi``'s ``--no-extensions``), or the plugins can be
+	enumerated and pinned. A composition with neither is not frozen, and saying so is the
+	point — §8.7 records that a ``dsh`` composition is mutable *at runtime by the agent*, so
+	a ``dsh`` build reports FR-154 as not carried out rather than reporting a clean freeze
+	it does not have.
+	"""
+
+	id: UUID7
+	harness: NonEmptyStr
+	created_at: datetime
+	pins: tuple[tuple[str, str], ...] = ()
+	"""``(plugin, digest)`` pairs. A composition with no plugins is the minimal one."""
+
+	admissions: tuple[PluginAdmission, ...] = ()
+	"""FR-155's test, one row per plugin that was considered — including the refused ones.
+
+	Considered, not admitted: a refusal is the more valuable row, because it is the one
+	that records *why* a capability the ecosystem offers is not in the build. A composition
+	that listed only its members would make its refusals invisible and they would be
+	re-litigated at the next plugin.
+	"""
+
+	operator_profile: bool = False
+	"""Whether this composition inherited the operator's own profile. FR-154 forbids it."""
+
+	argv_frozen: bool = False
+	"""Whether the argv that ran this harness refuses to auto-load installed plugins.
+
+	Derived from :attr:`~sofact.harness.HarnessSpec.freezing_argv` by
+	:func:`sofact.composition.composition_for` rather than typed in by a caller, so the
+	record states what the command line does and not what someone believed it did.
+	"""
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.operator_profile:
+			raise ValueError(
+				"a P5 composition must never be the operator's own profile (FR-154): a "
+				"producer that inherits it reaches whatever the operator happens to have "
+				"installed, which is a route to its own verifier"
+			)
+		pinned = [name for name, _ in self.pins]
+		if len(pinned) != len(set(pinned)):
+			raise ValueError(f"a plugin is pinned twice in {self.harness!r}; one pin per name")
+		admitted = {a.plugin for a in self.admissions if a.verdict is PluginVerdict.ADMISSIBLE}
+		unpinned = sorted(admitted - set(pinned))
+		if unpinned:
+			raise ValueError(
+				f"admitted plugin(s) {unpinned} carry no pin; FR-154 requires the "
+				"composition be pinned as well as admitted, or a name freezes while what "
+				"it resolves to does not"
+			)
+		refused = sorted(a.plugin for a in self.admissions if a.verdict is PluginVerdict.REFUSED)
+		installed = sorted(set(pinned) & set(refused))
+		if installed:
+			raise ValueError(
+				f"refused plugin(s) {installed} are installed anyway; FR-155 refuses a "
+				"plugin that holds a decision, and installing it while recording the "
+				"refusal would put it in the build the test excluded"
+			)
+		return self
+
+	@property
+	def frozen(self) -> bool:
+		"""Whether anything actually freezes this composition (FR-154).
+
+		Two ways, and either is enough: the argv refuses to auto-load installed plugins, or
+		the plugins are enumerated and pinned. A composition with neither is not frozen —
+		the harness loads whatever the operator has installed, which is the state FR-154
+		exists to make impossible — and this is the property that says so rather than
+		letting a composition report a freeze it does not have.
+		"""
+		return self.argv_frozen or bool(self.pins)
+
+	@property
+	def pinned_content(self) -> str:
+		"""SHA-256 over the pins and the admissions — what FR-154's freeze covers.
+
+		The admissions are in the hash deliberately. A composition is frozen so that a build
+		can be shown to have run the composition it was approved with, and the *reasoning*
+		that admitted each member is part of that: a plugin admitted under one reading of
+		FR-155 and later re-classified changes what the build's trust boundary was, and a
+		hash over the pins alone would not move.
+
+		``argv_frozen`` is in it for the same reason and a sharper one: it is the half of the
+		freeze that is not a list. Two builds can pin the same plugins and differ in whether
+		the harness was *also* told not to auto-load, and a hash that ignored the flag would
+		call those two compositions the same.
+		"""
+		return content_hash(
+			{
+				"harness": self.harness,
+				"argv_frozen": self.argv_frozen,
+				"pins": sorted(self.pins),
+				"admissions": [
+					{
+						"plugin": a.plugin,
+						"verdict": a.verdict.value,
+						"surfaces_held": sorted(a.surfaces_held),
+						"superseded_by": a.superseded_by,
+						"licence": a.licence,
+					}
+					for a in self.admissions
+				],
+			}
+		)
+
+	@property
+	def admitted(self) -> tuple[str, ...]:
+		"""The plugins that entered the build, in pin order."""
+		passing = {a.plugin for a in self.admissions if a.verdict is PluginVerdict.ADMISSIBLE}
+		return tuple(name for name, _ in self.pins if name in passing)
+
+	@property
+	def refused(self) -> tuple[PluginAdmission, ...]:
+		"""The plugins FR-155 kept out, with the surfaces that kept them out."""
+		return tuple(a for a in self.admissions if a.verdict is PluginVerdict.REFUSED)
+
+	@property
+	def superseded(self) -> tuple[PluginAdmission, ...]:
+		"""The plugins FR-156 replaced with configuration."""
+		return tuple(a for a in self.admissions if a.verdict is PluginVerdict.SUPERSEDED)
+
+	@property
+	def minimal(self) -> bool:
+		"""Whether every member was admitted by the deletion test, and none refused is installed.
+
+		FR-154's word is "minimal", and this is what it can honestly mean to a machine: not
+		"as few plugins as possible" — no number exists for that — but "no plugin is in the
+		build that FR-155 would keep out". A composition can therefore be minimal and
+		non-empty, which is the case the adjective is for.
+		"""
+		return not ({name for name, _ in self.pins} & {a.plugin for a in self.refused})
+
+	@property
+	def built_here(self) -> tuple[PluginAdmission, ...]:
+		"""The plugins FR-154 replaced with SoFact's own code rather than with a setting."""
+		return tuple(a for a in self.admissions if a.verdict is PluginVerdict.BUILT_HERE)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this composition carries out, which may be none.
+
+		The vacuous-pass rule the other reports keep, applied twice over. A composition that
+		considered no plugin has not applied the deletion test to anything, so it leaves
+		FR-155 open rather than reporting a clean filter that filtered nothing. A
+		composition that is not :attr:`frozen` leaves FR-154 open even when it has
+		admissions: an unfrozen harness loads whatever the operator installed, and the
+		admission rows describe a list the argv does not enforce. FR-156 is the one that
+		still applies either way — an empty, unfrozen composition *is* the configuration-only
+		answer — so it is the floor this can return and never the whole set by default.
+		"""
+		discharged: list[str] = ["FR-156"]
+		if self.frozen:
+			discharged.append("FR-154")
+		if self.admissions:
+			discharged.append("FR-155")
+		return tuple(name for name in COMPOSITION_REQUIREMENTS if name in discharged)
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-154-156 this composition did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in COMPOSITION_REQUIREMENTS if name not in discharged)
 
 
 class AttemptTelemetry(View):

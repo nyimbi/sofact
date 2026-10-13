@@ -243,6 +243,8 @@ sofact probe                        # attempt a harness; record what was observe
 sofact dispatch --all               # run the plan; stops at the first refuted wave
 sofact repair                       # hand each refuted clause back to the producer
 sofact attempts                     # what the repair loop cost: attempts, tokens, wall clock
+sofact composition                  # the frozen plugin set, and whether FR-154's freeze holds
+sofact composition --verify a=<sha> # re-check the pins against what is installed now
 sofact integrity                    # re-verify the pinned hashes
 sofact integrate                    # P7
 sofact deliver --root ./delivery    # P8: the report, its chain, its handover
@@ -256,6 +258,16 @@ total, and the count of sessions that reported nothing travels with the number. 
 over a run that never repaired anything is not a cheap build, and the verb exits non-zero
 rather than print it
 ([ADR-0055](docs/adr/0055-attempt-telemetry-is-a-join-and-the-unmeasured-token-count-is-part-of-it.md)).
+
+`composition` prints the plugin set a build runs with and **exits non-zero while any part
+of FR-154–156 is open**. The freeze has two independent halves — the harness's own argv
+refusing to auto-load installed plugins, or the plugins enumerated and pinned by digest —
+and both are *derived* from the harness spec rather than declared, so a spec cannot claim a
+freeze its command line does not enforce. `pi` runs frozen; `dsh`, whose plugin set is
+mutable at runtime by the agent, does not, and the verb says so instead of printing a clean
+table. §8.7's worked audit of the ecosystem is the corpus: eight measured rows, four
+distinct verdicts, one plugin admitted
+([ADR-0056](docs/adr/0056-the-freeze-is-derived-from-the-argv-and-the-deletion-test-admits.md)).
 
 `probe` is not optional: dispatching against an assumed capability is exactly what the spec
 forbids, so `dispatch` refuses until a profile exists. Which harness is a **row of data, not

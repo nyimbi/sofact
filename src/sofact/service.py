@@ -20,6 +20,7 @@ from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
 from sofact.audit import audit_oracles as run_oracle_audit
+from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
 from sofact.delivery import DELIVERY_ARTIFACT_PATHS
@@ -128,6 +129,7 @@ from sofact.views import (
 	PhaseAdvance,
 	PhaseGate,
 	PhaseStatus,
+	PluginComposition,
 	ProjectState,
 	Readiness,
 	RepairAttempt,
@@ -371,6 +373,7 @@ class FactoryService:
 		envelope: DeliveryEnvelope | None = None,
 		topology: DeploymentTopology | None = None,
 		escape_budgets: Sequence[EscapeBudget] = (),
+		compositions: Mapping[str, PluginComposition] | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -400,6 +403,13 @@ class FactoryService:
 		exists until there has been a deployment, and NFR-024 forbids reporting a target the
 		product has not measured. So nothing is invented, no lane is reduced, and the
 		delivery report says FR-023 is not in force rather than printing a clean table.
+
+		``compositions`` is FR-154's declared plugin composition, keyed by harness name, and
+		``None`` means *this deployment declared none* rather than "no composition" -- a
+		harness with no declaration runs the empty composition derived from its own spec, which
+		is a freeze on `pi` and an unfrozen profile on `dsh`. The distinction is the same one
+		the other four make, and here it separates "we pinned nothing because nothing is
+		installed" from "we pinned nothing because we did not look".
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
@@ -408,6 +418,7 @@ class FactoryService:
 		self._envelope = envelope
 		self._topology = topology
 		self.escape_budgets: tuple[EscapeBudget, ...] = tuple(escape_budgets)
+		self._compositions: Mapping[str, PluginComposition] = dict(compositions or {})
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
@@ -1411,6 +1422,24 @@ class FactoryService:
 		"""The harnesses this instance is allowed to dispatch to, by name."""
 		return dict(self._specs)
 
+	def composition(self, name: str | None = None) -> PluginComposition:
+		"""The plugin composition this deployment declares for a harness (FR-154).
+
+		Read from configuration at dispatch time rather than passed in, for FR-148's reason
+		one requirement along: a caller that could supply its own composition could supply
+		an optimistic one, and the whole point of FR-154 is that the composition a build
+		ran under is not the producer's to choose. The operator sets
+		``SOFACT_COMPOSITION`` (via :func:`sofact.cli._configured_composition`) or gets the
+		harness's own default from :func:`~sofact.composition.composition_for`.
+		"""
+		spec = harness_spec_for(self.harness_name(name), self._specs)
+		declared = self._compositions.get(spec.name)
+		return declared if declared is not None else composition_for(spec)
+
+	def composition_hash(self, name: str | None = None) -> str:
+		"""The digest a session's ``composition_hash`` carries (FR-154, FR-149)."""
+		return self.composition(name).pinned_content
+
 	def adapter(
 		self,
 		name: str | None = None,
@@ -1439,6 +1468,7 @@ class FactoryService:
 			model=model or os.environ.get("SOFACT_MODEL") or DEFAULT_MODEL,
 			tools=resolve_tools(tools),
 			probe_timeout=DEFAULT_PROBE_TIMEOUT_SECONDS,
+			composition_hash=self.composition_hash(resolved),
 		)
 
 	async def probe_harness(

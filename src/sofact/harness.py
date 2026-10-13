@@ -138,6 +138,7 @@ fails, so this is data the spec must carry rather than a detail the caller can k
 # dataclass the first time a field was added.
 _TUPLE_FIELDS: Final = (
 	"budget_argv",
+	"freezing_flags",
 	"isolation_env",
 	"research_tools",
 	"completion_reason_path",
@@ -158,7 +159,7 @@ _STRING_FIELDS: Final = (
 	"session_id_style",
 	"usage_reduce",
 )
-_BOOL_FIELDS: Final = ("session_is_zstd", "supports_context_file_flag")
+_BOOL_FIELDS: Final = ("session_is_zstd", "supports_context_file_flag", "freezing_argv")
 
 DEFAULT_TOOLS: Final = "read,write,edit,bash"
 """The tool set a dispatch hands the harness unless the operator says otherwise.
@@ -274,7 +275,36 @@ class HarnessSpec:
 	budget_argv: tuple[str, ...] = ()
 	compaction_event: str = ""
 	research_tools: tuple[str, ...] = ()
+	freezing_flags: tuple[str, ...] = ()
+	"""Argv entries whose presence means installed plugins are not auto-loaded (FR-154).
+
+	A *flag list* rather than a boolean, because a boolean a spec could set is a claim
+	nothing checks — and this project's recurring defect is precisely a declaration that
+	drifts from the thing it describes. :attr:`composition_frozen` is derived from this
+	against :attr:`argv`, so a spec that listed ``--no-extensions`` and then dropped it
+	from the command line computes *not frozen*, which is the state ``pi-research`` is in
+	by design: it drops the flag because the research loop *is* an installed extension.
+
+	The list is empty for a harness that offers no such flag. That is not an oversight to
+	be filled in later — ``dsh``'s composition is mutable at runtime by the agent (§8.7)
+	and ``claude``'s argv has no switch SoFact has measured as refusing operator plugins,
+	so both report FR-154 as not carried out rather than reporting a freeze nobody took.
+	"""
+
 	notes: str = ""
+
+	@property
+	def composition_frozen(self) -> bool:
+		"""Whether this argv refuses to auto-load whatever the operator has installed.
+
+		Derived, never declared: every flag in :attr:`freezing_flags` must actually be in
+		:attr:`argv`, and a spec that declares no such flag is not frozen. This is what
+		:func:`sofact.composition.composition_for` reads, so the composition a build
+		records and the command line that ran it cannot disagree — which is the whole of
+		FR-154's claim, and the reason it is a property of the argv rather than a field
+		someone types in.
+		"""
+		return bool(self.freezing_flags) and all(flag in self.argv for flag in self.freezing_flags)
 
 	def __post_init__(self) -> None:
 		if not self.argv:
@@ -545,6 +575,7 @@ PI_SPEC: Final = HarnessSpec(
 	supports_context_file_flag=True,
 	model_error_pattern="not found. Use --list-models",
 	confinement_tools="read,write,edit",
+	freezing_flags=("--no-extensions",),
 	notes=(
 		"Measured 2026-09-12 against pi 0.85.1 with a local ollama model. The session "
 		"record is plain JSONL at <session-dir>/<iso-timestamp>_<session-id>.jsonl with "
@@ -592,6 +623,11 @@ PI_RESEARCH_SPEC: Final = HarnessSpec(
 	goal_entry=PI_SPEC.goal_entry,
 	supports_context_file_flag=PI_SPEC.supports_context_file_flag,
 	model_error_pattern=PI_SPEC.model_error_pattern,
+	# Carried through rather than dropped, and the argv above drops the flag itself: so
+	# `composition_frozen` computes *False* here without anyone declaring it. A research
+	# dispatch runs an installed extension, so it is not frozen, and the composition it
+	# records says so (FR-154).
+	freezing_flags=PI_SPEC.freezing_flags,
 	env=(
 		("RESEARCH_MODEL", "{model}"),
 		("npm_config_loglevel", "error"),
@@ -1023,6 +1059,7 @@ class ConfiguredHarnessAdapter:
 		probe_timeout: float = DEFAULT_PROBE_TIMEOUT_SECONDS,
 		env: Mapping[str, str] | None = None,
 		spec_env: bool = True,
+		composition_hash: str | None = None,
 	) -> None:
 		assert spec.name, "spec must be named"
 		assert model.strip(), "a dispatch needs a model"
@@ -1035,6 +1072,10 @@ class ConfiguredHarnessAdapter:
 		self.probe_timeout = probe_timeout
 		self.env = dict(env or {})
 		self.spec_env = spec_env
+		# FR-154's "observed composition hash is recorded with the session". Bound to the
+		# adapter rather than passed per dispatch so every record it produces carries the
+		# same freeze -- a session that ran under one composition cannot report another.
+		self.composition_hash = composition_hash
 
 	def __repr__(self) -> str:
 		return f"ConfiguredHarnessAdapter({self.spec.name!r}, workspace={self.workspace})"
@@ -1069,6 +1110,7 @@ class ConfiguredHarnessAdapter:
 			probe_timeout=self.probe_timeout,
 			env=self.env if env is None else env,
 			spec_env=self.spec_env if spec_env is None else spec_env,
+			composition_hash=self.composition_hash,
 		)
 
 	def _slots(self, session_id: str) -> dict[str, str]:
@@ -2200,6 +2242,7 @@ class ConfiguredHarnessAdapter:
 				session_path=session_path,
 				stderr_tail=stderr_tail,
 				checkout=checkout,
+				composition_hash=self.composition_hash,
 			)
 
 		if profile is None:

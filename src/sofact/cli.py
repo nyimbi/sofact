@@ -25,12 +25,13 @@ from sofact import __version__
 from sofact import api as machine_api
 from sofact._uuid7 import uuid7str
 from sofact.audit import EMPTY_WORKSPACE_INSTRUMENT
+from sofact.composition import load_composition, verify_composition
 from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
 from sofact.escape import load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
-from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
+from sofact.harness import SPECS, HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.service import (
 	FactoryService,
@@ -67,6 +68,8 @@ from sofact.views import (
 	OracleAuditReport,
 	Phase,
 	PhaseStatus,
+	PluginComposition,
+	PluginVerdict,
 	ProbeOutcome,
 	RepairOutcome,
 	ResearchBudget,
@@ -240,6 +243,7 @@ def _service(home: Path | None) -> FactoryService:
 		envelope=_configured_envelope(),
 		topology=_configured_topology(),
 		escape_budgets=_configured_escape_budgets(),
+		compositions=_configured_compositions(),
 	)
 
 
@@ -305,6 +309,35 @@ def _configured_specs() -> Mapping[str, HarnessSpec] | None:
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_HARNESS_SPECS: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
+
+
+def _configured_compositions() -> dict[str, PluginComposition] | None:
+	"""The plugin compositions this deployment declared, by harness (FR-154).
+
+	``None`` means *this deployment declared none*, which is not the same as "an empty
+	composition": a harness with no declaration runs the composition derived from its own
+	spec, and that is a freeze on `pi` and an unfrozen profile on `dsh`. The distinction
+	separates "we pinned nothing because nothing is installed" from "we pinned nothing
+	because we did not look".
+	"""
+	configured = os.environ.get("SOFACT_COMPOSITION")
+	if not configured:
+		return None
+	try:
+		return load_composition(Path(configured), _specs_for_compositions())
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_COMPOSITION: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _specs_for_compositions() -> Mapping[str, HarnessSpec]:
+	"""The harness table a composition file is read against.
+
+	``SOFACT_HARNESS_SPECS`` when set, else the built-in table — the same table the
+	dispatch will use. Reading a composition against a different table than the one that
+	will run it is how a composition ends up pinned for a harness that does not exist.
+	"""
+	return _configured_specs() or SPECS
 
 
 def _configured_escape_budgets() -> tuple[EscapeBudget, ...]:
@@ -2096,6 +2129,134 @@ async def _escapes(svc: FactoryService, *, override: str | None, reason: str) ->
 			"budget, so the deploy gate does not refuse — record an attributed override if "
 			"the reduction itself is what you are accepting.",
 			fg="red",
+		)
+		raise typer.Exit(code=1)
+
+
+@app.command(name="composition")
+def composition_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	harness: str | None = typer.Option(
+		None, "--harness", help="Which harness (default: the one a dispatch would use)."
+	),
+	verify: str | None = typer.Option(
+		None,
+		"--verify",
+		help=(
+			"Check the freeze against what is installed now: NAME=DIGEST pairs, comma "
+			"separated (FR-154). Reports every plugin whose content moved."
+		),
+	),
+) -> None:
+	"""Report the plugin composition, and whether FR-154's freeze holds (FR-154-156)."""
+	asyncio.run(_composition(_service(_home_of(ctx, home)), harness=harness, verify=verify))
+
+
+def _observed_pins(declared: str | None) -> dict[str, str] | None:
+	"""Parse ``--verify``'s ``NAME=DIGEST`` list, refusing a malformed pair.
+
+	Refused rather than skipped: a pair that silently dropped out of the comparison would
+	leave the plugin it names unverified, and the check would report a clean freeze over a
+	plugin it never looked at — the failure mode this project keeps finding in its own gates.
+	"""
+	if declared is None:
+		return None
+	observed: dict[str, str] = {}
+	for part in declared.split(","):
+		name, _, digest = part.strip().partition("=")
+		if not name.strip() or not digest.strip():
+			typer.secho(
+				f"--verify takes NAME=DIGEST pairs; {part.strip()!r} is neither. A pair that "
+				"dropped out of the comparison would leave its plugin unverified and the "
+				"check would report a clean freeze over a plugin it never looked at (FR-154).",
+				fg="red",
+			)
+			raise typer.Exit(code=1)
+		observed[name.strip()] = digest.strip()
+	return observed
+
+
+async def _composition(svc: FactoryService, *, harness: str | None, verify: str | None) -> None:
+	observed = _observed_pins(verify)
+	composition = svc.composition(harness)
+	typer.secho(f"\nFR-154 composition: {composition.harness}", fg="cyan", bold=True)
+	typer.secho(f"  hash {composition.pinned_content}", fg="bright_black")
+	typer.secho(
+		f"  {'frozen' if composition.frozen else 'NOT frozen'}: "
+		+ (
+			"the argv refuses to auto-load installed plugins"
+			if composition.argv_frozen
+			else "the argv does not refuse installed plugins"
+		)
+		+ (
+			f", and {len(composition.pins)} plugin(s) are pinned"
+			if composition.pins
+			else ", and no plugin is pinned"
+		),
+		fg="green" if composition.frozen else "red",
+	)
+	typer.secho(
+		f"  {'minimal' if composition.minimal else 'NOT minimal'}: "
+		+ (
+			"no refused plugin is installed"
+			if composition.minimal
+			else "a plugin FR-155 refused is installed anyway"
+		),
+		fg="green" if composition.minimal else "red",
+	)
+
+	if not composition.admissions:
+		typer.secho(
+			"  no plugin was considered, so FR-155's deletion test has been applied to "
+			"nothing. An empty composition is FR-156's answer — config is not a dependency "
+			"— and it is not evidence that the plugins in the ecosystem were examined.",
+			fg="bright_black",
+		)
+	for admission in composition.admissions:
+		colour = {
+			PluginVerdict.ADMISSIBLE: "green",
+			PluginVerdict.REFUSED: "red",
+			PluginVerdict.SUPERSEDED: "yellow",
+			PluginVerdict.BUILT_HERE: "yellow",
+		}[admission.verdict]
+		typer.secho(f"  {admission.plugin}: {admission.verdict.value}", fg=colour)
+		typer.secho(f"    {admission.rationale}", fg="bright_black")
+		if admission.licence is not None:
+			typer.secho(f"    licence {admission.licence}", fg="bright_black")
+		if admission.superseded_by is not None:
+			typer.secho(f"    superseded by: {admission.superseded_by}", fg="bright_black")
+
+	if observed is not None:
+		drifted = verify_composition(composition, pins=observed)
+		if drifted:
+			typer.secho(
+				"\n  the freeze does NOT hold: "
+				+ ", ".join(drifted)
+				+ " no longer match what the composition pinned. FR-154's word is "
+				"hash-verified, and a pin nobody re-checks is a name with a digest beside it.",
+				fg="red",
+			)
+			raise typer.Exit(code=1)
+		typer.secho(
+			f"\n  the freeze holds: all {len(composition.pins)} pin(s) match what is "
+			"installed now (FR-154).",
+			fg="green",
+		)
+
+	if composition.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(composition.not_implemented)
+			+ (
+				". This harness's argv does not freeze the composition, so a producer that "
+				"can mount a plugin into its own runtime can reach its own verifier (§8.7, "
+				"R29). A pinned composition is what would carry FR-154 here."
+				if not composition.frozen
+				else ". No plugin was considered, so FR-155's deletion test was applied to "
+				"nothing (FR-155)."
+			),
+			fg="yellow",
 		)
 		raise typer.Exit(code=1)
 
