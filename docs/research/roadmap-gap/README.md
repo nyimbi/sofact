@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1131 passed, 0 failed** (2026-10-13, after ADR-0049).
+`tests/ci` at the last refresh: **1150 passed, 0 failed** (2026-10-13, after ADR-0050).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -82,13 +82,13 @@ closed since carry their date.
 | FR-101 escalate with diagnosis, not retry forever | **Implemented** | `repair_plan` bounded per clause; `test_the_loop_is_bounded_and_says_so_when_it_gives_up` (`test_service.py:961`). |
 | FR-102 attempt telemetry | **Partly** | Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`); `test_a_step_runs_and_is_recorded` (`test_service.py:525`). **No attempt-level aggregation.** |
 | FR-103 oracle manufacturing from contract structure | **Partly** | `suggest_oracle` (`contract.py:46`) proposes a class and a command from clause polarity; `test_negative_clauses_suggest_a_property_and_positive_ones_a_contract` (`test_contract.py:64`). No test *generation*, no rank ordering, no mutation. |
-| FR-104 ranks 1–2 mandatory above L2 | **Partly** | `STRONG_ORACLE_MAX_RANK` (`views.py:204`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. |
+| FR-104 ranks 1–2 mandatory above L2 | **Partly, and it conflicts with §14** | `STRONG_ORACLE_MAX_RANK` (`views.py:269`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. **The code is right and the requirement is the outlier:** FR-104 says ranks 1–2 are mandatory above L2, but §14's own module-class table puts **G3 (API/service) and G4 (persistence) at L3 with rank-3 contract tests** — the same L3 `ceiling_for_rank(3)` grants. Read literally, FR-104 would make §14's G3 and G4 unreachable. Resolving it needs a spec decision (narrow FR-104 to G7-class modules, or lower §14's G3/G4), not a code change; recorded here so the conflict is not mistaken for a missing cap. |
 | FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:407`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
 | FR-106 operator examples held out | **Not built** | No holdout mechanism. |
 | FR-107 adversarial audit of oracles | **Not built** | No code. |
-| FR-108 per-module ground-truth debt | **Implemented** | `ground_truth_debt` (`contract.py:73`); `test_debt_is_the_fraction_of_uncheckable_clauses` (`test_contract.py:109`). |
-| FR-109 uncovered clauses cap at L2 | **Partly** | `ceiling_for_rank` caps on rank, not on clause coverage; `refuted_steps` (`service.py:176`) tracks refutations. `test_an_oracle_too_weak_to_trust_narrows_the_ceiling` (`test_cli.py:209`) tests the rank path. |
-| FR-110 O8 Integration oracle class | **Not built** | `OracleClass` (`views.py:183`) has **7** members; there is no O8. |
+| FR-108 per-module ground-truth debt | **Implemented** | One measure, `Contract.uncovered_clauses` (`views.py:962`), read by `Contract.ground_truth_debt` and by the cap; `contract.ground_truth_debt` delegates to it. The set is FR-108's own: **executable *and* rank ≤ 5** (`COVERING_ORACLE_MAX_RANK`), because FR-103's table calls rank 6–7 "sample, not coverage". `test_debt_counts_a_weak_oracle_even_when_it_runs` (`test_contract.py`). |
+| FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:986`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
+| FR-110 O8 Integration oracle class | **Not built** | `OracleClass` (`views.py:246`) has **7** members; there is no O8. |
 | FR-111 P7 build order | **Implemented** | `check_build_order` (`integration.py:286`); `test_a_module_built_before_its_dependency_is_a_finding` (`test_integration.py:331`). |
 | FR-112 empty public-API diff | **Implemented** (2026-10-12, ADR-0027) | `check_interface_conformance` (`integration.py:390`), `public_surface` (`:336`), `Module.surface` (`views.py:510`); `test_a_declared_name_the_build_does_not_expose_is_a_finding` (`test_integration.py:422`), `test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it` (`:513`). Discharged **only when a module declares a surface** — a proposal derives none, so the default report still names FR-112. |
 | FR-113 no module reaches another's internals | **Implemented** | `check_imports` (`integration.py:183`); `test_a_module_reaching_another_without_declaring_it_is_a_finding` (`test_integration.py:157`). |
@@ -217,6 +217,14 @@ bound) is **partly** (per-step only).
    exist as a class. This is the requirement the product's own thesis rests on
    (§1.1 capability 3). **Blocker: manufacturing needs a target language, which
    D5 leaves open and ADR-0025 records as out of scope.**
+   **Narrowed 2026-10-13 (ADR-0050)**, and the narrowing is the half that needed no
+   target language: *accounting* for coverage is now correct where it was not.
+   FR-108 and FR-109 read one predicate — executable **and** rank ≤ 5 — so a rank-1
+   property intention no longer grants L4 and a rank-6 example with a command no
+   longer reports zero debt. What remains blocked is unchanged and is the harder
+   half: nothing **manufactures** an oracle, and FR-105's measured strength is still
+   a declaration rather than a measurement. Manufacturing a rank-1 property test from
+   an invariant is exactly the step that needs D5's target language.
 4. ~~**No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).**~~
    **Closed 2026-10-13 (ADR-0040), except FR-120's delivered-system half.** The report, the deploy gate and the
    Mode M handover are built: `DeliveryReport`'s five FR-118 statements are five required

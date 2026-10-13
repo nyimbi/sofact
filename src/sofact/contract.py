@@ -71,13 +71,20 @@ def unexecutable_clauses(contract: Contract) -> tuple[Clause, ...]:
 
 
 def ground_truth_debt(contract: Contract) -> float:
-	"""Fraction of clauses no machine can currently check.
+	"""Fraction of clauses no machine can currently check (FR-108).
 
 	``0.0`` is the only good value. Anything above it means the contract's autonomy
 	ceiling is a claim about clauses that were never run.
+
+	Delegates to :attr:`~sofact.views.Contract.ground_truth_debt` rather than counting
+	``unexecutable_clauses`` here, because the two were the *same count* until FR-108's
+	"rank-1-5" half was read: this function counted clauses naming no command, while
+	FR-103's table makes a rank-6 example with a command uncovered too. One measure in
+	one place, so the debt a report prints and the cap a ceiling applies cannot come to
+	mean different things.
 	"""
 	assert contract.clauses, "cannot measure debt on a contract with no clauses"
-	debt = len(unexecutable_clauses(contract)) / len(contract.clauses)
+	debt = contract.ground_truth_debt
 	assert 0.0 <= debt <= 1.0, f"debt must be a fraction, got {debt}"
 	return debt
 

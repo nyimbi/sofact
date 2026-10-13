@@ -348,7 +348,7 @@ class TestTheContract:
 		result = _contract(home)
 		assert result.exit_code == 0, result.output
 		assert "ground-truth debt 0%" in result.output
-		assert "these clauses name no command" not in result.output
+		assert "no oracle covers" not in result.output
 
 	def test_without_a_command_the_debt_is_stated(self, home: Path) -> None:
 		"""SoFact will not invent a command, so it reports the gap instead (§2.3)."""
@@ -356,7 +356,8 @@ class TestTheContract:
 		result = RUNNER.invoke(app, ["--home", str(home), "contract"])
 		assert result.exit_code == 0, result.output
 		assert "ground-truth debt 100%" in result.output
-		assert "these clauses name no command" in result.output
+		assert "no oracle covers" in result.output
+		assert "names no command" in result.output
 
 	def test_an_oracle_too_weak_to_trust_narrows_the_ceiling(self, home: Path) -> None:
 		"""A suggested oracle names no command *and* ranks weak, so the ceiling drops."""
@@ -364,6 +365,21 @@ class TestTheContract:
 		result = RUNNER.invoke(app, ["--home", str(home), "contract"])
 		assert result.exit_code == 0, result.output
 		assert "ceiling" in result.output
+
+	def test_an_uncovered_clause_says_the_ceiling_is_l2(self, home: Path) -> None:
+		"""FR-109, at the surface the operator reads.
+
+		The suggested oracle ranks 3 (a contract test), which on rank alone grants L3. It
+		names no command, so nothing can run it and the cap is what makes the printed
+		ceiling L2 — and the line has to say so, because a number that dropped with no
+		reason given is one the operator cannot act on.
+		"""
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "contract"])
+		assert result.exit_code == 0, result.output
+		assert "weakest oracle rank 3" in result.output
+		assert "ceiling L2" in result.output, "rank 3 alone would print L3"
+		assert "no oracle covers, so the ceiling is L2 (FR-109)" in result.output
 
 
 # --------------------------------------------------------------------------- #

@@ -132,6 +132,55 @@ def test_executable_and_unexecutable_partition_the_contract(
 	assert runnable & intentions == set()
 
 
+def test_debt_counts_a_weak_oracle_even_when_it_runs(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""FR-108's "rank-1-5" half, which the count of unexecutable clauses did not have.
+
+	A rank-6 example test names a command, so the executability measure read it as
+	coverage. FR-103's own table calls it "sample, not coverage", and FR-108's words are
+	"covered by a rank-1-5 oracle" — so a contract covered only by examples is in debt.
+	"""
+	contract = make_contract(
+		("a holds", make_oracle("pytest -k a", oracle_class=OracleClass.EXAMPLE)),
+		("b holds", make_oracle("pytest -k b", oracle_class=OracleClass.GOLDEN)),
+	)
+
+	assert all(c.oracle.is_executable for c in contract.clauses), "both run; neither covers"
+	assert ground_truth_debt(contract) == 1.0
+
+
+def test_debt_is_zero_at_the_rank_five_boundary(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""Rank 5 is the weakest covering class, and the boundary is inclusive."""
+	contract = make_contract(
+		("a holds", make_oracle("pytest -k a", oracle_class=OracleClass.SCHEMA)),
+		("b holds", make_oracle("pytest -k b", oracle_class=OracleClass.METAMORPHIC)),
+	)
+
+	assert ground_truth_debt(contract) == 0.0
+
+
+def test_the_measure_is_the_contracts_own_property(
+	make_contract: MakeContract, make_oracle: MakeOracle
+) -> None:
+	"""One measure in one place: the function and the property cannot drift.
+
+	The debt a report prints and the cap :attr:`Contract.ceiling` applies are the same
+	set, so a change to either that did not reach the other would be a report whose
+	number disagreed with its own ceiling.
+	"""
+	contract = make_contract(
+		("a holds", make_oracle("true")),
+		("b holds", make_oracle()),
+		("c holds", make_oracle("pytest -k c", oracle_class=OracleClass.GOLDEN)),
+	)
+
+	assert ground_truth_debt(contract) == contract.ground_truth_debt
+	assert len(contract.uncovered_clauses) == 2
+
+
 # --------------------------------------------------------------------------- #
 # refusing to pretend
 # --------------------------------------------------------------------------- #

@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from sofact import __version__
 from sofact import api as machine_api
 from sofact._uuid7 import uuid7str
-from sofact.contract import ground_truth_debt, unexecutable_clauses
+from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
@@ -78,6 +78,7 @@ from sofact.views import (
 	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
+	ceiling_for_rank,
 )
 
 app = typer.Typer(
@@ -1965,20 +1966,34 @@ async def _contract(svc: FactoryService, command: str | None) -> None:
 
 	typer.secho(f"\ncontract {built.id} v{built.version}", fg="cyan", bold=True)
 	typer.echo(f"  {len(built.clauses)} clause(s)")
-	typer.echo(f"  weakest oracle rank {built.weakest_oracle_rank} → ceiling {built.ceiling.name}")
+	rank = built.weakest_oracle_rank
+	typer.echo(f"  weakest oracle rank {rank} → ceiling {built.ceiling.name}")
 	debt = ground_truth_debt(built)
 	typer.secho(
 		f"  ground-truth debt {debt:.0%}",
 		fg="green" if debt == 0 else "yellow",
 	)
-	unexecutable = unexecutable_clauses(built)
-	if unexecutable:
-		typer.secho("\n  these clauses name no command, so nothing can run them:", fg="yellow")
-		for clause in unexecutable:
+	uncovered = built.uncovered_clauses
+	if uncovered:
+		if built.ceiling < ceiling_for_rank(rank):
 			typer.secho(
-				f"    [{clause.oracle.oracle_class.value}] {clause.statement}",
-				fg="bright_black",
+				f"\n  {len(uncovered)} clause(s) no oracle covers, so the ceiling is L2 (FR-109)",
+				fg="yellow",
 			)
+		else:
+			typer.secho(
+				f"\n  {len(uncovered)} clause(s) no oracle covers:",
+				fg="yellow",
+			)
+		for clause in uncovered:
+			reason = (
+				"names no command, so nothing can run it"
+				if not clause.oracle.is_executable
+				else f"only a rank-{clause.oracle.rank} {clause.oracle.oracle_class.value} "
+				"oracle, which is a sample rather than coverage"
+			)
+			typer.secho(f"    {clause.statement}", fg="bright_black")
+			typer.secho(f"      {reason}", fg="bright_black")
 
 
 @app.command()

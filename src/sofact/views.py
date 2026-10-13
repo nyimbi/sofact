@@ -268,6 +268,31 @@ ORACLE_RANK: dict[OracleClass, int] = {
 
 STRONG_ORACLE_MAX_RANK = 2
 
+COVERING_ORACLE_MAX_RANK = 5
+"""The weakest oracle class that still *covers* a clause (FR-108).
+
+FR-103's table is why the line is here and not at 7. Ranks 1-5 derive a check from
+something the contract already asserts — an invariant, a state machine, a signature, a
+relation between operations, the system model. Ranks 6 and 7 do not: an example is a
+sample of behaviour and a golden file is a recording of one run, and FR-103's own
+strength column calls them "sample, not coverage" and "detects change, not wrongness".
+A clause covered only by an example is a clause nothing establishes, which is the debt
+§2.3 is about.
+
+Rank 6-7 are also capped at L2 by :func:`ceiling_for_rank`, but that is a *different*
+refusal with a different reach: the rank cap applies to a contract whose weakest clause
+is weak, and this one applies to a clause that is covered by nothing at all.
+"""
+
+UNCOVERED_CLAUSE_CEILING: Final[AutonomyLevel] = AutonomyLevel.L2
+"""The highest autonomy a contract with any uncovered clause may claim (FR-109).
+
+The same number as :data:`MODE_G_CEILING` and a different requirement, so it is a
+different symbol: FR-123 caps a *delivery* because its architecture passed human gates,
+and FR-109 caps a *contract* because a clause in it is unestablished. Collapsing them
+would make a future change to either silently move the other.
+"""
+
 
 def ceiling_for_rank(rank: int) -> AutonomyLevel:
 	"""Highest autonomy a contract may claim, given its weakest oracle rank.
@@ -277,6 +302,10 @@ def ceiling_for_rank(rank: int) -> AutonomyLevel:
 
 	Ranks 1-2 admit L4; ranks 3-4 admit L3; anything weaker caps at L2. L5 is never
 	returned.
+
+	Rank alone, deliberately: this maps a *number* to a level and has no oracle to
+	consult, so FR-109's executability cap is applied where the oracle is known —
+	:attr:`Contract.ceiling` and :attr:`OracleDeclaration.covers`.
 	"""
 	assert 1 <= rank <= len(ORACLE_RANK), f"rank out of range: {rank}"
 	if rank <= STRONG_ORACLE_MAX_RANK:
@@ -850,6 +879,24 @@ class OracleDeclaration(View):
 		"""
 		return self.command_hint is not None
 
+	@property
+	def covers(self) -> bool:
+		"""Whether this oracle *covers* its clause: strong enough and runnable (FR-108).
+
+		Both conjuncts are required, and each was missing from one consumer before this
+		existed. :attr:`Contract.ceiling` read the rank alone, so a rank-1 property
+		*intention* — prose with no command — granted L4 to a contract nothing could run.
+		:func:`~sofact.contract.ground_truth_debt` read executability alone, so a rank-6
+		example test with a command reported zero debt on a clause FR-103's own table
+		calls "sample, not coverage".
+
+		Neither half suffices. A weak oracle that runs measures the wrong thing; a strong
+		oracle that does not run measures nothing. §2.3's failure is a contract that
+		*looks* verified, and it takes both conjuncts to look that way, so it takes both
+		to refuse it.
+		"""
+		return self.is_executable and self.rank <= COVERING_ORACLE_MAX_RANK
+
 
 class Clause(View):
 	"""A falsifiable unit of the contract.
@@ -912,9 +959,39 @@ class Contract(View):
 		return max(c.oracle.rank for c in self.clauses)
 
 	@property
+	def uncovered_clauses(self) -> tuple[Clause, ...]:
+		"""Clauses no oracle covers (FR-108): not runnable, or too weak to establish.
+
+		The complement of :attr:`OracleDeclaration.covers` over the clause set. This is
+		the set FR-109's L2 cap is about and the set ground-truth debt is the size of,
+		expressed once here so the cap and the debt cannot come to mean different things.
+		"""
+		return tuple(c for c in self.clauses if not c.oracle.covers)
+
+	@property
+	def ground_truth_debt(self) -> float:
+		"""Fraction of clauses no oracle covers (FR-108, §2.3).
+
+		``0.0`` is the only good value. Anything above it means the contract's autonomy
+		ceiling is a claim about clauses that were never established — which is why
+		:attr:`ceiling` reads this and caps at L2 when it is non-zero.
+		"""
+		return len(self.uncovered_clauses) / len(self.clauses)
+
+	@property
 	def ceiling(self) -> AutonomyLevel:
-		"""Autonomy this contract may claim, per :func:`ceiling_for_rank`."""
-		return ceiling_for_rank(self.weakest_oracle_rank)
+		"""Autonomy this contract may claim, per :func:`ceiling_for_rank`.
+
+		Capped at L2 when any clause is uncovered (FR-109). The rank half and the
+		coverage half are different failures: a weak-but-runnable oracle *measures*
+		something and bounds the ceiling by what it measures, whereas an uncovered clause
+		measures nothing, so a contract containing one cannot be reported above the level
+		at which a human still checks the result.
+		"""
+		level = ceiling_for_rank(self.weakest_oracle_rank)
+		if self.uncovered_clauses:
+			return AutonomyLevel(min(level, UNCOVERED_CLAUSE_CEILING))
+		return level
 
 	@classmethod
 	def from_draft(
