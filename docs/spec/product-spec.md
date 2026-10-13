@@ -1899,7 +1899,8 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `sofact` (the interrogation itself, which is P0), `research` (P1 dispatched: FR-167),
 `sources` (P1's ledger, read from the run's artefacts: FR-069–FR-075, ADR-0035),
 `classify` (P1's per-clause verdicts: FR-068, ADR-0037),
-`specify`, `decompose`, `integrate` (P2, P3 and P7: ADR-0031, ADR-0038),
+`specify`, `decompose`, `integrate` (P2, P3 and P7: ADR-0031, ADR-0038; the proposal's
+per-module Definition of Done is FR-093 — ADR-0042),
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
 `dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `repair`, `run`,
 `envelope` (§1.3: FR-057, NFR-025 — ADR-0039), `deliver` and `deploy` (§11's report and

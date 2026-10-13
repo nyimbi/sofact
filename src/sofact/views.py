@@ -792,6 +792,19 @@ class Module(View):
 	"there was nothing to diff".
 	"""
 
+	completion_criteria: tuple[NonEmptyStr, ...] = ()
+	"""FR-093's Definition of Done, as the conditions that must hold for this module.
+
+	Derived from the *clause's oracle class* rather than authored per module, and that is
+	the point: the oracle class is the clause's shape of proof, so a property clause is
+	done when property tests pass and a schema clause is done when interface conformance
+	passes. An operator-written DoD would be a second statement of what the oracle already
+	says, and the two would drift.
+
+	Empty is a real state and is refused at the gate, not by the type — see
+	:func:`sofact.decomposition.completion_criteria` for why the refusal lives there.
+	"""
+
 	@model_validator(mode="after")
 	def _consistent(self) -> Self:
 		if not self.clause_ids:

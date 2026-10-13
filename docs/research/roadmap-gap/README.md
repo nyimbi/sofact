@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **982 passed, 0 failed**. The table below was written
+`tests/ci` at the last refresh: **989 passed, 0 failed**. The table below was written
 at 725; the verdicts are the part that matters and the ones closed since carry their
 date.
 
@@ -71,7 +71,7 @@ date.
 | FR-090 declared interface and dependencies | **Implemented** | `Module.interface` / `depends_on` (`views.py:491`); `test_a_dependency_follows_the_oracle_the_contract_already_carries` (`test_decomposition.py:121`). |
 | FR-091 minimise interface surface, report the count | **Partly** | `interface_count` (`views.py:641`) is **reported**, not minimised — `decomposition.py:473` says so explicitly. No threshold, no alternative proposal. |
 | FR-092 declared build order | **Implemented** | `build_order_exists` check (`decomposition.py:413`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
-| FR-093 per-module completion criteria | **Not built** | `completion_criteria` appears nowhere in `src/` or `tests/`. |
+| FR-093 per-module completion criteria | **Implemented** | `completion_criteria(clause)` (`decomposition.py`), derived from `planner.exit_evidence_for` — the same conditions P5's session is handed, so the module's DoD and the session's exit evidence are one statement (ADR-0042). `propose` populates `Module.completion_criteria`; the gate check `every_module_has_completion_criteria` refuses an empty set ("not eligible to be built"); the criteria are in `decomposition_hash` and printed by `sofact decompose`. 6 tests + 2 CLI tests; canaried twice. |
 | FR-094 revisable without invalidating the whole | **Implemented** | Revisions + `decomposition_hash`; `test_approving_a_superseded_revision_is_refused` (`test_decomposition.py:467`). The **rollback verb** the capability map recorded as missing now exists (2026-10-12): `FactoryService.cut` / `sofact rollback --to N` records a `cut.recorded` row and the fold reads through the target (ADR-0034); `TestRollback` (`test_service.py`), `test_a_cut_hides_the_entries_after_its_target` (`test_state.py`). |
 | FR-095 P5 given the contract and only the contract | **Partly** | Goals are compiled from the contract (`compile_plan`, `planner.py:576`) and pinned by hash; the *envelope* the producer may see is not otherwise constrained or checked. |
 | FR-096 contracts frozen before P5, immutable during | **Implemented** | `compile_plan` pins `contract_hash`; `check_integrity` (`planner.py:712`); `test_an_undisturbed_plan_reports_intact` (`test_service.py:1192`). |
@@ -160,10 +160,10 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 74 |
+| Implemented | 75 |
 | Partly | 26 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 19 |
+| Not built | 18 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so

@@ -1644,6 +1644,40 @@ class TestTheIntegrateVerb:
 
 
 # --------------------------------------------------------------------------- #
+# FR-093: the module's Definition of Done reaches the operator's terminal
+# --------------------------------------------------------------------------- #
+
+
+class TestTheModuleDefinitionOfDone:
+	def _proposal(self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Result:
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		return _proposed(home)
+
+	def test_the_proposal_prints_what_done_means_for_each_module(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-093's criteria are the precondition for P5, so the operator has to see them
+		at the gate they are approving — a Definition of Done that only exists in a JSON
+		field is not something anyone can check before the build starts."""
+		result = self._proposal(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "done when:" in result.output
+		assert "the covered clause's oracle passes" in result.output
+
+	def test_the_gate_reports_the_criteria_check(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The check is on the gate the operator reads, not only in the log."""
+		result = self._proposal(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "every_module_has_completion_criteria" in result.output
+		assert "Definition of Done" in result.output
+
+
+# --------------------------------------------------------------------------- #
 # §1.3's envelope, through the configuration seam (FR-057, NFR-025)
 # --------------------------------------------------------------------------- #
 

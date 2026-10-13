@@ -28,6 +28,7 @@ from sofact.decomposition import (
 	gate,
 	propose,
 )
+from sofact.planner import compile_plan
 from sofact.views import (
 	MODULE_CLASS_CEILING,
 	AutonomyLevel,
@@ -111,6 +112,65 @@ class TestTheProposal:
 
 		assert [m.name for m in first.modules] == [m.name for m in second.modules]
 		assert [m.module_class for m in first.modules] == [m.module_class for m in second.modules]
+
+	def test_every_module_carries_a_definition_of_done(self, make_contract: MakeContract) -> None:
+		"""FR-093: each module states what "done" means, and the gate refuses one that does not."""
+		contract = make_contract(
+			("the schema defines the reminder table", oracle(OracleClass.SCHEMA)),
+			("the total is summed", oracle(OracleClass.CONTRACT)),
+			("the balance is never negative", oracle(OracleClass.PROPERTY)),
+			("the order moves pending to shipped", oracle(OracleClass.STATE_MACHINE)),
+		)
+
+		proposal = propose(contract)
+
+		assert all(m.completion_criteria for m in proposal.modules)
+		assert gate(proposal, contract).failed == ()
+
+	def test_the_criteria_are_the_clause_oracles_shape_of_proof(
+		self, make_contract: MakeContract
+	) -> None:
+		"""Derived from the oracle class, not authored — so two statements cannot drift.
+
+		The four classes below compile to four different step kinds, and the criteria must
+		follow the step rather than the module's name or its class. If this ever passes
+		with one criterion repeated across all four, the derivation has been replaced by a
+		constant.
+		"""
+		contract = make_contract(
+			("the schema defines the reminder table", oracle(OracleClass.SCHEMA)),
+			("the total is summed", oracle(OracleClass.CONTRACT)),
+			("the balance is never negative", oracle(OracleClass.PROPERTY)),
+			("the order moves pending to shipped", oracle(OracleClass.STATE_MACHINE)),
+		)
+
+		criteria = [m.completion_criteria for m in propose(contract).modules]
+
+		assert len({c for group in criteria for c in group}) == len(criteria), (
+			"each oracle class must yield its own condition; identical sets mean the "
+			"derivation collapsed to a constant"
+		)
+		assert "interface conformance passes for every declared stub" in criteria[0]
+		assert "property tests for this clause pass" in " ".join(criteria[2])
+
+	def test_the_criteria_match_what_the_plan_asks_of_the_session(
+		self, make_contract: MakeContract
+	) -> None:
+		"""FR-093 says the criteria are "the precondition for P5", so they are one statement.
+
+		Two statements of one condition drift, and the drift is invisible because both read
+		as plausible prose. This pins the two ends together: a module's Definition of Done
+		is the exit evidence of the session its clause compiles to.
+		"""
+		contract = make_contract(
+			("the total is summed", oracle(OracleClass.CONTRACT)),
+			("the balance is never negative", oracle(OracleClass.PROPERTY)),
+		)
+		plan = compile_plan(contract)
+
+		for module in propose(contract).modules:
+			step = next(s for s in plan.steps if set(s.clause_ids) & set(module.clause_ids))
+			assert module.completion_criteria == step.exit_evidence
 
 	def test_the_proposal_never_contains_a_cycle(self, make_contract: MakeContract) -> None:
 		"""The proposer must not emit a graph its own gate would refuse (FR-089)."""
@@ -324,9 +384,29 @@ class TestTheGateRefuses:
 			"every_module_traces_to_a_requirement",
 			"every_requirement_traces_to_a_module",
 			"every_module_cites_a_real_clause",
+			"every_module_has_completion_criteria",
 			"interface_count_reported",
 			"within_delivery_envelope",
 		}
+
+	def test_a_module_with_no_completion_criteria_fails_the_gate(
+		self, make_contract: MakeContract
+	) -> None:
+		"""FR-093: "not eligible to be built" is a refusal, not a remark.
+
+		``propose`` cannot produce this — the derivation is total over the oracle classes
+		— so the gate is checked against a module built by hand, which is the only way one
+		arrives empty. A gate that trusted the proposer would be a gate that fails open
+		the moment a second proposer exists.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+		proposal = decomposition_of(module_of("api", (contract.clauses[0].id,)), contract=contract)
+
+		result = gate(proposal, contract)
+
+		failure = next(c for c in result.failed if c.name == "every_module_has_completion_criteria")
+		assert "api" in failure.detail, "the refusal must name the module, or it is not actionable"
+		assert not result.is_satisfied
 
 
 # --------------------------------------------------------------------------- #
@@ -407,6 +487,28 @@ class TestTheHashNamesTheArtefact:
 		)
 
 		assert decomposition_hash(flattened) != decomposition_hash(proposal)
+
+	def test_the_hash_moves_when_a_modules_criteria_change(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The criteria are what P5 is handed, so an approval has to cover them (FR-093).
+
+		A revision that changed a module's Definition of Done without touching its
+		interface would otherwise hash identically, and the operator's approval would
+		describe a module nobody was told to build.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+		proposal = propose(contract)
+		(module,) = proposal.modules
+		revised = proposal.model_copy(
+			update={
+				"modules": (
+					module.model_copy(update={"completion_criteria": ("the api returns 200",)}),
+				)
+			}
+		)
+
+		assert decomposition_hash(revised) != decomposition_hash(proposal)
 
 
 # --------------------------------------------------------------------------- #

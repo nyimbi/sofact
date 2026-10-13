@@ -68,6 +68,7 @@ __all__ = [
 	"GOAL_PLAN_TIERS",
 	"check_integrity",
 	"compile_plan",
+	"exit_evidence_for",
 	"refutation_diagnosis",
 	"repair_goal",
 	"revised_plan",
@@ -202,6 +203,23 @@ than a list, even though a single module's plan is usually a chain.
 def step_kind_for(clause: Clause) -> PlanStepKind:
 	"""The session kind that would discharge ``clause``."""
 	return _STEP_FOR_ORACLE[clause.oracle.oracle_class]
+
+
+def exit_evidence_for(clause: Clause) -> tuple[str, ...]:
+	"""What must be true for the session that discharges ``clause`` to be done (FR-093).
+
+	The same conditions :data:`_EXIT_EVIDENCE` gives the session, asked one level up:
+	FR-093 requires each *module* to carry its Definition of Done, and a module is
+	discharged by the sessions its clauses compile to. Deriving it here rather than
+	restating it in the decomposition is the point — two statements of one condition
+	drift, and the drift would be invisible because both would read as plausible prose.
+
+	The return is the step kind's conditions, not the clause's oracle's. The two agree
+	today for every oracle class, and when they do not the *step* is authoritative: the
+	oracle says how the clause is checked and the step says what the session is asked to
+	leave behind, and FR-093 is a condition on the work rather than on the check.
+	"""
+	return _EXIT_EVIDENCE[step_kind_for(clause)]
 
 
 def _oracle_lines(clauses: Sequence[Clause]) -> tuple[str, ...]:

@@ -32,6 +32,7 @@ from typing import Final
 
 from sofact._uuid7 import uuid7str
 from sofact.envelope import measure
+from sofact.planner import exit_evidence_for
 from sofact.views import (
 	Clause,
 	Contract,
@@ -49,6 +50,7 @@ from sofact.views import (
 __all__ = [
 	"CLASS_MARKERS",
 	"classify",
+	"completion_criteria",
 	"decomposition_hash",
 	"gate",
 	"propose",
@@ -281,6 +283,32 @@ def _interface(clause: Clause) -> str:
 	return f"{clause.statement} (oracle: {clause.oracle.oracle_class.value})"
 
 
+def completion_criteria(clause: Clause) -> tuple[str, ...]:
+	"""FR-093's Definition of Done for the module a clause becomes.
+
+	Derived, never authored. §7.3's module contract carries a ``completion_criteria``
+	field an operator may write, and an authored one would be a second statement of what
+	the clause's oracle already says: the oracle class *is* the clause's shape of proof,
+	so a property clause is done when property tests pass and a schema clause is done
+	when interface conformance passes. Two statements of one condition drift, and the
+	drift is invisible because both read as plausible prose.
+
+	The derivation is :func:`sofact.planner.exit_evidence_for` — the same conditions P5's
+	session is asked to leave behind. That is not a coincidence to be tolerated: FR-093
+	says completion criteria are "the precondition for P5", so the module's DoD and the
+	session's exit evidence are one statement, and this function is the place that says
+	so rather than a place that copies it.
+
+	Never empty. ``_STEP_FOR_ORACLE`` is total over :class:`~sofact.views.OracleClass`
+	and every step kind in :data:`_EXIT_EVIDENCE` carries at least one condition, so a
+	clause with a declared oracle always yields criteria — which is why FR-093's refusal
+	("not eligible to be built") can live in :func:`gate` as a check over the modules
+	rather than as a branch here. A module built by hand, outside :func:`propose`, is the
+	one that can arrive empty, and that is exactly what the gate check is for.
+	"""
+	return exit_evidence_for(clause)
+
+
 def propose(contract: Contract) -> Decomposition:
 	"""Propose a decomposition of ``contract`` into modules, deterministically (FR-087).
 
@@ -306,6 +334,7 @@ def propose(contract: Contract) -> Decomposition:
 			module_class=classify(clause.statement),
 			interface=_interface(clause),
 			clause_ids=(clause.id,),
+			completion_criteria=completion_criteria(clause),
 		)
 
 	# A clause whose oracle is SCHEMA or PROPERTY declares a shape or an invariant, and a
@@ -372,6 +401,13 @@ def decomposition_hash(decomposition: Decomposition) -> str:
 				# are excluded because they are minted per proposal, and the surface is
 				# included because it is a decision.
 				"surface": [member.model_dump(mode="json") for member in m.surface],
+				# FR-093's Definition of Done is what P5 is handed, so it is part of what
+				# the operator approved. Derived from the clause today and therefore stable
+				# across two proposals — but FR-094 makes revisions normal, and a revision
+				# could change a module's criteria without touching its interface. An
+				# approval that did not cover the criteria would describe a module P5 was
+				# never told to build.
+				"completion_criteria": list(m.completion_criteria),
 				"clauses": list(m.clause_ids),
 				"depends_on": sorted(m.depends_on),
 			}
@@ -480,6 +516,34 @@ def gate(
 			detail="no module cites a clause outside the contract"
 			if not strangers
 			else f"dangling: {', '.join(strangers)}",
+		)
+	)
+
+	# FR-093: a module with no completion criteria is not eligible to be built. This is a
+	# refusal and not a warning, because the criteria are what P5 is handed: a session
+	# dispatched against a module whose DoD is empty has been told to build something and
+	# not told what "done" means, which is the failure FR-093 exists to name.
+	#
+	# `propose` cannot produce such a module — `completion_criteria` is total over the
+	# oracle classes and every step kind carries a condition — so a failure here means a
+	# decomposition built by hand or by a future proposer that dropped the field. That is
+	# the case the check is for: the proposer being correct today is not a reason for the
+	# gate to assume it.
+	undefined = tuple(m.name for m in decomposition.modules if not m.completion_criteria)
+	checks.append(
+		GateCheck(
+			name="every_module_has_completion_criteria",
+			passed=not undefined,
+			detail=(
+				f"all {len(decomposition.modules)} module(s) carry a Definition of Done "
+				f"({len({c for m in decomposition.modules for c in m.completion_criteria})} "
+				"distinct condition(s) across them), each derived from its clause's oracle "
+				"class rather than authored (FR-093)"
+				if not undefined
+				else f"{len(undefined)} module(s) with no completion criteria, so nothing "
+				f"states what done means for them: {', '.join(undefined)}. A module without "
+				"completion criteria is not eligible to be built (FR-093)"
+			),
 		)
 	)
 

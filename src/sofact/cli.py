@@ -1002,6 +1002,8 @@ def _print_decomposition(proposal: Decomposition, result: DecompositionGate) -> 
 	for module in order:
 		typer.secho(f"    {module.name} [{module.module_class.value}]", fg="cyan")
 		typer.echo(f"        {module.interface}")
+		for criterion in module.completion_criteria:
+			typer.secho(f"        done when: {criterion}", fg="bright_black")
 		if module.depends_on:
 			names = ", ".join(
 				d.name for d in (proposal.module(i) for i in module.depends_on) if d is not None
