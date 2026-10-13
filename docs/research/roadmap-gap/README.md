@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1210 passed, 0 failed** (2026-10-13, after ADR-0053).
+`tests/ci` at the last refresh: **1279 passed, 0 failed** (2026-10-13, after ADR-0054).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -29,7 +29,7 @@ closed since carry their date.
 | FR-008–011 mutation score per module, thresholds, trend | **Not built** | No mutation-scoring code. Oracle *rank* is a declaration, not a measurement. |
 | FR-012–015 adversarial audit, sampling, exploit metric | **Not built** | No code. The **oracle-side instrument** FR-107 asks for and FR-012's loop would point at is built (ADR-0053); the loop itself — hacker/fixer roles, 1-in-N sampling at or below L3, 100% above, the exploit-discovery-rate metric trending to zero — is not. |
 | FR-016–020 isolation | **Partly** | No enforced boundary: producer isolation is **asserted in goal text only** (`planner.py:127`, FR-059), and ADR-0005 refuses the container layer FR-019 names. What *is* measured now is the narrower claim a spec makes about its own environment: the `store_isolated` probe row (`harness.py`, `_probe_store_isolated`) runs the same goal twice with `HOME` relocated and the spec's containment variables applied in one arm and withheld in the other, so "an isolation variable is not a boundary" is decided rather than assumed. Measured 2026-10-12 for `claude`: zero files under the isolated arm's `HOME`, three under the control's. |
-| FR-021–023 escape oracle, automatic downgrade | **Not built** | No code. |
+| FR-021–023 escape oracle, automatic downgrade | **Implemented** (2026-10-13, ADR-0054) | `escape.py` — `measure_escapes`, `lanes_of`, `load_escape_budget`, `ceilings_from` — plus `EscapeEvent`/`EscapeBudget`/`EscapeOverride`/`LaneEscape`/`EscapeReport` (`views.py`), `record_escape`/`record_escape_override`/`escape_report` (`service.py`), `sofact escape` and `sofact escapes` (`cli.py`), the `escapes` machine operation (`api.py`), and an `## Escapes` section in `DELIVERY.md`. **The denominator** is distinct deployed report ids and the **numerator** distinct `defect` values; `deployed_reports` is a field, not a sum of the per-lane rows (one report spanning four lanes is one change). FR-021's band is **derived** from `contract.weakest_oracle_rank`, never stored. FR-023's reduction is one level, non-cumulative, clamped at L0, and **unset is not zero** (no declared budget ⇒ `unbudgeted`, `over_budget=None`). The over-budget check **reports** (`escape_ceiling_applied`, `passed=True`) rather than failing, because a failing check would refuse the very deploy that dilutes the rate back to budget and make FR-023's automatic recovery unreachable — the reduction still binds through `lane_ceilings` into `module_autonomy`. 42 + 14 + 14 tests. |
 | FR-024–035 routing function, blast bounds, ladder, per-deployment ceilings | **Partly** (2026-10-13, ADR-0045, ADR-0046) | The **ceilings** half is built: `DeploymentTopology` with its isolation and signed modifier (`views.py`), the per-module-class refusal (FR-031), and the T1 default (FR-042) — ADR-0045. The **blast bound** half is now declared: `ModuleBudget` (`max_files`, `max_loc`, `reasoning_class`) on every `Module`, checked at P7 as `module_budget` (FR-026, FR-097) — ADR-0046. Still absent: the **routing function** that reads a declared `ReasoningClass` to pick a lane (the class is declared and nothing routes on it), the autonomy **ladder** (FR-024's θ function), and FR-027's T4 blast radius, which ADR-0045 named as the thing T4 unlocks and which this bound does not supply — the budget is declared by the proposer, not derived from a measured radius. |
 | FR-036 per-language mutation/property tooling | **Not built** | Cited once in a spec open-decision; no code. |
 | FR-038 verifier/executor import direction | **Implemented** | `test_verifier_cannot_reach_the_executor` (`test_verification.py:72`) scans this file's imports. |
@@ -95,7 +95,7 @@ closed since carry their date.
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
 | FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
 | FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
-| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040, ADR-0048) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (108 tests), `test_api.py` (33 tests). **FR-120's factory surface is built** (2026-10-13, ADR-0048): `sofact.api` publishes nine read-only operations behind one closed `MachineEnvelope`, `sofact api <operation>`/`--list` is the verb, and the four §3.3 human gates are refused by name with the human verb to use. **The delivered-system half is not built and is recorded as a producer obligation** — no oracle in O1-O8 observes whether an artefact is machine-usable, so the report names it in a `machine_surface_not_verified` check and `DELIVERY_REQUIREMENTS` keeps it in the list rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes — **and the factory now writes those two** (2026-10-13, ADR-0044): `sofact.writing` renders `DELIVERY.md` and `RUNBOOK.md` deterministically from the report, `render_delivery` computes the delivery as a fixed point (render, write, render until a render agrees with disk), and `sofact deliver` requires `--root`. Before this, `sofact deliver` could not succeed on a fresh project: the factory reported its own output as missing. |
+| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040, ADR-0048) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (122 tests), `test_api.py` (33 tests). **FR-120's factory surface is built** (2026-10-13, ADR-0048): `sofact.api` publishes ten read-only operations behind one closed `MachineEnvelope`, `sofact api <operation>`/`--list` is the verb, and the four §3.3 human gates are refused by name with the human verb to use. **The delivered-system half is not built and is recorded as a producer obligation** — no oracle in O1-O8 observes whether an artefact is machine-usable, so the report names it in a `machine_surface_not_verified` check and `DELIVERY_REQUIREMENTS` keeps it in the list rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes — **and the factory now writes those two** (2026-10-13, ADR-0044): `sofact.writing` renders `DELIVERY.md` and `RUNBOOK.md` deterministically from the report, `render_delivery` computes the delivery as a fixed point (render, write, render until a render agrees with disk), and `sofact deliver` requires `--root`. Before this, `sofact deliver` could not succeed on a fresh project: the factory reported its own output as missing. |
 | FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040/0041) | `delivery.module_autonomy` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
 | FR-123 Mode G delivery caps at L2 and must be reported | **Implemented** (2026-10-13, ADR-0041) | `MODE_G_CEILING` (`views.py`) is applied **last and unconditionally** in `delivery.ceiling`, including when no decomposition exists — a cap that failed open on missing input would be no cap. The report carries **two** numbers, `autonomy` (capped) and `module_autonomy` (not), because FR-123 asks for the *distinction*: one number cannot state "modules at L4 internally, delivery at L2". `autonomy_capped_for_mode_g` is a gate check and `sofact deliver` prints both lines. Canaried by removing the cap: `test_a_delivery_is_never_above_l2` and `test_the_cap_applies_with_no_decomposition` both fail. |
 | FR-124 per-deployment topology ceilings | **Implemented** (2026-10-13, ADR-0045) | `DeploymentTopology`/`TOPOLOGY_ISOLATION`/`TOPOLOGY_MODIFIER`/`topology_ceiling`/`topology_refusal`/`HIGHEST_GRANTABLE` (`views.py`), `topology_statement`/`refused_by_topology` plus the `topology_ceiling_applied` and `topology_refuses_l4_at_a_degraded_deployment` gate checks (`delivery.py`), `SOFACT_TOPOLOGY`/`--override-topology` (`cli.py`), the two fields on `DeliveryReport` and `VerificationReport`, and the deployment lines in `DELIVERY.md`/`RUNBOOK.md` (`writing.py`). §5.4's modifier is a delta applied to the **modules'** number and not to the delivery's (FR-123's L2 cap is already at or below every topology's). FR-031's refusal is per module class and is a **failed machine check**, so `approve_deploy` refuses it with no second enforcement path; the override is a **name**, not a flag. T4 is reported as baseline with its unlock named rather than applied, because the blast bound it unlocks is one SoFact does not hold (FR-027). `TestTheTopologyIsATypeNotAComment`, `TestTheTopologyRefusesRatherThanDowngrades`, `TestTheRefusalReachesTheGate`, `TestTheReportStatesWhereItRan` (`test_delivery.py`), `TestTheTopologySeam` (`test_cli.py`, 5 tests). **Still open**: FR-040's "first-class configuration input" is satisfied for the ceiling only — nothing reads the topology to change packaging, egress, or the container boundary FR-019 depends on (D9). |
@@ -131,7 +131,7 @@ closed since carry their date.
 | FR-154 plugin composition frozen, pinned | **Partly** | `--no-extensions` on the build spec (`harness.py:491,552`); `test_claude_notes_record_the_unconfined_child_and_the_egress`. No hash-verified pin or licence audit. |
 | FR-155 third-party plugin deletion test | **Not built** | The test is applied in prose (§8.7 table); no code, no gate. |
 | FR-156 capability by configuration not code | **Implemented** | `load_specs` (`harness.py:406`), `--tools`/`SOFACT_TOOLS`; `test_the_readme_example_loads_through_the_real_loader` (`test_cli.py:717`). |
-| FR-157 deployment-scoped autonomy target | **Not built** | No deployment scope type; the θ gate (FR-024–035) is absent so nothing can be scoped. |
+| FR-157 deployment-scoped autonomy target | **Partly** (2026-10-13, ADR-0054) | Its stated input now exists: FR-157's requirement is "L2–L3 with escape-rate tracking (FR-107)", and both halves are built — FR-107's audit (ADR-0053) and FR-022's rate (ADR-0054). What is still absent is the **target** itself: no deployment scope type carries "this deployment targets L3", so nothing compares a measured rate against a declared ambition. The θ gate (FR-024–035) is still absent, so the target has nothing to be scoped *by*. |
 | FR-158 evolvability debt reported as first-class, Mode M L1 | **Implemented** | `EVOLVABILITY_DEBT = 1.0` and `MODE_M_CEILING = L1` (`views.py:322`, `views.py:301`), the number surfaced as `DeliveryReport.evolvability_debt` beside FR-108's measured debt; `MAINTAINABILITY_NOT_VERIFIED` (`views.py:337`) is a `ClassVar` interpolating it, so the sentence and the number cannot drift; `MaintenanceLane.ceiling` refuses a lane above the cap and `delivery.handover` clamps §13's L4 lanes to it; the `maintainability_not_verified` check reports both ceilings as two numbers (FR-158(b)); both renderers and `sofact deliver` state it. 12 tests (`test_delivery.py::TestMaintainabilityIsNotVerified`). |
 | FR-159 differential change-cost oracle | **Not built** | ADR-0011 records it as "specified and **unbuilt**". |
 | FR-160 gate-cost measurement | **Implemented** | `GateCost` (`views.py`) carries the pair FR-160 names — `human_minutes` and `rework_fraction` — and `FactoryService.record_gate_cost` refuses a cost for a gate whose phase is not complete, because the approval is the evidence a human was there. `ProjectState.gate_cost` reads the latest per gate so `total_human_minutes` cannot double-count a re-measure, and `None` means unmeasured rather than free. `envelope.measure(human_minutes=...)` now measures §1.3's `HUMAN_MINUTES` (one fewer unmeasured dimension), the pair travels into `DeliveryReport.gate_costs` with a mean `rework_fraction`, and the `gate_cost_reported` check reports without failing on an unmeasured project. `sofact gate --cost P2:90:0.25` records one; `sofact deliver` prints the pair under its own heading (ADR-0043). 4 + 4 + 6 tests; canaried three times. |
@@ -145,12 +145,22 @@ closed since carry their date.
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the P8 delivery unit, by reading
-the verdict cell of every row with a script rather than by arithmetic on the previous
-snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
-67/26/0/26, then 69/25/0/25, then 71/25/0/23, then 72/25/0/22) did not match the rows
-they claimed to count. The script now reads the cell rather than grepping the line,
-because a row whose *evidence* names another verdict would otherwise be counted twice.
+Recounted from the table above on 2026-10-13 after the FR-021-023 escape unit, by
+reading the verdict cell of every row with a script rather than by arithmetic on the
+previous snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
+67/26/0/26, then 69/25/0/25, then 71/25/0/23, then 72/25/0/22, then 76/26/0/17) did not
+match the rows they claimed to count. The script reads the cell rather than grepping the
+line, because a row whose *evidence* names another verdict would otherwise be counted
+twice; it classifies on the cell's **leading** token, so the rows whose verdict carries a
+date or a qualification still land in the right bucket.
+
+**The previous snapshot was itself stale, and the recount found it.** Running the script
+against `HEAD` gives 85/25/0/9 where the file recorded 76/26/0/17 — nine rows had been
+closed by the ADR-0035..0053 units without the count being moved, which is the same
+class of defect this audit exists to find in other people's documents. This change moves
+exactly two rows (FR-021-023 Not built → Implemented, FR-157 Not built → Partly), so
+85/25/0/9 becomes 86/26/0/7; the difference from the recorded baseline is the correction,
+not the work.
 
 The `Implemented` count includes FR-152's row, whose cell reads
 `**Implemented (as a documented refusal)**` — the one verdict spelled with a
@@ -160,10 +170,10 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 76 |
+| Implemented | 86 |
 | Partly | 26 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 17 |
+| Not built | 7 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -260,7 +270,7 @@ bound) is **partly** (per-step only).
    the operator — the artefact check is scoped to the two the factory owes, because a
    check that can never pass is one an operator learns to bypass — and **FR-120's
    machine-usable API surface** was unbuilt; **the factory's own surface is now built**
-   (2026-10-13, ADR-0048) — `sofact api <operation>` answers nine read-only operations
+   (2026-10-13, ADR-0048) — `sofact api <operation>` answers ten read-only operations
    through one closed envelope and refuses the four human gates by name — while the
    *delivered* system's surface stays a producer obligation no oracle observes, which the
    report now names in a `machine_surface_not_verified` check and `DELIVERY_REQUIREMENTS`

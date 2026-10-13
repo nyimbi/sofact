@@ -2379,3 +2379,320 @@ class TestTheGateCostVerb:
 		assert "specification: 90 human-minute(s), 25% of the slice" in again.output
 		assert "total 90 human-minute(s)" in again.output
 		assert "mean rework fraction 0.250" in again.output
+
+
+# --------------------------------------------------------------------------- #
+# FR-021-023 — the escape oracle at the operator's surface
+# --------------------------------------------------------------------------- #
+
+
+def _deployed(
+	home: Path,
+	tmp_path: Path,
+	monkeypatch: pytest.MonkeyPatch,
+	*,
+	budget: str | None = None,
+) -> str:
+	"""Drive the real CLI to a *deployed* delivery. Returns the report id.
+
+	``budget`` writes a real ``SOFACT_ESCAPE_BUDGET`` file and points the environment at
+	it, because the seam is the thing under test: a test that injected the budgets in
+	Python would prove the CLI reads a variable nobody can set.
+	"""
+	delivered = _delivered(home, tmp_path, monkeypatch)
+	assert delivered.exit_code == 0, delivered.output
+	report_id = delivered.output.split("delivery report ")[1].split("\n")[0].strip()
+	# Deploying is a separate verb (§1.5 makes deploy never automatic), so the helper
+	# drives it rather than assuming `deliver` released anything.
+	approved = RUNNER.invoke(
+		app, ["--home", str(home), "deploy", "--approve", report_id, "--by", "operator"]
+	)
+	assert approved.exit_code == 0, approved.output
+	if budget is not None:
+		path = tmp_path / "budget.json"
+		path.write_text(budget)
+		monkeypatch.setenv("SOFACT_ESCAPE_BUDGET", str(path))
+	return report_id
+
+
+class TestTheEscapeVerb:
+	def test_an_escape_with_nothing_deployed_says_so(self, home: Path) -> None:
+		"""A precondition with a sentence rather than a traceback, and a non-zero exit so a
+		script can gate on it."""
+		conversation(home)
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G4",
+				"--kind",
+				"revert",
+				"--defect",
+				"it broke",
+			],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "nothing has been deployed" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_escape_is_recorded_against_the_latest_deploy(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		report_id = _deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G4",
+				"--kind",
+				"revert",
+				"--defect",
+				"the total was wrong",
+				"--by",
+				"operator",
+			],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "escape recorded" in result.output
+		assert f"against report {report_id}" in result.output
+		assert "revert in G4: the total was wrong" in result.output
+
+	def test_a_lane_the_deployment_never_exercised_is_refused_with_a_sentence(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The refusal has to reach the terminal as a message, and exit non-zero: this is
+		the API's "hard to get wrong" at the surface an operator actually uses."""
+		_deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G1",
+				"--kind",
+				"revert",
+				"--defect",
+				"it broke",
+			],
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "cannot record that escape" in result.output
+		assert "exercises no G1 module" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_unknown_kind_is_a_message_not_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``--kind`` is FR-021's own three words, so a fourth is a spelling mistake rather
+		than a value, and a thin CLI's characteristic failure is a traceback here."""
+		_deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G4",
+				"--kind",
+				"catastrophe",
+				"--defect",
+				"it broke",
+			],
+		)
+
+		assert result.exit_code != 0, result.output
+		assert "Traceback" not in result.output or "catastrophe" in result.output
+
+
+class TestTheEscapesVerb:
+	def test_no_deployment_claims_nothing_rather_than_reporting_clean(self, home: Path) -> None:
+		"""The vacuous pass at the operator's surface: a screen showing "0 escapes" over no
+		deployment would report the absence of a measurement as a clean bill of health."""
+		conversation(home)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 0, result.output
+		assert "FR-022 escape oracle" in result.output
+		assert "no change has been deployed" in result.output
+		assert "not implemented: FR-021, FR-022, FR-023" in result.output
+
+	def test_the_rate_and_the_budget_are_printed_per_lane(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		_deployed(home, tmp_path, monkeypatch, budget='{"G4": {"maximum_rate": 0.5}}')
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 0, result.output
+		assert "G4: 0 escape(s) / 1 deployment(s) = 0.000, budget 0.500" in result.output
+
+	def test_an_over_budget_lane_exits_nonzero_and_names_the_reduction(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-023's reduction at the surface: the operator has to be able to see it, and a
+		script has to be able to gate on it."""
+		_deployed(home, tmp_path, monkeypatch, budget='{"G4": {"maximum_rate": 0.0}}')
+		RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G4",
+				"--kind",
+				"revert",
+				"--defect",
+				"it broke",
+			],
+		)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 1, result.output
+		assert "over budget: ceiling reduced L3 -> L2" in result.output
+		assert "FR-023" in result.output
+
+	def test_a_recorded_override_lifts_the_reduction_and_is_attributed(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-023's escape hatch, at the surface: the reduction lifts and the screen names
+		the human, because an override with nobody attached is the silent downgrade FR-031
+		forbids."""
+		_deployed(home, tmp_path, monkeypatch, budget='{"G4": {"maximum_rate": 0.0}}')
+		RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escape",
+				"--lane",
+				"G4",
+				"--kind",
+				"revert",
+				"--defect",
+				"it broke",
+			],
+		)
+
+		accepted = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escapes",
+				"--override",
+				"G4=the duty officer",
+				"--reason",
+				"the fix ships Friday",
+			],
+		)
+		assert accepted.exit_code == 0, accepted.output
+		assert "accepted by the duty officer" in accepted.output
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 0, "an accepted lane is not a refusal: " + result.output
+		assert "over budget, and accepted by the duty officer" in result.output
+
+	def test_the_rate_is_reported_per_autonomy_level_as_well_as_per_lane(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-022 asks for the rate "per lane **and per autonomy level**", and the second
+		axis is a report rather than a regrouping: a level whose lanes all escape is the
+		level the ladder has not earned. Asserted at the surface because a property nothing
+		prints is a measurement the operator cannot read."""
+		_deployed(home, tmp_path, monkeypatch, budget='{"G4": {"maximum_rate": 0.5}}')
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 0, result.output
+		assert "by granted ceiling (FR-022)" in result.output
+		# The synthetic decomposition spans G4/G5/G7/G8, whose §14 ceilings differ, so the
+		# axis is not degenerate here and each level is named.
+		for level in ("L3", "L2", "L1"):
+			assert f"      {level}: " in result.output, result.output
+		assert "ceiling reduced" not in result.output
+
+	def test_an_unreadable_budget_file_is_a_message_not_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The config seam's own failure mode: a malformed file must arrive as a sentence,
+		and refusing is the right answer rather than defaulting — NFR-024 forbids inventing
+		a target, and a silently-ignored budget file would read as configured."""
+		monkeypatch.setenv("SOFACT_ESCAPE_BUDGET", str(tmp_path / "absent.json"))
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot read SOFACT_ESCAPE_BUDGET" in result.output
+		assert "Traceback" not in result.output
+
+
+class TestTheOverrideIsAttributedOrRefused:
+	def test_an_override_with_nobody_attached_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-023's "attributed": `LANE=` with no name is the silent downgrade FR-031
+		forbids, so it is a message and a non-zero exit rather than a recorded row."""
+		_deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "escapes", "--override", "G4="])
+
+		assert result.exit_code == 1, result.output
+		assert "an override is attributed" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_override_with_no_reason_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-023's mechanism is that a human may accept a risk the measurement flags; an
+		override with no reason records that the risk was taken and not what was
+		understood about it."""
+		_deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app, ["--home", str(home), "escapes", "--override", "G4=the duty officer"]
+		)
+
+		assert result.exit_code == 1, result.output
+		assert "an override states why" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_unknown_lane_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		_deployed(home, tmp_path, monkeypatch)
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"escapes",
+				"--override",
+				"G9=someone",
+				"--reason",
+				"because",
+			],
+		)
+
+		assert result.exit_code != 0, result.output
+		assert "Traceback" not in result.output

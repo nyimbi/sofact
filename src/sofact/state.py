@@ -29,6 +29,8 @@ from sofact.views import (
 	DeployRecord,
 	DispatchRecord,
 	ElicitationAnswer,
+	EscapeEvent,
+	EscapeOverride,
 	Evidence,
 	GateCost,
 	Goal,
@@ -144,6 +146,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	deploys: list[DeployRecord] = []
 	gate_costs: list[GateCost] = []
 	oracle_audits: list[OracleAuditReport] = []
+	escapes: list[EscapeEvent] = []
+	escape_overrides: list[EscapeOverride] = []
 
 	for entry in ordered:
 		if entry.index in hidden:
@@ -235,6 +239,16 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# `ProjectState.gate_cost` reads the latest per gate, so the sum cannot
 				# double-count a gate that was measured twice.
 				gate_costs.append(GateCost.model_validate(payload["cost"]))
+			case LedgerKind.ESCAPE_RECORDED:
+				# Appended and never keyed: an escape is an event that happened, so two
+				# rows are two events — a revert and then a hotfix. FR-022's numerator
+				# collapses them by *defect*, which is where that judgement belongs.
+				escapes.append(EscapeEvent.model_validate(payload["escape"]))
+			case LedgerKind.ESCAPE_OVERRIDE_RECORDED:
+				# Appended, with `ProjectState.latest_escape_override` reading the latest
+				# per lane — `gate_cost`'s rule. The history is what makes FR-023's
+				# "logged and attributed" checkable after the override is revised.
+				escape_overrides.append(EscapeOverride.model_validate(payload["override"]))
 
 	state = ProjectState(
 		goals=tuple(goals),
@@ -264,6 +278,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		deploys=tuple(deploys),
 		gate_costs=tuple(gate_costs),
 		oracle_audits=tuple(oracle_audits),
+		escapes=tuple(escapes),
+		escape_overrides=tuple(escape_overrides),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

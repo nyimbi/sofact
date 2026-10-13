@@ -2181,7 +2181,12 @@ tested, not assumed.
 3. **Human review time** — logged per gate *and* per diff, so §1.4's claim can be
    compared directly against the v0.1 alternative.
 4. **Escape baseline** — requires a deployment. Until then all ceilings are
-   hypotheses.
+   hypotheses. **The instrument now exists (2026-10-13, ADR-0054):** FR-021–023 are
+   built, so `sofact escapes` folds the ledger into a per-lane escape rate with the
+   FR-023 reduction and names every lane with no declared budget. The *baseline* is
+   unchanged — a rate needs a deployment, and a lane with no deployments is reported
+   as unmeasured rather than clean, so NFR-024 still holds and the ceilings below
+   remain hypotheses until the first one.
 5. **Isolation verification** — container boundary and egress denial actually hold
    (FR-019).
 6. **Harness capability probe** — ordered, cheapest-falsifying-first:

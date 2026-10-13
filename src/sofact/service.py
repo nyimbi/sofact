@@ -14,7 +14,7 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -33,6 +33,7 @@ from sofact.elicitation import (
 	spec_for,
 )
 from sofact.envelope import measure
+from sofact.escape import lanes_of, measure_escapes
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.execution import OracleRunner, digest_tree
 from sofact.git import (
@@ -101,6 +102,11 @@ from sofact.views import (
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
+	EscapeBudget,
+	EscapeEvent,
+	EscapeKind,
+	EscapeOverride,
+	EscapeReport,
 	Evidence,
 	GateCheck,
 	GateCost,
@@ -112,6 +118,7 @@ from sofact.views import (
 	IntegrationReport,
 	IntegrityCheck,
 	LedgerKind,
+	ModuleClass,
 	NonGoal,
 	OracleAuditReport,
 	OracleDeclaration,
@@ -361,6 +368,7 @@ class FactoryService:
 		specs: Mapping[str, HarnessSpec] | None = None,
 		envelope: DeliveryEnvelope | None = None,
 		topology: DeploymentTopology | None = None,
+		escape_budgets: Sequence[EscapeBudget] = (),
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -382,6 +390,14 @@ class FactoryService:
 		never said where it runs are not the same deployment, and only the second is a
 		missing setting. So the *absence* is preserved as ``None`` and reaches the report
 		as ``topology_configured=False``.
+
+		``escape_budgets`` is FR-023's per-lane declaration, and an empty sequence means
+		*this deployment declared none* rather than "every lane is bounded at zero". The
+		same distinction the other three make, and the load-bearing one here: FR-023 reduces
+		a lane over its **declared** budget, §20.3 item 4 records that no escape baseline
+		exists until there has been a deployment, and NFR-024 forbids reporting a target the
+		product has not measured. So nothing is invented, no lane is reduced, and the
+		delivery report says FR-023 is not in force rather than printing a clean table.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
@@ -389,6 +405,7 @@ class FactoryService:
 		self._specs: Mapping[str, HarnessSpec] = SPECS if specs is None else dict(specs)
 		self._envelope = envelope
 		self._topology = topology
+		self.escape_budgets: tuple[EscapeBudget, ...] = tuple(escape_budgets)
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
@@ -2597,6 +2614,25 @@ class FactoryService:
 		identity = uuid7str()
 		rendered_at = now()
 
+		# FR-022's measurement, folded once and reused by every round of the fixed-point
+		# loop below. Read here rather than inside `render` so the two rounds cannot
+		# disagree: an escape recorded between them would make the second render differ
+		# from the first by something other than the artefacts, and the loop's own comment
+		# asserts that is the only thing that may differ.
+		escapes = (
+			measure_escapes(
+				deploys=state.deploys,
+				reports=state.deliveries,
+				decompositions=state.decompositions,
+				escapes=state.escapes,
+				budgets=self.escape_budgets,
+				overrides=state.escape_overrides,
+				contracts=state.contracts,
+			)
+			if self.escape_budgets or state.escapes
+			else None
+		)
+
 		def render() -> DeliveryReport:
 			"""One render of the report, reading nothing the caller has not already read."""
 			return delivery_report(
@@ -2616,6 +2652,7 @@ class FactoryService:
 				topology=self.topology(),
 				topology_configured=self.topology_configured(),
 				topology_override=topology_override,
+				escapes=escapes,
 			)
 
 		# The documents and the report describe each other: the report's artefact check
@@ -2732,6 +2769,128 @@ class FactoryService:
 		)
 		self._commit(LedgerKind.DEPLOY_RECORDED, {"deploy": record.model_dump(mode="json")})
 		return record
+
+	# --------------------------------------------------- FR-021-023: escape oracle
+
+	async def record_escape(
+		self,
+		report_id: str,
+		*,
+		lane: ModuleClass,
+		kind: EscapeKind,
+		defect: str,
+		by: str,
+		note: str | None = None,
+	) -> EscapeEvent:
+		"""Record an escape against a deployed change (FR-021).
+
+		Two refusals, and both are the API being hard to get wrong rather than permissive:
+
+		* **The change must have been deployed.** An escape from a change that never
+			shipped is not an escape — it is a defect that never got out — and counting it
+			would credit a lane with a failure reality never had the chance to cause. This is
+			:meth:`record_gate_cost`'s rule ("a cost for a gate nobody sat at is not a
+			measurement of anything") applied to the other side of the deploy.
+		* **The lane must be one the change exercised.** The lane is the operator's, because
+			only they know *which* module broke when a deployment spans several; validating it
+			against the report's own traceability chain makes filing an escape against a lane
+			that was never deployed impossible.
+
+		The oracle-strength band and the autonomy level FR-021 also asks for are *not*
+		arguments here. They are derived at read time from the change's contract and module
+		class, so a re-measured contract is judged at the strength it now carries rather
+		than at the strength it had on the day — see
+		:attr:`~sofact.views.EscapeReport.caveats`.
+		"""
+		assert by.strip(), "a recorded escape names who recorded it"
+		assert defect.strip(), "an escape names the defect it implicates"
+		state = await self.state()
+		deployed = next((d for d in state.deploys if d.report_id == report_id), None)
+		if deployed is None:
+			raise ValueError(
+				f"no deploy record approves report {report_id}, so nothing escaped from it "
+				"(FR-021). An escape is a change reality rejected, and a change that was "
+				"never deployed was never in a position to be rejected"
+			)
+		report = next((r for r in state.deliveries if r.id == report_id), None)
+		if report is None:
+			raise ValueError(
+				f"the deploy record names report {report_id}, which this log no longer "
+				"holds, so the escape cannot be attributed to a lane (FR-021)"
+			)
+		decomposition = next(
+			(d for d in state.decompositions if d.contract_id == report.contract_id), None
+		)
+		exercised = lanes_of(report, decomposition)
+		if lane not in exercised:
+			known = ", ".join(sorted(c.value for c in exercised)) or "none"
+			raise ValueError(
+				f"report {report_id} exercises no {lane.value} module, so an escape cannot "
+				f"be filed against that lane (FR-021). The lanes this deployment reached "
+				f"are: {known}"
+			)
+		escape = EscapeEvent(
+			id=uuid7str(),
+			report_id=report_id,
+			lane=lane,
+			kind=kind,
+			defect=defect.strip(),
+			recorded_by=by,
+			recorded_at=now(),
+			note=note,
+		)
+		self._commit(LedgerKind.ESCAPE_RECORDED, {"escape": escape.model_dump(mode="json")})
+		return escape
+
+	async def record_escape_override(
+		self, lane: ModuleClass, *, by: str, reason: str
+	) -> EscapeOverride:
+		"""Record an operator's decision to run a lane over its escape budget (FR-023).
+
+		FR-023's "manual override must be logged and attributed", and both halves are
+		enforced by the type: ``by`` and ``reason`` are non-empty strings, so an override
+		with nobody attached — indistinguishable from the silent downgrade FR-031 forbids —
+		cannot be constructed.
+
+		A ledger row rather than a render parameter, which is where this differs from
+		FR-031's ``topology_override``. That override is threaded into one render; FR-023's
+		reduction persists until the rate returns to budget, so the acceptance that lifts it
+		must persist too. A parameter would evaporate at the next render and silently
+		restore the reduction the operator had already weighed.
+		"""
+		assert by.strip(), "an override names who accepted it"
+		assert reason.strip(), "an override states why"
+		override = EscapeOverride(lane=lane, accepted_by=by, reason=reason, recorded_at=now())
+		self._commit(
+			LedgerKind.ESCAPE_OVERRIDE_RECORDED, {"override": override.model_dump(mode="json")}
+		)
+		return override
+
+	async def escape_report(self) -> EscapeReport:
+		"""Fold the log into FR-022's rate, and FR-023's reduction, per lane.
+
+		Reads the whole ledger rather than the latest delivery: FR-022's rate is a
+		*standing* property of a lane, not a property of one report, and a metric that
+		forgot every escape older than the most recent delivery would let a lane launder a
+		bad history by deploying again.
+		"""
+		state = await self.state()
+		return measure_escapes(
+			deploys=state.deploys,
+			reports=state.deliveries,
+			decompositions=state.decompositions,
+			escapes=state.escapes,
+			budgets=self.escape_budgets,
+			overrides=state.escape_overrides,
+			contracts=state.contracts,
+		)
+
+	async def escapes(self, report_id: str | None = None) -> tuple[EscapeEvent, ...]:
+		"""Every recorded escape, or the ones filed against one deployed change (FR-021)."""
+		state = await self.state()
+		if report_id is None:
+			return state.escapes
+		return state.escapes_for(report_id)
 
 	# --------------------------------------------------------- FR-143: precision
 

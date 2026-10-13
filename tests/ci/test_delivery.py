@@ -44,7 +44,7 @@ from sofact.delivery import (
 	topology_statement,
 	verified_and_unverified,
 )
-from sofact.planner import compile_plan
+from sofact.planner import DEFAULT_MODULE_BUDGET, compile_plan
 from sofact.service import FactoryService
 from sofact.views import (
 	DELIVERY_ARTIFACTS,
@@ -61,6 +61,7 @@ from sofact.views import (
 	ClauseKind,
 	ClauseStem,
 	Contract,
+	Decomposition,
 	DeliveryArtifact,
 	DeliveryArtifactKind,
 	DeliveryEnvelope,
@@ -70,11 +71,14 @@ from sofact.views import (
 	DeployRecord,
 	ElicitationDimension,
 	EnvelopeDimension,
+	EscapeBudget,
+	EscapeReport,
 	GateCheck,
 	GateCost,
 	Handover,
 	InheritedOracle,
 	MaintenanceLane,
+	Module,
 	ModuleClass,
 	OracleClass,
 	OracleDeclaration,
@@ -1804,3 +1808,376 @@ class TestTheReportIsDerivedFromTheLog:
 		assert len(verified) + len(unverified) == len(contract.clauses)
 		assert sum(1 for u in unverified if u.is_ground_truth_debt) == 1
 		assert isinstance(unverified[0], UnverifiedClause)
+
+
+# --------------------------------------------------------------------------- #
+# FR-021-023 — the reduction reaches the autonomy, and the check reports it
+# --------------------------------------------------------------------------- #
+
+
+def a_decomposition(contract: Contract, module_class: ModuleClass) -> Decomposition:
+	"""One module owning the contract's first clause, at a named §14 class.
+
+	Built directly rather than proposed, because these tests are about what a *class* does
+	to a ceiling and the proposer's own naming is `test_decomposition`'s subject.
+	"""
+	return Decomposition(
+		id=uuid7str(),
+		goal_id=contract.goal_id,
+		contract_id=contract.id,
+		created_at=contract.created_at,
+		modules=(
+			Module(
+				id=uuid7str(),
+				name="api",
+				module_class=module_class,
+				interface="the api interface",
+				clause_ids=(contract.clauses[0].id,),
+				depends_on=(),
+				budget=DEFAULT_MODULE_BUDGET,
+			),
+		),
+	)
+
+
+def an_escape_report(
+	lane: ModuleClass,
+	*,
+	rate: float,
+	budget: float | None,
+	granted: AutonomyLevel,
+	reduced: AutonomyLevel,
+	override: bool = False,
+) -> EscapeReport:
+	"""One lane's measurement, built directly so a test can vary the numbers the gate reads.
+
+	Built rather than measured because the *gate* is what is under test here, and a test
+	that drove a real service would be testing `measure_escapes` twice and the check not at
+	all. `sofact.escape`'s own suite is where the arithmetic lives.
+	"""
+	from sofact.views import EscapeOverride, LaneEscape
+
+	return EscapeReport(
+		id=uuid7str(),
+		rendered_at=now(),
+		lanes=(
+			LaneEscape(
+				lane=lane,
+				deployed_changes=2,
+				escapes=round(rate * 2),
+				rate=rate,
+				budget=(
+					None
+					if budget is None
+					else EscapeBudget(lane=lane, maximum_rate=budget, declared_by="the operator")
+				),
+				over_budget=None if budget is None else rate > budget,
+				granted_ceiling=granted,
+				reduced_ceiling=reduced,
+				override=(
+					EscapeOverride(
+						lane=lane,
+						accepted_by="the duty officer",
+						reason="Friday",
+						recorded_at=now(),
+					)
+					if override
+					else None
+				),
+			),
+		),
+		unbudgeted=() if budget is not None else (lane,),
+		deployed_reports=2,
+	)
+
+
+class TestTheEscapeCeilingReachesTheAutonomy:
+	def test_a_reduced_lane_lowers_the_module_autonomy(self) -> None:
+		"""FR-023's reduction has to *bind*, not merely print. `module_autonomy` is where the
+		modules' number is computed, so a reduction that did not reach here would be a
+		number the report showed and nothing acted on."""
+		contract = one_clause_contract("the api returns 200", command="true")
+		decomposition = a_decomposition(contract, ModuleClass.G4)
+		granted = MODULE_CLASS_CEILING[ModuleClass.G4]
+
+		plain = module_autonomy(contract, decomposition)
+		reduced = module_autonomy(
+			contract, decomposition, lane_ceilings={ModuleClass.G4: AutonomyLevel(granted - 1)}
+		)
+
+		assert reduced < plain
+
+	def test_a_lane_ceiling_above_the_class_ceiling_does_not_raise_it(self) -> None:
+		"""The control arm, and the reason `module_autonomy` uses `min` rather than
+		assignment: §14's class ceiling is a *cap* on the class, so a caller handing in a
+		raised number must not be able to raise a lane the class ceiling forbids."""
+		contract = one_clause_contract("the api returns 200", command="true")
+		decomposition = a_decomposition(contract, ModuleClass.G7)
+
+		raised = module_autonomy(
+			contract, decomposition, lane_ceilings={ModuleClass.G7: AutonomyLevel.L4}
+		)
+		plain = module_autonomy(contract, decomposition)
+
+		assert raised == plain
+		assert plain <= MODULE_CLASS_CEILING[ModuleClass.G7]
+
+	def test_no_lane_ceilings_leaves_the_class_ceiling_unchanged(self) -> None:
+		"""`None` means *nothing was measured*, which must not read as *nothing was reduced*:
+		the default is the unconfigured deployment, and its number is §14's."""
+		contract = one_clause_contract("the api returns 200", command="true")
+		decomposition = a_decomposition(contract, ModuleClass.G4)
+
+		with_none = module_autonomy(contract, decomposition, lane_ceilings=None)
+		without = module_autonomy(contract, decomposition)
+
+		assert with_none == without
+
+
+class TestTheGateReportsTheEscapeCeiling:
+	def test_an_over_budget_lane_names_the_reduction_in_the_check(self) -> None:
+		"""The check is where an operator reads what FR-023 did. It names the lane, the rate,
+		the budget and both ceilings, because a number that dropped with no reason given is
+		one the operator cannot act on."""
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=0.5,
+			budget=0.0,
+			granted=MODULE_CLASS_CEILING[ModuleClass.G4],
+			reduced=AutonomyLevel(MODULE_CLASS_CEILING[ModuleClass.G4] - 1),
+		)
+
+		contract = one_clause_contract("one")
+		rendered = report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=None,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			escapes=escapes,
+		)
+		check = next(c for c in rendered.checks if c.name == "escape_ceiling_applied")
+
+		assert "G4" in check.detail
+		assert "0.500" in check.detail
+		assert "reduced from L3 to L2" in check.detail
+
+	def test_an_accepted_lane_names_who_accepted_it(self) -> None:
+		"""FR-023's "logged and attributed", at the surface the operator reads: a lane over
+		budget with an override must not print as an unreduced lane with no explanation."""
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=0.5,
+			budget=0.0,
+			granted=MODULE_CLASS_CEILING[ModuleClass.G4],
+			reduced=MODULE_CLASS_CEILING[ModuleClass.G4],
+			override=True,
+		)
+
+		contract = one_clause_contract("one")
+		rendered = report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=None,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			escapes=escapes,
+		)
+		check = next(c for c in rendered.checks if c.name == "escape_ceiling_applied")
+
+		assert "the duty officer" in check.detail
+
+	def test_no_measurement_is_reported_as_not_in_force_rather_than_clean(self) -> None:
+		"""An unconfigured deployment's check must say FR-023 is not in force, not that every
+		lane is within budget. The two are different statements and a reader acts on them
+		differently."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		rendered = report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=None,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			escapes=None,
+		)
+		check = next(c for c in rendered.checks if c.name == "escape_ceiling_applied")
+
+		assert check.passed is True
+		assert "FR-023 is not in force" in check.detail
+		assert "no lane exceeds its declared escape budget" not in check.detail
+
+	def test_an_unbudgeted_lane_is_named_by_the_declaration_check(self) -> None:
+		"""A lane measured with no budget cannot be reduced, and the report says so rather
+		than leaving the operator to read an unreduced lane as a safe one."""
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=0.9,
+			budget=None,
+			granted=MODULE_CLASS_CEILING[ModuleClass.G4],
+			reduced=MODULE_CLASS_CEILING[ModuleClass.G4],
+		)
+
+		contract = one_clause_contract("one")
+		rendered = report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=None,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			escapes=escapes,
+		)
+		check = next(c for c in rendered.checks if c.name == "escape_budget_declared")
+
+		assert check.passed is True, "a missing declaration is reported, not failed"
+		assert "G4" in check.detail
+		assert "NFR-024" in check.detail
+
+	def test_the_reduction_binds_the_report_s_autonomy(self) -> None:
+		"""The end of the chain: the reduced ceiling reaches `report.autonomy`, so a delivery
+		in a reduced lane cannot report the number FR-023 withdrew.
+
+		A PROPERTY oracle (rank 1, ceiling L4) so the contract is not itself the binding
+		constraint: with a weaker contract the contract's own ceiling would already be at the
+		reduced value and the test would pass whether or not the lane ceiling was read.
+		"""
+		contract = one_clause_contract("one", command="true", oracle_class=OracleClass.PROPERTY)
+		decomposition = a_decomposition(contract, ModuleClass.G4)
+		granted = MODULE_CLASS_CEILING[ModuleClass.G4]
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=1.0,
+			budget=0.0,
+			granted=granted,
+			reduced=AutonomyLevel(granted - 1),
+		)
+
+		plain = report(
+			contract,
+			goal_id=uuid7str(),
+			plan=compile_plan(contract),
+			decomposition=decomposition,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+		)
+		reduced = report(
+			contract,
+			goal_id=uuid7str(),
+			plan=compile_plan(contract),
+			decomposition=decomposition,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			escapes=escapes,
+		)
+
+		assert reduced.module_autonomy < plain.module_autonomy
+
+
+class TestTheDeliveryDocumentStatesTheEscapes:
+	"""FR-022's measurement reaches the document an operator reads, in all four states.
+
+	A check the report carries and the document drops is a statement nobody sees — the
+	rule `test_the_delivery_document_states_it` states for FR-158. Four states, because
+	three of them render as *plausible* English and the difference between them is the
+	whole of what FR-023 does and does not claim.
+	"""
+
+	def test_no_measurement_is_a_sentence_rather_than_an_empty_table(self) -> None:
+		rendered = render_delivery_document(a_report())
+
+		assert "## Escapes" in rendered
+		assert "FR-023 is not in force for this delivery" in rendered
+		assert "| Lane |" not in rendered, (
+			"an empty table reads as compliance, which is the state this sentence exists "
+			"to distinguish itself from"
+		)
+
+	def test_no_deployments_says_the_rate_has_no_denominator(self) -> None:
+		empty = EscapeReport(id=uuid7str(), rendered_at=now())
+
+		rendered = render_delivery_document(a_report(escapes=empty))
+
+		assert "no denominator" in rendered
+		assert "| Lane |" not in rendered
+
+	def test_an_over_budget_lane_renders_the_reduction_as_an_arrow(self) -> None:
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=1.0,
+			budget=0.0,
+			granted=AutonomyLevel.L3,
+			reduced=AutonomyLevel.L2,
+		)
+
+		rendered = render_delivery_document(a_report(escapes=escapes))
+
+		assert "| G4 | 2 | 2 | 1.000 | 0.000 | L3 → **L2** |" in rendered
+
+	def test_a_lane_at_the_ladder_floor_says_fr_023_is_in_force(self) -> None:
+		"""The state a plain ceiling would hide: the lane is over budget and FR-023 moved
+		nothing, because L0 is the floor of the ladder rather than of the reduction. A
+		reader shown an unreduced `L0` would take it for a lane that was never over."""
+		escapes = an_escape_report(
+			ModuleClass.G7,
+			rate=1.0,
+			budget=0.0,
+			granted=AutonomyLevel.L0,
+			reduced=AutonomyLevel.L0,
+		)
+
+		rendered = render_delivery_document(a_report(escapes=escapes))
+
+		assert "L0 (FR-023 in force, at the ladder floor)" in rendered
+		assert "L0 → **L0**" not in rendered, "a reduction to the same level is not a reduction"
+
+	def test_an_unbudgeted_lane_is_named_rather_than_bounded_at_zero(self) -> None:
+		"""NFR-024 at the document: a lane with no declared budget is *unbudgeted*, and the
+		sentence says so. Rendering it as `0.000` would invent the threshold the
+		requirement forbids."""
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=0.5,
+			budget=None,
+			granted=AutonomyLevel.L3,
+			reduced=AutonomyLevel.L3,
+		)
+
+		rendered = render_delivery_document(a_report(escapes=escapes))
+
+		assert "| G4 | 1 | 2 | 0.500 | undeclared | L3 |" in rendered
+		assert "no declared budget" in rendered
+
+	def test_an_override_is_rendered_with_the_name_that_accepted_it(self) -> None:
+		escapes = an_escape_report(
+			ModuleClass.G4,
+			rate=1.0,
+			budget=0.0,
+			granted=AutonomyLevel.L3,
+			reduced=AutonomyLevel.L3,
+			override=True,
+		)
+
+		rendered = render_delivery_document(a_report(escapes=escapes))
+
+		assert "(override: the duty officer)" in rendered

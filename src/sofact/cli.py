@@ -28,6 +28,7 @@ from sofact.audit import EMPTY_WORKSPACE_INSTRUMENT
 from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
+from sofact.escape import load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
@@ -52,6 +53,9 @@ from sofact.views import (
 	DeploymentTopology,
 	DispatchRecord,
 	EnvelopeDimension,
+	EscapeBudget,
+	EscapeKind,
+	EscapeReport,
 	GoalPlan,
 	GoalStyle,
 	HarnessProfile,
@@ -59,6 +63,7 @@ from sofact.views import (
 	InterfaceMember,
 	InterfaceMemberKind,
 	MachineRequest,
+	ModuleClass,
 	OracleAuditReport,
 	Phase,
 	PhaseStatus,
@@ -234,6 +239,7 @@ def _service(home: Path | None) -> FactoryService:
 		specs=_configured_specs(),
 		envelope=_configured_envelope(),
 		topology=_configured_topology(),
+		escape_budgets=_configured_escape_budgets(),
 	)
 
 
@@ -298,6 +304,26 @@ def _configured_specs() -> Mapping[str, HarnessSpec] | None:
 		return load_specs(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_HARNESS_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_escape_budgets() -> tuple[EscapeBudget, ...]:
+	"""The per-lane escape budgets this deployment declared (FR-023).
+
+	An empty tuple means *this deployment declared none*, which is not the same as "every
+	lane is bounded at zero": FR-023 reduces a lane over its **declared** budget, §20.3 item
+	4 records that no escape baseline exists until there has been a deployment, and NFR-024
+	forbids reporting a target the product has not measured. So an undeclared deployment
+	gets no reduction and a delivery report that says FR-023 is not in force, rather than a
+	clean table that reads as compliance.
+	"""
+	configured = os.environ.get("SOFACT_ESCAPE_BUDGET")
+	if not configured:
+		return ()
+	try:
+		return load_escape_budget(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_ESCAPE_BUDGET: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -1845,6 +1871,235 @@ def _print_audit(report: OracleAuditReport) -> None:
 		)
 
 
+def _print_escape_summary(report: EscapeReport) -> None:
+	"""FR-022's rate, per lane, and what FR-023 did to each ceiling."""
+	typer.secho("\n  escapes (FR-022)", fg="cyan")
+	if not report.deployed_changes:
+		typer.secho(
+			"    no change has been deployed, so there is no ground truth yet and this "
+			"measurement claims nothing (FR-021). §20.3 item 4 records the same: until a "
+			"deployment exists, every ceiling is a hypothesis.",
+			fg="bright_black",
+		)
+		return
+	for lane in report.lanes:
+		# Red when the reduction is in force, yellow when a named person accepted the risk,
+		# green when the lane is within budget. Three states, because FR-023's override is a
+		# decision rather than an absence and printing it as clean would hide the acceptance.
+		if not lane.over_budget:
+			colour = "green"
+		else:
+			colour = "yellow" if lane.override is not None else "red"
+		budget = (
+			f"budget {lane.budget.maximum_rate:.3f}" if lane.budget is not None else "unbudgeted"
+		)
+		typer.secho(
+			f"    {lane.lane.value}: {lane.escapes} escape(s) / "
+			f"{lane.deployed_changes} deployment(s) = {lane.rate:.3f}, {budget}",
+			fg=colour,
+		)
+		if lane.over_budget:
+			if lane.override is not None:
+				typer.secho(
+					f"      over budget, and accepted by {lane.override.accepted_by}: "
+					f"{lane.override.reason}",
+					fg="yellow",
+				)
+			else:
+				typer.secho(
+					f"      over budget: ceiling reduced {lane.granted_ceiling.name} -> "
+					f"{lane.reduced_ceiling.name} until the rate returns (FR-023). Record an "
+					"attributed override to run it here.",
+					fg="red",
+				)
+	# FR-022 asks the rate "per lane **and per autonomy level**", and the second axis is a
+	# real report rather than a regrouping: a lane's escape history is the evidence for the
+	# ceiling it was granted, so a level whose lanes all escape is the level the ladder has
+	# not earned. Printed by *granted* ceiling, and the degeneracy in Mode G is stated
+	# rather than left to look like a finding.
+	grouped = report.by_autonomy_level
+	if len(grouped) > 1:
+		typer.secho("    by granted ceiling (FR-022):", fg="cyan")
+		for level, lanes in grouped.items():
+			typer.secho(
+				f"      {level.name}: "
+				+ ", ".join(
+					f"{lane.lane.value} {lane.escapes}/{lane.deployed_changes}" for lane in lanes
+				),
+				fg="bright_black",
+			)
+	elif grouped:
+		typer.secho(
+			"    one granted ceiling for every lane ("
+			+ next(iter(grouped)).name
+			+ "), so FR-022's autonomy axis is degenerate here — FR-123 caps every Mode G "
+			"delivery at L2 unconditionally, and a one-bucket breakdown is a cap rather "
+			"than a result.",
+			fg="bright_black",
+		)
+	if report.unbudgeted:
+		typer.secho(
+			f"    {len(report.unbudgeted)} lane(s) measured with no declared budget "
+			f"({', '.join(lane.value for lane in report.unbudgeted)}), so FR-023 cannot "
+			"reduce them. No threshold is invented (NFR-024).",
+			fg="yellow",
+		)
+	if report.orphan_deployments:
+		typer.secho(
+			f"    {report.orphan_deployments} deployed report(s) reach no module, so they "
+			"fall in no lane's denominator. Counted rather than dropped.",
+			fg="bright_black",
+		)
+
+
+@app.command()
+def escape(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	lane: str = typer.Option(..., "--lane", help="The §14 lane class the defect was in."),
+	kind: str = typer.Option(..., "--kind", help="revert, hotfix or incident (FR-021)."),
+	defect: str = typer.Option(..., "--defect", help="What was wrong, in your words."),
+	report: str | None = typer.Option(
+		None, "--report", help="The delivery that escaped; defaults to the latest deployed."
+	),
+	by: str = typer.Option("operator", "--by", help="Who recorded the escape."),
+	note: str | None = typer.Option(None, "--note", help="Anything else worth keeping."),
+) -> None:
+	"""Record an escape against a deployed change (FR-021)."""
+	asyncio.run(
+		_escape(
+			_service(_home_of(ctx, home)),
+			lane=lane,
+			kind=kind,
+			defect=defect,
+			report=report,
+			by=by,
+			note=note,
+		)
+	)
+
+
+async def _escape(
+	svc: FactoryService,
+	*,
+	lane: str,
+	kind: str,
+	defect: str,
+	report: str | None,
+	by: str,
+	note: str | None,
+) -> None:
+	state = await svc.state()
+	if report is None:
+		# Defaulted to the latest *deployed* report rather than the latest rendered one:
+		# an escape is a change reality rejected, and the most recent change reality has
+		# seen is the most recent deploy. A rendered-but-undeployed report is not eligible,
+		# and `record_escape` would refuse it anyway.
+		if not state.deploys:
+			typer.secho(
+				"nothing has been deployed, so nothing can have escaped (FR-021). An escape "
+				"is a change reality rejected, and a change that was never deployed was never "
+				"in a position to be rejected.",
+				fg="yellow",
+			)
+			raise typer.Exit(code=1)
+		report = state.deploys[-1].report_id
+	try:
+		recorded = await svc.record_escape(
+			report,
+			lane=ModuleClass(lane.strip().upper()),
+			kind=EscapeKind(kind.strip().lower()),
+			defect=defect,
+			by=by,
+			note=note,
+		)
+	except ValueError as exc:
+		typer.secho(f"cannot record that escape: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(f"\nescape recorded {recorded.id}", fg="cyan", bold=True)
+	typer.secho(f"  {recorded.kind.value} in {recorded.lane.value}: {recorded.defect}", fg="red")
+	typer.secho(f"  against report {recorded.report_id} (FR-021)", fg="bright_black")
+	summary = await svc.escape_report()
+	_print_escape_summary(summary)
+
+
+@app.command(name="escapes")
+def escapes_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	override: str | None = typer.Option(
+		None,
+		"--override",
+		help="Accept one lane's escape budget: LANE=WHO (FR-023). Repeats.",
+	),
+	reason: str = typer.Option(
+		"", "--reason", help="Why the risk is accepted. Recorded with the override."
+	),
+) -> None:
+	"""Report the escape rate per lane, and each lane's reduced ceiling (FR-022, FR-023)."""
+	asyncio.run(_escapes(_service(_home_of(ctx, home)), override=override, reason=reason))
+
+
+async def _escapes(svc: FactoryService, *, override: str | None, reason: str) -> None:
+	if override is not None:
+		# FR-023's "manual override must be logged and attributed", and both words carry
+		# weight: `LANE=WHO` is a name rather than a boolean because an override with nobody
+		# attached is indistinguishable from the silent downgrade FR-031 forbids, and a
+		# ledger row rather than a render flag because the reduction it lifts persists.
+		lane, _, who = override.partition("=")
+		if not who.strip():
+			typer.secho(
+				"an override is attributed: pass LANE=WHO, e.g. G4=the-duty-officer (FR-023). "
+				"An override with nobody attached is the silent downgrade FR-031 forbids.",
+				fg="red",
+			)
+			raise typer.Exit(code=1)
+		if not reason.strip():
+			typer.secho(
+				"an override states why: pass --reason. FR-023's mechanism is that a human "
+				"may accept a risk the measurement flags, and an override with no reason "
+				"records that the risk was taken and not what was understood about it.",
+				fg="red",
+			)
+			raise typer.Exit(code=1)
+		try:
+			recorded = await svc.record_escape_override(
+				ModuleClass(lane.strip().upper()), by=who.strip(), reason=reason.strip()
+			)
+		except ValueError as exc:
+			typer.secho(f"cannot record that override: {exc}", fg="red")
+			raise typer.Exit(code=1) from exc
+		typer.secho(
+			f"\noverride recorded: {recorded.lane.value} accepted by {recorded.accepted_by} "
+			f"(FR-023). The reduction is lifted by a named decision rather than by a quieter "
+			"number.",
+			fg="yellow",
+		)
+	report = await svc.escape_report()
+	typer.secho("\nFR-022 escape oracle", fg="cyan", bold=True)
+	typer.secho(f"  measurement {report.id}", fg="bright_black")
+	_print_escape_summary(report)
+	for caveat in report.caveats:
+		typer.secho(f"  note: {caveat}", fg="bright_black")
+	if report.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(report.not_implemented)
+			+ ". No change has been deployed, so this reading cleared nothing.",
+			fg="yellow",
+		)
+	if report.over_budget and not any(lane.override for lane in report.over_budget):
+		typer.secho(
+			"\n  A lane over its declared budget has had its ceiling reduced automatically "
+			"(FR-023). The reduced number is what `deliver` reports, and FR-119 makes the "
+			"deploy a human decision over it. Deploying the fix is what returns the rate to "
+			"budget, so the deploy gate does not refuse — record an attributed override if "
+			"the reduction itself is what you are accepting.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+
+
 @app.command()
 def precision(
 	ctx: typer.Context,
@@ -2710,6 +2965,8 @@ async def _deliver(
 			"T2/T3/T4, or accept the lower number deliberately.",
 			fg="yellow",
 		)
+	if report.escapes is not None:
+		_print_escape_summary(report.escapes)
 	typer.secho("\n  artefacts (FR-117)", fg="cyan")
 	for artifact in report.artifacts:
 		if artifact.present:

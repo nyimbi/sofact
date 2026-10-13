@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Final
 
 from sofact._uuid7 import uuid7str
+from sofact.escape import ceilings_from
 from sofact.views import (
 	EVOLVABILITY_DEBT,
 	MODE_G_CEILING,
@@ -60,12 +61,14 @@ from sofact.views import (
 	DeliveryReport,
 	DeploymentTopology,
 	EnvelopeActuals,
+	EscapeReport,
 	GateCheck,
 	GateCost,
 	GoalPlan,
 	Handover,
 	InheritedOracle,
 	MaintenanceLane,
+	ModuleClass,
 	Specification,
 	TraceLink,
 	UnverifiedClause,
@@ -314,6 +317,7 @@ def module_autonomy(
 	decomposition: Decomposition | None,
 	*,
 	topology: DeploymentTopology = DeploymentTopology.T1,
+	lane_ceilings: Mapping[ModuleClass, AutonomyLevel] | None = None,
 ) -> AutonomyLevel:
 	"""The autonomy the *modules* sustain: the lower of the two measured ceilings (FR-122).
 
@@ -337,7 +341,16 @@ def module_autonomy(
 	measured = contract.ceiling
 	if decomposition is not None:
 		for module in decomposition.modules:
-			measured = AutonomyLevel(min(measured, MODULE_CLASS_CEILING[module.module_class]))
+			granted = MODULE_CLASS_CEILING[module.module_class]
+			if lane_ceilings is not None:
+				# FR-023's reduction composes with §14's class ceiling rather than
+				# replacing it: a G7 lane is L1 and a reduction may lower it to L0, never
+				# raise it. `min` rather than assignment is what keeps a caller that hands
+				# in a *raised* ceiling from raising a lane the class ceiling forbids.
+				granted = AutonomyLevel(
+					min(granted, lane_ceilings.get(module.module_class, granted))
+				)
+			measured = AutonomyLevel(min(measured, granted))
 	return topology_ceiling(measured, topology)
 
 
@@ -505,6 +518,7 @@ def report(
 	topology: DeploymentTopology = DeploymentTopology.T1,
 	topology_configured: bool = False,
 	topology_override: str | None = None,
+	escapes: EscapeReport | None = None,
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -544,7 +558,20 @@ def report(
 	links = chain(contract, decomposition, plan, requirement_for_clause=requirement_for_clause)
 	verified, unverified = verified_and_unverified(contract, verdicts)
 	handed = handover(contract, system=system, entry_point=entry_point)
-	modules_autonomy = module_autonomy(contract, decomposition, topology=topology)
+	# FR-023's reduction reaches the autonomy computation as a pre-computed mapping, so
+	# `module_autonomy` stays pure and the escape arithmetic lives in `sofact.escape` alone.
+	# `ceilings_from` returns `None` when no measurement was taken, which is a different
+	# statement from a measurement that reduced nothing — the check below says which.
+	if escapes is not None and escapes.rendered_at != rendered_at:
+		# One instant for one report. The escape table is a statement *about* this delivery,
+		# so a table stamped with the moment it was folded would date a delivery's own
+		# evidence to a different second than the delivery — and `rendered_at` is what pins
+		# the report's identity for FR-117's versioning.
+		escapes = escapes.model_copy(update={"rendered_at": rendered_at})
+	lane_ceilings = ceilings_from(escapes)
+	modules_autonomy = module_autonomy(
+		contract, decomposition, topology=topology, lane_ceilings=lane_ceilings
+	)
 	delivered_autonomy = ceiling(contract, decomposition, topology=topology)
 	refused = refused_by_topology(contract, decomposition, topology=topology)
 
@@ -765,6 +792,79 @@ def report(
 				f"{topology.value} refuses nothing (FR-031)"
 			),
 		),
+		GateCheck(
+			name="escape_ceiling_applied",
+			# A *reporting* check, `topology_ceiling_applied`'s shape, and the reason it does
+			# not fail is a property of FR-023 rather than a concession. A check that failed
+			# on `over_budget` would refuse the deploy of the fix: the rate is
+			# escapes/deployments, so the only way it returns to budget is by deploying
+			# changes that hold, and a gate that blocks those makes the recovery FR-023 is
+			# trying to cause unreachable. Requiring an override to deploy the fix would not
+			# help — it would make recording an override the routine first step of every
+			# recovery, which is how a gate teaches its operators to bypass it.
+			#
+			# The reduction is nonetheless real and binding: it reaches `module_autonomy`
+			# through `lane_ceilings`, so a delivery in a reduced lane *reports* the lower
+			# number rather than claiming one FR-023 has withdrawn. FR-119 then makes the
+			# deploy a human decision over that report, which is where the weighing belongs.
+			passed=True,
+			detail=(
+				"no escape measurement was taken for this delivery, so FR-023 is not in "
+				"force here and no lane is reduced. This is not the same statement as every "
+				"lane being within budget: it is the absence of a measurement, and a "
+				"deployment that wants FR-023 declares its budgets (SOFACT_ESCAPE_BUDGET)"
+				if escapes is None
+				else (
+					"no lane exceeds its declared escape budget (FR-022, FR-023): "
+					+ ", ".join(
+						f"{lane.lane.value} {lane.rate:.3f} <= {lane.budget.maximum_rate:.3f}"
+						for lane in escapes.lanes
+						if lane.budget is not None
+					)
+					if not escapes.over_budget
+					else f"{len(escapes.over_budget)} lane(s) exceed their declared escape "
+					"budget (FR-023): "
+					+ "; ".join(
+						f"{lane.lane.value} escaped {lane.escapes} time(s) in "
+						f"{lane.deployed_changes} deployment(s) = {lane.rate:.3f} against a "
+						f"declared {lane.budget.maximum_rate:.3f}"
+						+ (
+							f", and a manual override was recorded by {lane.override.accepted_by}, "
+							"so the reduction is lifted by a named decision rather than by a "
+							"quieter number"
+							if lane.override is not None
+							else f", so {lane.lane.value}'s ceiling is reduced from "
+							f"{lane.granted_ceiling.name} to {lane.reduced_ceiling.name} "
+							"until its rate returns to budget. Record an attributed "
+							"override to run it here (FR-023)"
+						)
+						for lane in escapes.over_budget
+						if lane.budget is not None
+					)
+				)
+			),
+		),
+		GateCheck(
+			name="escape_budget_declared",
+			passed=True,
+			detail=(
+				"FR-023 reduces a lane over its *declared* budget, and this deployment "
+				"declared none, so no lane is reduced and the escape oracle is unarmed. "
+				"§20.3 item 4 records that no escape baseline exists until there has been a "
+				"deployment, so no default is invented here (NFR-024)"
+				if escapes is None or not escapes.lanes
+				else (
+					"every measured lane has a declared escape budget (FR-023): "
+					+ ", ".join(f"{lane.lane.value}" for lane in escapes.lanes)
+					if not escapes.unbudgeted
+					else f"{len(escapes.unbudgeted)} lane(s) were measured and have no "
+					"declared budget, so FR-023 cannot reduce them: "
+					+ ", ".join(lane.value for lane in escapes.unbudgeted)
+					+ ". A lane with no declaration is not one whose rate exceeds it, and "
+					"inventing a threshold would be the unmeasured target NFR-024 forbids"
+				)
+			),
+		),
 	]
 
 	return DeliveryReport(
@@ -784,6 +884,7 @@ def report(
 		module_autonomy=modules_autonomy,
 		topology=topology,
 		topology_configured=topology_configured,
+		escapes=escapes,
 		handover=handed,
 		checks=tuple(checks),
 	)

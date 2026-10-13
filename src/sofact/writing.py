@@ -56,6 +56,7 @@ DELIVERY_HEADINGS: Final[tuple[str, ...]] = (
 	"Debt",
 	"Machine surface",
 	"Autonomy",
+	"Escapes",
 	"Maintenance handover",
 	"Machine checks",
 )
@@ -236,6 +237,70 @@ def render_delivery_document(report: DeliveryReport) -> str:
 			"numbers above are T1's (FR-042)"
 		),
 	]
+
+	lines += [
+		"",
+		"## Escapes",
+		"",
+	]
+
+	if report.escapes is None:
+		lines.append(
+			"No escape measurement was taken, so **FR-023 is not in force for this "
+			"delivery**: this deployment declared no per-lane escape budget and no escape "
+			"has been recorded. That is not the same statement as every lane being within "
+			"budget, and §20.3 item 4 records why no default is invented here — until a "
+			"deployment has happened, every ceiling is a hypothesis (NFR-024)."
+		)
+	elif not report.escapes.deployed_changes:
+		lines.append(
+			"No change has been deployed, so FR-022's rate has no denominator and this "
+			"measurement claims nothing (FR-021)."
+		)
+	else:
+		escapes = report.escapes
+		lines.append(
+			f"Escape rate per lane (FR-022) — {escapes.deployed_changes} deployed "
+			f"change(s) measured:"
+		)
+		lines.append("")
+		lines.append("| Lane | Escapes | Deployments | Rate | Budget | Ceiling |")
+		lines.append("| --- | --- | --- | --- | --- | --- |")
+		for lane in escapes.lanes:
+			budget = f"{lane.budget.maximum_rate:.3f}" if lane.budget is not None else "undeclared"
+			ceiling = lane.granted_ceiling.name
+			if lane.reduced:
+				ceiling = f"{lane.granted_ceiling.name} → **{lane.reduced_ceiling.name}**"
+			elif lane.reduced_by_fr_023:
+				# FR-023 is in force and moved nothing: the lane is already at L0, which is
+				# the floor of the ladder rather than the floor of the reduction. Rendering
+				# this as a plain ceiling would make it identical to a lane that was never
+				# over budget — the one state an operator most needs told apart.
+				ceiling = f"{ceiling} (FR-023 in force, at the ladder floor)"
+			elif lane.over_budget and lane.override is not None:
+				ceiling = f"{ceiling} (override: {lane.override.accepted_by})"
+			lines.append(
+				f"| {lane.lane.value} | {lane.escapes} | {lane.deployed_changes} | "
+				f"{lane.rate:.3f} | {budget} | {ceiling} |"
+			)
+		if escapes.unbudgeted:
+			lines.append("")
+			lines.append(
+				f"**{len(escapes.unbudgeted)} lane(s) were measured with no declared "
+				"budget** ("
+				+ ", ".join(lane.value for lane in escapes.unbudgeted)
+				+ "), so FR-023 cannot reduce them. No threshold is invented: an undeclared "
+				"budget is the absence of a declaration rather than a bound at zero."
+			)
+		if escapes.orphan_deployments:
+			lines.append("")
+			lines.append(
+				f"{escapes.orphan_deployments} deployed report(s) reach no module, so they "
+				"fall in no lane's denominator. Counted rather than dropped."
+			)
+		lines.append("")
+		for caveat in escapes.caveats:
+			lines.append(f"- {caveat}")
 
 	lines += [
 		"",

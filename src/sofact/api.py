@@ -174,6 +174,12 @@ MACHINE_OPERATIONS: Final[dict[str, MachineOperation]] = {
 			invariant=READ_ONLY_INVARIANT,
 		),
 		MachineOperation(
+			name="escapes",
+			summary="The escape rate per lane and per autonomy level (FR-022).",
+			returns="{report: EscapeReport, escapes: [EscapeEvent]}",
+			invariant=READ_ONLY_INVARIANT,
+		),
+		MachineOperation(
 			name="sources",
 			summary="The source ledger and the claims resting on it (FR-069-FR-075).",
 			returns="SourceLedger or null",
@@ -311,6 +317,14 @@ async def payload_for(svc: FactoryService, operation: str) -> Any:
 		return {
 			"harnesses": {name: asdict(spec) for name, spec in svc.harness_table().items()},
 			"profiles": [profile.model_dump(mode="json") for profile in state.profiles],
+		}
+	if operation == "escapes":
+		# The rate *and* the raw events, because FR-021's "tracked forward through deploy"
+		# is a lookup a caller does on the events while FR-022's metric is the fold over
+		# them: publishing only the rate would make the recording unauditable.
+		return {
+			"report": (await svc.escape_report()).model_dump(mode="json"),
+			"escapes": [e.model_dump(mode="json") for e in state.escapes],
 		}
 	if operation == "sources":
 		ledger = await svc.current_ledger()

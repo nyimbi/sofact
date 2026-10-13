@@ -29,6 +29,8 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, computed_field, mode
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"ESCAPE_RATE_READING",
+	"ESCAPE_REQUIREMENTS",
 	"EVOLVABILITY_DEBT",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
@@ -74,6 +76,11 @@ __all__ = [
 	"EnvelopeActuals",
 	"EnvelopeDimension",
 	"EnvelopeMeasurement",
+	"EscapeBudget",
+	"EscapeEvent",
+	"EscapeKind",
+	"EscapeOverride",
+	"EscapeReport",
 	"Evidence",
 	"EvidenceKind",
 	"GateCheck",
@@ -96,6 +103,7 @@ __all__ = [
 	"IntegritySubject",
 	"InterfaceMember",
 	"InterfaceMemberKind",
+	"LaneEscape",
 	"LedgerEntry",
 	"LedgerKind",
 	"MachineEnvelope",
@@ -153,6 +161,7 @@ __all__ = [
 	"canonical_json",
 	"ceiling_for_rank",
 	"content_hash",
+	"lane_ceiling",
 	"now",
 	"topology_ceiling",
 	"topology_refusal",
@@ -2471,6 +2480,353 @@ class OracleAuditReport(View):
 
 
 # --------------------------------------------------------------------------- #
+# FR-021-023 — the escape oracle
+# --------------------------------------------------------------------------- #
+
+ESCAPE_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-021", "FR-022", "FR-023")
+"""What one escape measurement can carry out.
+
+Three requirements, and :attr:`EscapeReport.discharged` decides whether a reading
+carried them: a rate over zero deployments makes no claim, which is a different state
+from a rate of zero over deployments that all held. The two must not print the same
+line, which is the rule :data:`ORACLE_AUDIT_REQUIREMENTS` states one phase earlier.
+"""
+
+ESCAPE_RATE_READING: Final[str] = (
+	"rate = distinct defects recorded against the lane / distinct deployed reports whose "
+	"traceability chain reaches a module of that lane. The denominator includes the "
+	"deployment an escape escaped from, so the rate is conservatively high; the numerator "
+	"counts a defect once however many events it produced, so a revert followed by a "
+	"hotfix is one escape rather than two."
+)
+"""FR-022's reading rule, stated once so the report and its reader use one sentence.
+
+A rate whose numerator and denominator rules are implicit is a rate two readers compute
+differently from one ledger, which is the failure the rule exists to prevent.
+"""
+
+
+class EscapeKind(StrEnum):
+	"""FR-021's three escape events, and its own three words.
+
+	The set is the requirement's, not an invention: "revert, hot-fix, or incident
+	implicating the same defect". A fourth kind would need a requirement to name it, and a
+	free-text ``kind`` would make FR-022's per-kind breakdown ungroupable.
+	"""
+
+	REVERT = "revert"
+	HOTFIX = "hotfix"
+	INCIDENT = "incident"
+
+
+class EscapeEvent(View):
+	"""One escape: a deployed change that reality rejected (FR-021).
+
+	FR-021 asks every accepted change to be "tracked forward through deploy", with escape
+	events "recorded against the change, its lane, its oracle-strength band, and its
+	autonomy level". This type carries the first two; the band and the level are *derived*
+	at read time from the change's contract and its module class rather than copied here.
+	Storing them would freeze the numbers in force on the day of recording, and FR-023
+	reads the *current* rate to decide the *current* ceiling — a frozen band would let a
+	re-measured contract keep lowering an autonomy it no longer carries.
+	:attr:`EscapeReport` states the choice, so a reader does not have to infer it.
+
+	``lane`` is the operator's, and :meth:`~sofact.service.FactoryService.record_escape`
+	validates it against the report's own chain. Deriving it would discard the one thing
+	only the operator knows — *which* module broke, when a deployment spans several —
+	while validating it makes naming a lane that was never deployed impossible.
+	"""
+
+	id: UUID7
+	report_id: UUID7
+	"""The delivery that escaped. This is what makes "tracked forward through deploy"
+	checkable: an escape names the deployment it got past, and recording refuses one that
+	names a report no deploy record approved (FR-021, FR-119)."""
+
+	lane: ModuleClass
+	kind: EscapeKind
+	defect: NonEmptyStr
+	"""What was wrong, in the operator's words. The rate's numerator counts *distinct*
+	values of this field per lane, so one defect that took a revert and then a hotfix is
+	one escape rather than two (FR-022)."""
+
+	recorded_by: NonEmptyStr
+	recorded_at: datetime
+	note: NonEmptyStr | None = None
+
+
+class EscapeBudget(View):
+	"""One lane's declared escape budget, and who declared it (FR-023).
+
+	FR-023 says "a lane whose escape rate exceeds its **declared** budget". Declared, so
+	there is no default: §20.3 item 4 records that no escape baseline exists until there
+	has been a deployment, and NFR-024 forbids reporting a target the product has not
+	measured. Inventing a threshold here would be exactly the invented target that
+	requirement refuses, so an undeclared lane is *unbudgeted* — reported as such, and
+	left unreduced.
+
+	The budget is a rate, not a count: a lane deployed once that escaped once and a lane
+	deployed a hundred times that escaped once are not the same safety story, and only the
+	rate distinguishes them.
+	"""
+
+	lane: ModuleClass
+	maximum_rate: float
+	declared_by: NonEmptyStr
+
+	@model_validator(mode="after")
+	def _a_budget_bounds_a_rate(self) -> Self:
+		if not 0.0 <= self.maximum_rate <= 1.0:
+			raise ValueError(
+				f"the escape budget of {self.maximum_rate:g} is not a rate; 0.0 is a lane "
+				"that must escape never and 1.0 is one every deployment of which may escape, "
+				"and nothing outside that range is a share of deployments (FR-023)"
+			)
+		return self
+
+
+class EscapeOverride(View):
+	"""An operator's decision to run a lane over its escape budget, attributed (FR-023).
+
+	FR-023's last sentence is "manual override must be logged and attributed", and both
+	words carry weight. *Logged*, so this is a ledger row rather than a flag on a render:
+	the reduction it lifts persists until the rate returns to budget, so the override that
+	lifts it must persist too, and a render parameter would evaporate at the next render
+	and silently restore the reduction. *Attributed*, so the field is a name rather than a
+	boolean — an override with nobody attached is indistinguishable from the silent
+	downgrade FR-031 forbids, which is why ``topology_override`` is a string for the same
+	reason.
+
+	Reading is latest-per-lane (:meth:`ProjectState.latest_escape_override`), the rule
+	:meth:`ProjectState.gate_cost` states: two overrides of one lane are a decision and a
+	revision of it, not two decisions.
+	"""
+
+	lane: ModuleClass
+	accepted_by: NonEmptyStr
+	reason: NonEmptyStr
+	"""Why, in the operator's words. FR-023's whole mechanism is that a human may accept a
+	risk the measurement flags; an override with no reason records that the risk was taken
+	and not what was understood about it."""
+
+	recorded_at: datetime
+
+
+class LaneEscape(View):
+	"""One lane's escape measurement, and what it did to the lane's ceiling (FR-022).
+
+	Every field is required, including the awkward ones: ``budget`` is ``None`` rather
+	than a default because an undeclared budget is the absence of a declaration, and
+	``over_budget`` is ``None`` for the same reason — a lane with no budget is not *within*
+	it, it is unbudgeted, and collapsing those would report a clearance the operator never
+	declared.
+	"""
+
+	lane: ModuleClass
+	deployed_changes: int
+	"""Distinct deployed reports whose chain reaches a module of this lane."""
+
+	escapes: int
+	"""Distinct defects recorded against this lane across those deployments."""
+
+	rate: float
+	budget: EscapeBudget | None
+	over_budget: bool | None
+	"""``None`` when the lane is unbudgeted, which is not ``False``."""
+
+	granted_ceiling: AutonomyLevel
+	"""§14's ceiling for the class, before FR-023."""
+
+	oracle_ranks: tuple[int, ...] = ()
+	"""The oracle-strength bands FR-021 asks an escape be attributed to, weakest first.
+
+	One rank per *deployed change* whose chain reaches this lane, deduplicated. Derived at
+	read time from each change's own contract (:attr:`Contract.weakest_oracle_rank`) rather
+	than stored on the escape, for the reason :attr:`EscapeEvent` states: a stored band
+	would be the number in force on the day, and FR-023 reads the *current* rate to decide
+	the *current* ceiling.
+
+	Empty when no contract in the log accounts for this lane's deployments — a gap the
+	report shows rather than fills with a guess, since a band nobody derived is not a
+	measurement (NFR-024).
+	"""
+
+	reduced_ceiling: AutonomyLevel
+	"""The ceiling after FR-023. Equal to :attr:`granted_ceiling` when not over budget."""
+
+	override: EscapeOverride | None = None
+	"""The operator's acceptance, when one is in force for this lane (FR-023).
+
+	Carried on the row rather than looked up beside it so the report answers "who accepted
+	this?" in the same place it answers "how far over is it?" — an over-budget lane whose
+	row did not name its override would leave the reader to cross-reference the ledger for
+	the one fact FR-023 requires be attributable.
+	"""
+
+	@property
+	def reduced(self) -> bool:
+		"""Whether FR-023 lowered this lane, which is a different fact from being over
+		budget: an over-budget lane already at L0 is not lowered further, and one an
+		operator accepted is not lowered at all."""
+		return self.reduced_ceiling < self.granted_ceiling
+
+	@property
+	def reduced_by_fr_023(self) -> bool:
+		"""Whether the reduction is in force: over budget, and not accepted by a named human."""
+		return bool(self.over_budget) and self.override is None
+
+
+class EscapeReport(View):
+	"""FR-022's measurement: the escape rate per lane and per autonomy level.
+
+	The **primary safety metric**, and the requirement's argument for why is the reason
+	this type holds no producer input: FR-022 says the rate "cannot be gamed by the
+	producer because it is measured by events the producer does not author". Every field
+	here is a fold over deploy records and operator-recorded escapes. Nothing in the
+	factory's verification path writes to either.
+
+	Its honest limit is a *different* claim and is stated rather than conflated: the rate
+	is only as complete as the operator's recording. A producer cannot inflate it, but an
+	operator who does not record an escape lowers it, and "not gameable by the producer"
+	must not be read as "not gameable". That limit is FR-021's recording discipline, and
+	:attr:`caveats` names it.
+	"""
+
+	id: UUID7
+	rendered_at: datetime
+	lanes: tuple[LaneEscape, ...] = ()
+	"""One entry per lane that was *measured*, which includes lanes with zero escapes.
+
+	A lane with deployments and no escapes is the good case and must be visible; omitting
+	it would make the report a list of problems rather than a measurement."""
+
+	unbudgeted: tuple[ModuleClass, ...] = ()
+	"""Lanes with deployments and no declared budget. Reported, never reduced: FR-023
+	reduces a lane "whose escape rate exceeds its declared budget", and a lane with no
+	declaration is not one whose rate exceeds it."""
+
+	orphan_deployments: int = 0
+	"""Deployed reports whose traceability chain reaches no module, so they fall in no
+	lane's denominator. Counted rather than dropped: a report the metric cannot place is a
+	gap in the measurement, and a reader is owed the number."""
+
+	deployed_reports: int = 0
+	"""Distinct deployed reports the measurement saw, placed or not.
+
+	A field rather than ``sum(lane.deployed_changes)``, because one report spanning four
+	lanes is *one* change and appears in four denominators — summing the rows would report
+	it as four, and this number is what :attr:`discharged` reads to decide whether the
+	reading claims anything at all.
+	"""
+
+	@property
+	def deployed_changes(self) -> int:
+		"""How many distinct deployed reports the measurement saw, placed or not."""
+		return self.deployed_reports
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this reading carried out, which may be none.
+
+		The rule :attr:`OracleAuditReport.discharged` states: a rate over zero deployments
+		claims nothing. A project with no deploy has no ground truth yet, and a screen
+		showing "0 escapes" over it would report the absence of a measurement as a clean
+		bill of health.
+		"""
+		if not self.deployed_changes:
+			return ()
+		return ESCAPE_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-021-023 this reading did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in ESCAPE_REQUIREMENTS if name not in discharged)
+
+	@property
+	def over_budget(self) -> tuple[LaneEscape, ...]:
+		"""The lanes whose rate exceeds their declared budget (FR-023)."""
+		return tuple(lane for lane in self.lanes if lane.over_budget)
+
+	@property
+	def by_autonomy_level(self) -> dict[AutonomyLevel, tuple[LaneEscape, ...]]:
+		"""FR-022's second axis: the same lanes grouped by the ceiling they were granted.
+
+		Grouped by the *granted* ceiling — §14's class ceiling — rather than by the
+		delivery's, because in Mode G the delivery axis is degenerate: FR-123 caps every
+		Mode G delivery at :data:`MODE_G_CEILING` unconditionally, so every lane would land
+		in one bucket and the grouping would read as a finding when it is a cap. That is
+		stated on the report rather than left for a reader to notice, because a
+		single-bucket breakdown looks like a result.
+		"""
+		grouped: dict[AutonomyLevel, list[LaneEscape]] = {}
+		for lane in self.lanes:
+			grouped.setdefault(lane.granted_ceiling, []).append(lane)
+		return {level: tuple(rows) for level, rows in sorted(grouped.items())}
+
+	@property
+	def caveats(self) -> tuple[str, ...]:
+		"""What this measurement does not claim, stated rather than left to inference.
+
+		Three sentences, each closing a reading a careful operator would otherwise supply:
+		the numerator and denominator rules, the operator-recording limit that FR-022's
+		"cannot be gamed" must not be stretched over, and the derived-band choice that
+		FR-021's "its oracle-strength band, and its autonomy level" is satisfied by
+		derivation rather than by a stored copy.
+		"""
+		return (
+			ESCAPE_RATE_READING,
+			"the rate is complete only as far as the operator records escapes; FR-022's "
+			"claim is that no *producer* authors an input to it, which is not the claim "
+			"that it cannot be gamed at all",
+			"FR-021's oracle-strength band and autonomy level are derived at read time from "
+			"the change's contract and module class rather than stored on the escape, so a "
+			"re-measured contract is judged at the strength it now carries",
+		)
+
+
+def lane_ceiling(
+	lane: ModuleClass,
+	*,
+	rate: float,
+	budget: EscapeBudget | None,
+	override: EscapeOverride | None = None,
+) -> AutonomyLevel:
+	"""The ceiling a lane may claim once FR-023's reduction is applied.
+
+	§14's class ceiling, lowered **one level** when the lane's rate exceeds its declared
+	budget. One level because §5.4's own modifier unit is "-1 level": the ladder is
+	ordinal and the spec supplies no other quantum, so a larger step would be an invented
+	policy rather than a reading of the requirement.
+
+	**Not cumulative.** The reduction is a function of the *current* rate, so it is in
+	force while the rate is over budget and lifts when the rate returns — which is what
+	"reduced **until** escape rate returns to budget" says. A ratchet that remembered
+	every bad period would make a lane's ceiling a function of its history rather than of
+	its present, and no requirement asks for that.
+
+	An unbudgeted lane is unchanged: FR-023 reduces a lane over "its declared budget", and
+	a lane with no declaration is not one whose rate exceeds it. Guessing a threshold
+	would be NFR-024's forbidden target.
+
+	An override **lifts the reduction**, because that is what a manual override of an
+	automatic reduction means: the operator has accepted the risk the measurement flags and
+	says so by name. It is a ledger row rather than a flag precisely so that acceptance is
+	not silent — and it moves the ceiling and the deploy gate's refusal together, since a
+	delivery that passed its gate while still reporting a reduced ceiling would be
+	reporting two contradictory things. The measurement is not erased by the override:
+	:attr:`LaneEscape.rate`, ``budget`` and ``over_budget`` all still carry it, so a reader
+	sees that the lane is over budget *and* that a named person accepted it.
+	"""
+	granted = MODULE_CLASS_CEILING[lane]
+	if budget is None or rate <= budget.maximum_rate:
+		return granted
+	if override is not None:
+		return granted
+	return AutonomyLevel(max(int(granted) - 1, int(AutonomyLevel.L0)))
+
+
+# --------------------------------------------------------------------------- #
 # P3/P4 — the goal plan (FR-136, FR-137)
 # --------------------------------------------------------------------------- #
 
@@ -3476,6 +3832,22 @@ class DeliveryReport(View):
 	from the log alone — the topology a delivery was rendered under is part of what the
 	report *says*, not something a later reader has to reconstruct from the deployment's
 	current configuration, which may since have changed.
+	"""
+
+	escapes: EscapeReport | None = None
+	"""FR-022's escape measurement, or ``None`` when none was taken (FR-021-023).
+
+	A field rather than a property, for :attr:`topology`'s reason: the report must stay
+	readable from the log alone, and the rate a delivery was approved under is part of what
+	the report *says* rather than something a later reader reconstructs from escapes
+	recorded afterwards. ``None`` means the deployment configured no escape budget — a
+	different statement from a measurement that found nothing, and the report prints which.
+
+	The value is a reading of the log *at the moment of rendering*, so an escape recorded
+	after this report is not in it and the reduction appears in the next render. That is not
+	a gap in FR-022's rate, which is a fold over the whole ledger, but it is a fact a reader
+	of a stored report needs — and FR-117 versions reports precisely so an approver's copy
+	stays as it was.
 	"""
 
 	topology_configured: bool = False
@@ -4889,6 +5261,8 @@ class LedgerKind(StrEnum):
 	DEPLOY_RECORDED = "deploy.recorded"
 	GATE_COST_RECORDED = "gate_cost.recorded"
 	ORACLE_AUDITED = "oracle.audited"
+	ESCAPE_RECORDED = "escape.recorded"
+	ESCAPE_OVERRIDE_RECORDED = "escape_override.recorded"
 
 
 class LedgerEntry(View):
@@ -5154,6 +5528,24 @@ class ProjectState(View):
 	the most recent; the history is what shows FR-012's exploit-discovery rate over time.
 	"""
 
+	escapes: tuple[EscapeEvent, ...] = ()
+	"""Every escape the operator recorded, oldest first (FR-021).
+
+	Appended, never keyed, and for a stronger reason than :attr:`gate_costs`: an escape is
+	an event that happened, so two rows are two events — a revert and then a hotfix — and
+	keying them would delete the second. FR-022's numerator collapses them by *defect*
+	rather than by row, which is where that judgement belongs.
+	"""
+
+	escape_overrides: tuple[EscapeOverride, ...] = ()
+	"""Every operator override of an escape budget, oldest first (FR-023).
+
+	Appended, never keyed, with :meth:`latest_escape_override` reading the most recent per
+	lane — :attr:`gate_costs`'s rule. The history is what makes FR-023's "logged and
+	attributed" checkable: an override that was later withdrawn is still an override
+	someone signed.
+	"""
+
 	def latest_oracle_audit(self, contract_id: str) -> OracleAuditReport | None:
 		"""The most recent audit of one contract's oracles, if any was rendered (FR-107).
 
@@ -5163,6 +5555,25 @@ class ProjectState(View):
 		"""
 		matching = [a for a in self.oracle_audits if a.contract_id == contract_id]
 		return matching[-1] if matching else None
+
+	def latest_escape_override(self, lane: ModuleClass) -> EscapeOverride | None:
+		"""The most recent override of one lane's escape budget, if any (FR-023).
+
+		Latest per lane, the rule :meth:`gate_cost` states: two overrides of one lane are a
+		decision and a revision of it rather than two decisions, and only the current one is
+		in force. The history stays in the log, which is what makes "logged and attributed"
+		checkable after the fact.
+		"""
+		matching = [o for o in self.escape_overrides if o.lane is lane]
+		return matching[-1] if matching else None
+
+	def escapes_for(self, report_id: str) -> tuple[EscapeEvent, ...]:
+		"""Every escape recorded against one deployed change (FR-021).
+
+		FR-021's "tracked forward through deploy" is this lookup: an escape names a report,
+		and a report's escapes are the events reality filed against it.
+		"""
+		return tuple(e for e in self.escapes if e.report_id == report_id)
 
 	def gate_cost(self, gate: PhaseGate) -> GateCost | None:
 		"""The most recent recorded cost for one gate, if any (FR-160)."""
