@@ -1885,6 +1885,27 @@ class TestTheDeliverVerb:
 		assert "delivery_artifacts" in result.output
 		assert "exist under the delivery root" in result.output
 
+	def test_the_report_says_the_delivered_surface_was_not_verified(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-120 has two subjects and only one of them is the factory's (ADR-0048).
+
+		The verb prints the factory's *own* surface as built, so a reader who saw only the
+		green lines would take "machine-usable" for a property of what they are about to
+		ship. The delivered system's surface is checked by nothing, and the screen has to
+		say so.
+
+		The assertion names the **check**, not the substring: ``FR-120`` and ``not
+		verified`` both appear elsewhere in the output — the maintainability sentence is
+		on the same screen — so a substring test here passes with the check deleted, which
+		is exactly what the first canary showed.
+		"""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "machine_surface_not_verified" in result.output, result.output
+		assert "producer obligation" in result.output
+
 	def test_the_report_states_that_value_was_not_certified(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:

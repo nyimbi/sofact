@@ -23,7 +23,7 @@ from datetime import UTC, date, datetime
 from enum import IntEnum, StrEnum
 from typing import Annotated, Any, ClassVar, Final, Self
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, computed_field, model_validator
 
 from sofact._uuid7 import uuid7str
 
@@ -31,6 +31,7 @@ __all__ = [
 	"EVOLVABILITY_DEBT",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
+	"MACHINE_API_VERSION",
 	"MAINTAINABILITY_NOT_VERIFIED",
 	"MODE_G_CEILING",
 	"MODE_M_CEILING",
@@ -95,6 +96,9 @@ __all__ = [
 	"InterfaceMemberKind",
 	"LedgerEntry",
 	"LedgerKind",
+	"MachineEnvelope",
+	"MachineOperation",
+	"MachineRequest",
 	"MaintenanceLane",
 	"Module",
 	"ModuleCheckout",
@@ -4606,6 +4610,88 @@ class Advice(View):
 	def _exactly_one(self) -> Self:
 		if (self.text is None) == (self.unavailable is None):
 			raise ValueError("advice must be either text or a reason it is unavailable")
+		return self
+
+
+# --------------------------------------------------------------------------- #
+# FR-120 — the machine surface's envelope
+# --------------------------------------------------------------------------- #
+
+MACHINE_API_VERSION: Final[str] = "1"
+"""The machine surface's version, carried on every response (FR-120).
+
+A *string* and not a number, because FR-120's word is "stable" and the useful thing a
+caller can do with a version is compare it for equality, not order it. Bumping it is how a
+change to an operation's shape is announced; the operations themselves are named, so
+adding one does not bump this and changing what one returns does.
+"""
+
+
+class MachineOperation(View):
+	"""One operation FR-120's surface publishes.
+
+	The ``invariant`` is a field rather than a docstring because it travels: a caller that
+	reads the table learns *why* the operation is shaped as it is, and the same sentence
+	appears on the response the operation returns. An operation whose invariant is only in
+	the source is one a caller has to read the source to trust.
+	"""
+
+	name: NonEmptyStr
+	summary: NonEmptyStr
+	returns: NonEmptyStr
+	invariant: NonEmptyStr
+
+
+class MachineRequest(View):
+	"""One call against FR-120's surface.
+
+	``arguments`` is a free mapping rather than a typed union, because the surface is
+	read-only and its operations take at most a name. A typed union of nine near-empty
+	argument models would be nine types to keep in step with the table for no gain; when an
+	operation needs an argument, this field's *contents* get a type and the shape of the
+	envelope does not change.
+	"""
+
+	operation: NonEmptyStr
+	arguments: dict[str, str] = {}
+
+
+class MachineEnvelope(View):
+	"""What FR-120's surface returns: one closed shape for every operation.
+
+	``ok`` is **derived** from ``error`` rather than stored beside it, so a response cannot
+	report success and carry an error at once — the discipline
+	:func:`sofact.delivery.report` applies to its own checks, one surface along. A refused
+	operation carries ``result=None``: a refusal that also returned a partial answer is an
+	answer a caller would use.
+
+	It is a :func:`~pydantic.computed_field` rather than a plain property for a reason that
+	is the whole surface: the caller here is a *program* reading JSON, and a plain property
+	is absent from the serialised document, so the one field a caller branches on would be
+	the one field it could not see. Computed is still not stored — the field cannot be set,
+	and a payload that carried ``ok`` would be rejected as an extra field.
+	"""
+
+	id: UUID7
+	api_version: str
+	operation: str
+	invariant: str
+	error: str | None = None
+	result: Any = None
+
+	@computed_field  # type: ignore[prop-decorator]
+	@property
+	def ok(self) -> bool:
+		"""Whether the operation was answered. The one place the two halves can disagree."""
+		return self.error is None
+
+	@model_validator(mode="after")
+	def _a_refusal_carries_no_result(self) -> Self:
+		if self.error is not None and self.result is not None:
+			raise ValueError(
+				"a refused operation cannot also carry a result: a caller would use the "
+				"partial answer and never read the refusal (FR-120)"
+			)
 		return self
 
 

@@ -643,6 +643,21 @@ def report(
 			),
 		),
 		GateCheck(
+			name="machine_surface_not_verified",
+			passed=True,
+			detail=(
+				"FR-120 asks that the *delivered* system be machine-usable as well as "
+				"human-usable — a documented, stable API surface. **It is not verified "
+				"here.** No oracle in O1-O8 observes whether an artefact has a usable "
+				"interface, so a check would be one that cannot pass. The factory's own "
+				"surface is another matter and is built (`sofact api <operation>`, "
+				"ADR-0048); the delivered system's is a producer obligation this report "
+				"names rather than verifies. This check reports rather than fails for "
+				"FR-158's reason one requirement along: refusing a delivery for a property "
+				"no oracle observes would refuse all of them"
+			),
+		),
+		GateCheck(
 			name="envelope_actuals_reported",
 			passed=True,
 			detail=(

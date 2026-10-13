@@ -13,6 +13,7 @@ long-lived event loop would buy nothing and would complicate Ctrl-C.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +22,7 @@ import typer
 from pydantic import ValidationError
 
 from sofact import __version__
+from sofact import api as machine_api
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, unexecutable_clauses
 from sofact.elicitation import DIMENSIONS
@@ -52,6 +54,7 @@ from sofact.views import (
 	GoalStyle,
 	HarnessProfile,
 	IntegrityOutcome,
+	MachineRequest,
 	Phase,
 	PhaseStatus,
 	ProbeOutcome,
@@ -578,6 +581,37 @@ async def _status(svc: FactoryService) -> None:
 		f"\nledger: {chain.length} entries, chain {'intact' if chain.ok else 'BROKEN'}",
 		fg="green" if chain.ok else "red",
 	)
+
+
+@app.command(name="api")
+def api_call(
+	ctx: typer.Context,
+	operation: str | None = typer.Argument(
+		None, help="Operation to call; omit with --list to read the surface."
+	),
+	list_operations: bool = typer.Option(
+		False, "--list", help="Print the published operations and exit."
+	),
+	home: Path | None = _HOME_OPTION,
+) -> None:
+	"""Call FR-120's machine surface and print the envelope as JSON.
+
+	The CLI verbs remain the human surface and are unchanged. This is the same facts
+	behind one closed envelope, so a program can drive the factory without parsing
+	prose. Reads only: the four human gates are refused by name, with the verb to use.
+	"""
+	if list_operations:
+		typer.echo(json.dumps(machine_api.surface(), indent=2, sort_keys=True))
+		return
+	if operation is None:
+		typer.secho("name an operation, or pass --list to read the surface", fg="red")
+		raise typer.Exit(code=2)
+	envelope = asyncio.run(
+		machine_api.dispatch(_service(_home_of(ctx, home)), MachineRequest(operation=operation))
+	)
+	typer.echo(json.dumps(envelope.model_dump(mode="json"), indent=2, sort_keys=True))
+	if not envelope.ok:
+		raise typer.Exit(code=1)
 
 
 @app.command(name="ledger")

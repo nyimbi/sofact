@@ -477,6 +477,87 @@ class TestMaintainabilityIsNotVerified:
 
 
 # --------------------------------------------------------------------------- #
+# FR-120's delivered-system half: named, and not faked
+# --------------------------------------------------------------------------- #
+
+
+class TestTheMachineSurfaceIsAProducerObligation:
+	"""FR-120 has two subjects and only one of them is checkable here (ADR-0048).
+
+	The requirement's subject is the *delivered* system, and no oracle in O1-O8 observes
+	whether an artefact exposes a usable interface. The failure this class guards against
+	is the tempting one: a check that asserts the factory "produced a machine-usable
+	system" by looking for, say, an ``openapi.json`` in the delivery root — a check that
+	would pass on a project that happened to have one and fail on every other, which is a
+	check measuring the fixture rather than the requirement.
+	"""
+
+	def a_rendered_report(self) -> DeliveryReport:
+		contract = one_clause_contract("the ledger records entries", command="true")
+		return report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=propose(contract),
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+		)
+
+	def test_the_report_names_it_and_says_it_was_not_verified(self) -> None:
+		check = next(
+			c for c in self.a_rendered_report().checks if c.name == "machine_surface_not_verified"
+		)
+
+		assert check.passed, "a check that cannot pass is one an operator learns to bypass"
+		assert "FR-120" in check.detail
+		assert "not verified" in check.detail, "the check must not read as a verification"
+		assert "producer obligation" in check.detail
+
+	def test_the_report_still_owes_the_requirement(self) -> None:
+		"""A requirement dropped from the list is a requirement nobody reads about.
+
+		The list is on the *document* rather than on the report, and that is where a
+		reader meets it — so the assertion is against the rendering, not against a field
+		the report does not have.
+		"""
+		assert "FR-120" in DELIVERY_REQUIREMENTS
+		assert "FR-120" in render_delivery_document(a_report())
+		assert "Requirements: FR-117, FR-118, FR-119, FR-120, FR-121" in (
+			render_delivery_document(a_report())
+		)
+
+	def test_the_delivery_document_has_a_section_for_it(self) -> None:
+		rendered = render_delivery_document(a_report())
+
+		assert "## Machine surface" in rendered
+		assert "FR-120" in rendered
+		assert "not verified here" in rendered
+
+	def test_the_runbook_says_what_nobody_checked(self) -> None:
+		rendered = render_runbook(a_report())
+
+		assert "FR-120" in rendered
+		assert "not verified" in rendered
+
+	def test_no_check_claims_the_delivered_system_is_machine_usable(self) -> None:
+		"""The class this guards: a check whose *name* claims the property.
+
+		The obligation is named; the property is not claimed. A check passing on a
+		directory that happens to contain an API description would be measuring the
+		fixture.
+		"""
+		names = {c.name for c in self.a_rendered_report().checks}
+
+		assert "machine_surface_not_verified" in names
+		assert not [n for n in names if n.startswith("machine_usable")], (
+			"a check named for the property is a check claiming to have observed it"
+		)
+
+
+# --------------------------------------------------------------------------- #
 # an absence carries a reason, and presence is a filesystem fact
 # --------------------------------------------------------------------------- #
 

@@ -54,6 +54,7 @@ DELIVERY_HEADINGS: Final[tuple[str, ...]] = (
 	"Envelope actuals",
 	"Gate cost",
 	"Debt",
+	"Machine surface",
 	"Autonomy",
 	"Maintenance handover",
 	"Machine checks",
@@ -126,6 +127,15 @@ def render_delivery_document(report: DeliveryReport) -> str:
 		"construction. No oracle in O1-O8 observes change cost, so this is the correct "
 		"value rather than a measurement failure, and it is reported as its own number "
 		"rather than folded into the one above.",
+		"",
+		"## Machine surface",
+		"",
+		"FR-120 asks that this system be machine-usable as well as human-usable. **That is "
+		"not verified here.** No oracle in O1-O8 observes whether an artefact exposes a "
+		"usable interface, so a check would be one that cannot pass — and this is a "
+		"producer obligation the report names rather than one the factory discharges. The "
+		"factory's own surface is separate and is built: `sofact api <operation>` "
+		"(ADR-0048).",
 		"",
 		"## What was built",
 		"",
@@ -369,6 +379,13 @@ def render_runbook(report: DeliveryReport) -> str:
 	lines.append(
 		"The factory verified requirements, not value (FR-086). Nothing here is evidence "
 		"that the system is worth running."
+	)
+	lines.append("")
+	lines.append(
+		"FR-120 asks that this system be machine-usable as well as human-usable, and that "
+		"is **not verified here**: no oracle in O1-O8 observes whether an artefact exposes "
+		"a usable interface. Whether this system can be driven by a program is a claim "
+		"nobody has checked (ADR-0048)."
 	)
 	lines.append("")
 	lines.append(
