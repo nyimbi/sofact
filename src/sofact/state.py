@@ -38,6 +38,7 @@ from sofact.views import (
 	IntegrityCheck,
 	LedgerEntry,
 	LedgerKind,
+	OracleAuditReport,
 	PhaseAdvance,
 	ProjectState,
 	RepairAttempt,
@@ -142,6 +143,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	deliveries: list[DeliveryReport] = []
 	deploys: list[DeployRecord] = []
 	gate_costs: list[GateCost] = []
+	oracle_audits: list[OracleAuditReport] = []
 
 	for entry in ordered:
 		if entry.index in hidden:
@@ -225,6 +227,8 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# second deploy is a second act rather than an amendment of the first, and
 				# the history of who deployed what is the point of recording it.
 				deploys.append(DeployRecord.model_validate(payload["deploy"]))
+			case LedgerKind.ORACLE_AUDITED:
+				oracle_audits.append(OracleAuditReport.model_validate(payload["audit"]))
 			case LedgerKind.GATE_COST_RECORDED:
 				# Appended for the same reason: FR-160 measures a human act, and two
 				# recordings of one gate are two measurements rather than an edit.
@@ -259,6 +263,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		deliveries=tuple(deliveries),
 		deploys=tuple(deploys),
 		gate_costs=tuple(gate_costs),
+		oracle_audits=tuple(oracle_audits),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

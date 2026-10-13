@@ -37,6 +37,7 @@ __all__ = [
 	"MODE_G_CEILING",
 	"MODE_M_CEILING",
 	"MODULE_CLASS_CEILING",
+	"ORACLE_AUDIT_REQUIREMENTS",
 	"ORACLE_RANK",
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
@@ -105,6 +106,9 @@ __all__ = [
 	"ModuleCheckout",
 	"ModuleClass",
 	"NonGoal",
+	"OracleAuditFinding",
+	"OracleAuditReport",
+	"OracleAuditSkip",
 	"OracleClass",
 	"OracleDeclaration",
 	"Phase",
@@ -2327,6 +2331,143 @@ class VerificationReport(View):
 		if self.insufficient:
 			return VerdictOutcome.INSUFFICIENT
 		return VerdictOutcome.SATISFIED
+
+
+# --------------------------------------------------------------------------- #
+# FR-107 — the adversarial audit of the oracle set
+# --------------------------------------------------------------------------- #
+
+ORACLE_AUDIT_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-107",)
+"""What one audit pass can carry out.
+
+One requirement, and :attr:`OracleAuditReport.discharged` is what decides whether the
+pass carried it: an audit over nothing probed makes no claim, which is a different state
+from an audit that probed and found nothing. The two must not print the same line, which
+is the rule :data:`INTEGRATION_REQUIREMENTS` states one phase later.
+"""
+
+
+class OracleAuditFinding(View):
+	"""An oracle that was satisfied by nothing, and the clause it was meant to check (FR-107).
+
+	FR-107's own words: an oracle "that can be satisfied without implementing the
+	invariant". The finding is a measurement rather than a judgement about the command's
+	spelling — the oracle was *run* against an empty workspace and reported SATISFIED — so
+	it cannot be argued with by rewording a hint.
+
+	There is deliberately no ``kind`` field and no companion enum. A single-member enum
+	would name one thing and read as a capability, and the type *is* the kind: this class
+	means "satisfied by nothing" and nothing else. A second finding class arrives with its
+	own type when a second kind of defect is actually measured.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	oracle_class: OracleClass
+	"""The operator's own declaration of how strong this oracle was supposed to be.
+
+	Carried because the severity differs and the operator is the one who must judge it: a
+	rank-1 property oracle that passes against nothing was claiming to establish an
+	invariant and establishes nothing, while a rank-6 example passing there is a sample
+	that sampled nothing. Both are findings; the first is the one that grants autonomy.
+	"""
+
+	command: NonEmptyStr
+	"""The oracle's command, so the finding names something the operator can act on.
+
+	An operator-facing value: this report reaches the ledger and the operator's screen,
+	and nothing renders it into producer context. The producer-facing holdout is FR-106's
+	and lives on :attr:`OracleDeclaration.held_out`; if an audit report ever does become
+	producer input, that predicate is the one to apply here.
+	"""
+
+	detail: NonEmptyStr
+
+
+class OracleAuditSkip(View):
+	"""A clause this pass did not probe, in its own words, and why (FR-107).
+
+	``statement`` is carried here and not on the probed set, and the asymmetry is the
+	point: a *skipped* clause is one the operator may have to act on — by writing a
+	command, or by accepting that the scoping rule excludes it — so naming it by id alone
+	would force a lookup for the one list that needs reading. The probed clauses are the
+	ones with nothing to report, and their ids answer the only question asked of them.
+	"""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	because: NonEmptyStr
+
+
+class OracleAuditReport(View):
+	"""One adversarial pass over a contract's oracle set (FR-107).
+
+	Names the contract *and* its hash for the reason FR-139 gives a verdict the same
+	treatment: a finding is only actionable against the exact oracle set it was measured
+	on, and re-keying it to a later contract would attach an old measurement to oracles
+	nobody ran.
+	"""
+
+	id: UUID7
+	contract_id: UUID7
+	contract_hash: str
+	rendered_at: datetime
+	probed: tuple[UUID7, ...] = ()
+	"""Clauses whose oracle was run against an empty workspace and judged."""
+
+	skipped: tuple[OracleAuditSkip, ...] = ()
+	"""Clauses this pass did not ask about. Reported rather than passed over: a clause the
+	audit could not reach is not a clause it cleared, and FR-108's debt and FR-107's audit
+	are different questions with different remedies."""
+
+	findings: tuple[OracleAuditFinding, ...] = ()
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this pass actually carried out, which may be none.
+
+		The same rule :attr:`~sofact.views.IntegrationCheck.discharged` states: a pass over
+		no probed oracle claims nothing, however clean it looks. ``passed`` is not the test
+		— a contract of intentions has nothing to probe and is reported as unclaimed rather
+		than as audited.
+		"""
+		if not self.probed:
+			return ()
+		return ORACLE_AUDIT_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-107 this pass did not carry out.
+
+		Derived from what was discharged rather than from a hand-kept list, so a pass that
+		stops probing takes the requirement with it into this tuple. A contract whose every
+		oracle is an intention naming no command lands here, and that is the honest reading:
+		the audit asked nothing, so it found nothing, and a screen showing only the second
+		half would report a gap as a clearance.
+		"""
+		discharged = set(self.discharged)
+		return tuple(name for name in ORACLE_AUDIT_REQUIREMENTS if name not in discharged)
+
+	@property
+	def passed(self) -> bool:
+		"""Whether the pass found no oracle satisfied by nothing.
+
+		Says only that nothing was found, never that the oracles are good: a pass that
+		probed nothing passes vacuously, and :attr:`not_implemented` is what distinguishes
+		it from a pass that probed and found nothing.
+		"""
+		return not self.findings
+
+	@property
+	def weakest_audited_rank(self) -> int | None:
+		"""The weakest rank among the probed oracles, or ``None`` when nothing was probed.
+
+		Read off the findings rather than carried as a field, because the useful number is
+		about the *unprobed* set and a second stored copy would be a second thing to keep
+		true. ``None`` is not ``0``: nothing probed is an absent measurement.
+		"""
+		ranks = {ORACLE_RANK[finding.oracle_class] for finding in self.findings}
+		return max(ranks) if ranks else None
 
 
 # --------------------------------------------------------------------------- #
@@ -4747,6 +4888,7 @@ class LedgerKind(StrEnum):
 	DELIVERY_RENDERED = "delivery.rendered"
 	DEPLOY_RECORDED = "deploy.recorded"
 	GATE_COST_RECORDED = "gate_cost.recorded"
+	ORACLE_AUDITED = "oracle.audited"
 
 
 class LedgerEntry(View):
@@ -5002,6 +5144,25 @@ class ProjectState(View):
 	:meth:`gate_cost` reads the latest, and the sum over all of them would be wrong, so
 	the accessor is the only intended reader.
 	"""
+
+	oracle_audits: tuple[OracleAuditReport, ...] = ()
+	"""Every adversarial oracle audit the log records, oldest first (FR-107).
+
+	Appended, never keyed, and for :attr:`gate_costs`'s reason: an audit is a measurement
+	of a contract's oracles at a moment, so a second audit of a repaired oracle is a second
+	measurement rather than an amendment of the first. :meth:`latest_oracle_audit` reads
+	the most recent; the history is what shows FR-012's exploit-discovery rate over time.
+	"""
+
+	def latest_oracle_audit(self, contract_id: str) -> OracleAuditReport | None:
+		"""The most recent audit of one contract's oracles, if any was rendered (FR-107).
+
+		Keyed by contract rather than returned as a single latest, because two contracts can
+		be live at once — a re-contracted goal — and an audit of one says nothing about the
+		other's oracles.
+		"""
+		matching = [a for a in self.oracle_audits if a.contract_id == contract_id]
+		return matching[-1] if matching else None
 
 	def gate_cost(self, gate: PhaseGate) -> GateCost | None:
 		"""The most recent recorded cost for one gate, if any (FR-160)."""

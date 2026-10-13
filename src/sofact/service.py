@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
+from sofact.audit import audit_oracles as run_oracle_audit
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
 from sofact.delivery import DELIVERY_ARTIFACT_PATHS
@@ -112,6 +113,7 @@ from sofact.views import (
 	IntegrityCheck,
 	LedgerKind,
 	NonGoal,
+	OracleAuditReport,
 	OracleDeclaration,
 	Phase,
 	PhaseAdvance,
@@ -2466,6 +2468,31 @@ class FactoryService:
 			{"integration": report.model_dump(mode="json")},
 		)
 		return report
+
+	# ------------------------------------------- FR-107: the adversarial audit
+
+	async def audit_oracles(
+		self,
+		contract_id: str,
+		*,
+		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
+		workspace: Path | None = None,
+	) -> OracleAuditReport:
+		"""Run the contract's probeable oracles against an empty workspace, and record it.
+
+		The contract is re-read from the log rather than taken from the caller, for the
+		reason :meth:`check_integrity` gives: the thing being audited is the oracle set the
+		log holds, and a caller-supplied contract would be the audit grading its own input.
+
+		``workspace`` exists for tests that want to see the tree the oracles ran in.
+		Production passes nothing and a fresh temporary directory is used, so the audit
+		writes nothing into the operator's home — FR-003 makes the ledger the only account
+		of a run, and a leftover audit tree would be a second one.
+		"""
+		contract = await self.contract_by_id(contract_id)
+		audit = await run_oracle_audit(contract, timeout=timeout, workspace=workspace)
+		self._commit(LedgerKind.ORACLE_AUDITED, {"audit": audit.model_dump(mode="json")})
+		return audit
 
 	@staticmethod
 	def _worst_verdict_per_clause(state: ProjectState) -> dict[str, VerdictOutcome]:

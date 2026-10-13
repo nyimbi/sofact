@@ -383,6 +383,79 @@ class TestTheContract:
 
 
 # --------------------------------------------------------------------------- #
+# the adversarial audit — FR-107 at the operator's surface
+# --------------------------------------------------------------------------- #
+
+
+class TestTheAuditVerb:
+	def test_an_oracle_satisfied_by_nothing_exits_nonzero(self, home: Path) -> None:
+		"""FR-107's defect, at the surface, with a non-zero exit so a script can gate on it.
+
+		``--commands true`` is the operator's own declaration that every clause is checked
+		by ``true``, and the audit is what says that declaration checks nothing.
+		"""
+		conversation(home)
+		RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
+
+		result = RUNNER.invoke(app, ["--home", str(home), "audit"])
+
+		assert result.exit_code == 1, result.output
+		assert "FR-107 oracle audit" in result.output
+		assert "was satisfied without implementing anything" in result.output
+		assert "false claim of coverage" in result.output
+
+	def test_an_oracle_that_can_fail_exits_zero(self, home: Path) -> None:
+		"""The control arm: the same verb, a command that cannot pass against nothing."""
+		conversation(home)
+		RUNNER.invoke(
+			app,
+			["--home", str(home), "contract", "--command", "pytest tests/test_report.py"],
+		)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "audit"])
+
+		assert result.exit_code == 0, result.output
+		assert "can fail against an empty workspace" in result.output
+		assert "false claim of coverage" not in result.output
+
+	def test_the_audit_names_what_it_could_not_ask(self, home: Path) -> None:
+		"""The negative clauses are reported rather than passed.
+
+		The interrogation derives BOUNDARY and FAILURE as negative, so this is the state
+		of every real contract — and a screen that showed only the probed half would let
+		an operator read "skipped" as "fine".
+		"""
+		conversation(home)
+		RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"])
+
+		result = RUNNER.invoke(app, ["--home", str(home), "audit"])
+
+		assert "[skip]" in result.output
+		assert "asserts an absence" in result.output
+
+	def test_a_contract_of_intentions_reports_the_gap_not_a_clean_pass(self, home: Path) -> None:
+		"""Nothing probed is not the same fact as nothing found, and the screen says which.
+
+		Every suggested oracle names no command, so the audit asks nothing — and it must
+		not exit 0 with a green line, because a reader would take that for a clearance.
+		"""
+		conversation(home)
+		RUNNER.invoke(app, ["--home", str(home), "contract"])
+
+		result = RUNNER.invoke(app, ["--home", str(home), "audit"])
+
+		assert "not implemented: FR-107" in result.output
+		assert "cleared nothing" in result.output
+		assert "can fail against an empty workspace" not in result.output
+
+	def test_the_audit_without_a_contract_says_so(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "audit"])
+		assert result.exit_code == 1, result.output
+		assert "no contract yet" in result.output
+
+
+# --------------------------------------------------------------------------- #
 # the configured harness table — the seam FR-156 asks for
 # --------------------------------------------------------------------------- #
 

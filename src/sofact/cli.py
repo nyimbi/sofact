@@ -24,9 +24,11 @@ from pydantic import ValidationError
 from sofact import __version__
 from sofact import api as machine_api
 from sofact._uuid7 import uuid7str
+from sofact.audit import EMPTY_WORKSPACE_INSTRUMENT
 from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
+from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.harness import HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.service import (
@@ -57,6 +59,7 @@ from sofact.views import (
 	InterfaceMember,
 	InterfaceMemberKind,
 	MachineRequest,
+	OracleAuditReport,
 	Phase,
 	PhaseStatus,
 	ProbeOutcome,
@@ -1776,6 +1779,70 @@ async def _integrate(svc: FactoryService) -> None:
 			fg="red",
 		)
 		raise typer.Exit(code=1)
+
+
+@app.command()
+def audit(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	timeout: float = typer.Option(
+		DEFAULT_ORACLE_TIMEOUT_SECONDS,
+		"--timeout",
+		help="Seconds to allow one oracle before its result is INSUFFICIENT.",
+	),
+) -> None:
+	"""Audit the contract's oracles adversarially (FR-107)."""
+	asyncio.run(_audit(_service(_home_of(ctx, home)), timeout))
+
+
+async def _audit(svc: FactoryService, timeout: float) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	report = await svc.audit_oracles(built.id, timeout=timeout)
+	_print_audit(report)
+	if not report.passed:
+		raise typer.Exit(code=1)
+
+
+def _print_audit(report: OracleAuditReport) -> None:
+	typer.secho("\nFR-107 oracle audit", fg="cyan", bold=True)
+	typer.secho(f"  contract {report.contract_id} @ {report.contract_hash[:12]}", fg="bright_black")
+	typer.secho(f"  instrument: {EMPTY_WORKSPACE_INSTRUMENT}", fg="bright_black")
+	typer.echo(f"  probed {len(report.probed)} clause(s)")
+	for finding in report.findings:
+		typer.secho(
+			f"  [FAIL] {finding.oracle_class.value} oracle on {finding.statement}", fg="red"
+		)
+		typer.secho(f"         {finding.detail}", fg="bright_black")
+	for skip in report.skipped:
+		typer.secho(f"  [skip] {skip.statement}", fg="bright_black")
+		typer.secho(f"         {skip.because}", fg="bright_black")
+	if report.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(report.not_implemented)
+			+ ". Nothing was probed, so this pass cleared nothing.",
+			fg="yellow",
+		)
+	if report.passed and report.probed:
+		typer.secho(
+			f"\n  {len(report.probed)} oracle(s) can fail against an empty workspace, so none "
+			"of them is satisfied by nothing.",
+			fg="green",
+		)
+	if report.findings:
+		typer.secho(
+			"\n  These oracles cannot fail, so the clauses they cover are not established by "
+			"them (FR-107). A missing test is a gap; an oracle satisfied by nothing is a "
+			"false claim of coverage.",
+			fg="red",
+		)
 
 
 @app.command()
