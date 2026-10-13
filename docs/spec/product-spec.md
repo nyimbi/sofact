@@ -1903,7 +1903,8 @@ v0.1's lane and oracle definition formats are retained. New surface:
 `contract`, `plan`, `probe`, `dispatch`, `verify`, `integrity`, `precision`, `claim`,
 `dimensions`, `draft`, `status`, `ledger`, `verify-ledger`, `rollback`, `repair`, `run`,
 `envelope` (§1.3: FR-057, NFR-025 — ADR-0039), `deliver` and `deploy` (§11's report and
-its human gate: FR-117–FR-119, FR-121, FR-086 — ADR-0040). FR-120's machine-usable
+its human gate: FR-117–FR-119, FR-121, FR-086 — ADR-0040; the report's autonomy pair is
+FR-122/FR-123 — ADR-0041). FR-120's machine-usable
 surface is not built and `DELIVERY_REQUIREMENTS` names it rather than dropping it. The planned
 verbs remain the target surface; `plan` is §8.4's compiler, `probe` is FR-148, `dispatch` is
 FR-142's wave scheduler (and FR-163's trigger: **a completed session** is checked against the

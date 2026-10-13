@@ -2312,8 +2312,14 @@ async def _deliver(
 
 	typer.secho(f"\ndelivery report {report.id}", fg="cyan", bold=True)
 	typer.secho(
-		f"  autonomy: {report.autonomy.name} — the lowest ceiling anything in the "
-		"delivery carries (FR-122)",
+		f"  autonomy: {report.autonomy.name} — the delivery's, and FR-123 caps a Mode G "
+		"delivery at L2 because P2, P3 and P8 are human gates",
+		fg="bright_black",
+	)
+	typer.secho(
+		f"  modules:  {report.module_autonomy.name} — what the modules sustain internally "
+		"(FR-122), before that cap. Autonomous module construction inside a "
+		"human-validated architecture.",
 		fg="bright_black",
 	)
 	typer.secho("\n  artefacts (FR-117)", fg="cyan")

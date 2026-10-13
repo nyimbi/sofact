@@ -37,6 +37,7 @@ from typing import Final
 
 from sofact._uuid7 import uuid7str
 from sofact.views import (
+	MODE_G_CEILING,
 	MODULE_CLASS_CEILING,
 	UNPRODUCIBLE,
 	UNPRODUCIBLE_KINDS,
@@ -68,6 +69,7 @@ __all__ = [
 	"ceiling",
 	"chain",
 	"handover",
+	"module_autonomy",
 	"report",
 	"verified_and_unverified",
 ]
@@ -228,21 +230,40 @@ def verified_and_unverified(
 	return tuple(verified), tuple(unverified)
 
 
-def ceiling(contract: Contract, decomposition: Decomposition | None) -> AutonomyLevel:
-	"""The autonomy the delivery may claim: the lowest ceiling anything in it carries.
+def module_autonomy(contract: Contract, decomposition: Decomposition | None) -> AutonomyLevel:
+	"""The autonomy the *modules* sustain: the lower of the two measured ceilings (FR-122).
 
-	FR-122 makes the lower bound govern, and there are two bounds. The contract's is
-	``ceiling_for_rank`` on the weakest oracle (FR-007); the decomposition's is
-	:data:`~sofact.views.MODULE_CLASS_CEILING` on each module's class (FR-125/FR-126).
-	A delivery that reported the contract's ceiling alone would claim an autonomy a G7
-	module forbids — auth, secrets, payments or PII, where FR-126 makes the work
-	human-authored regardless of how strong the oracles are.
+	The contract's ceiling is ``ceiling_for_rank`` on the weakest oracle (FR-007); the
+	decomposition's is :data:`~sofact.views.MODULE_CLASS_CEILING` on each module's class
+	(FR-125/FR-126). The lower governs, so a G7 module — auth, secrets, payments or PII,
+	where FR-126 makes the work human-authored — lowers a delivery the contract alone
+	would have raised.
+
+	This is the number FR-123 calls the *internal* one. It is not the delivery's, and the
+	difference between the two is what :func:`ceiling` computes and the report states.
 	"""
-	ceiling = contract.ceiling
+	assert contract.clauses, "cannot compute an autonomy for a contract with no clauses"
+	measured = contract.ceiling
 	if decomposition is not None:
 		for module in decomposition.modules:
-			ceiling = AutonomyLevel(min(ceiling, MODULE_CLASS_CEILING[module.module_class]))
-	return ceiling
+			measured = AutonomyLevel(min(measured, MODULE_CLASS_CEILING[module.module_class]))
+	return measured
+
+
+def ceiling(contract: Contract, decomposition: Decomposition | None) -> AutonomyLevel:
+	"""The autonomy the *delivery* may claim: the module number, capped at L2 (FR-123).
+
+	FR-123's argument is that P2, P3 and P8 are human gates, so a Mode G delivery is L2
+	end-to-end however strong its oracles are. Applying the cap here — and unconditionally,
+	including when no decomposition exists — is the whole of the requirement's force: a
+	report that could exceed L2 because a phase artefact was missing would be a cap that
+	fails open on missing input.
+
+	The cap is not a claim about the modules. :func:`module_autonomy` is reported beside
+	this number, because "individual modules may run at L4 internally; the delivery is L2"
+	is a *distinction* and one number cannot express it.
+	"""
+	return AutonomyLevel(min(module_autonomy(contract, decomposition), MODE_G_CEILING))
 
 
 def _lane_oracles(contract: Contract) -> tuple[InheritedOracle, ...]:
@@ -388,6 +409,8 @@ def report(
 	links = chain(contract, decomposition, plan, requirement_for_clause=requirement_for_clause)
 	verified, unverified = verified_and_unverified(contract, verdicts)
 	handed = handover(contract, system=system, entry_point=entry_point)
+	modules_autonomy = module_autonomy(contract, decomposition)
+	delivered_autonomy = ceiling(contract, decomposition)
 
 	artifacts = tuple(artifact(kind, root) for kind in DeliveryArtifactKind)
 	# Scoped, and the scoping is the whole of this line's content: two of FR-117's four
@@ -492,6 +515,24 @@ def report(
 				"only against a gate a named person passed"
 			),
 		),
+		GateCheck(
+			name="autonomy_capped_for_mode_g",
+			passed=delivered_autonomy <= MODE_G_CEILING,
+			detail=(
+				f"the delivery is {delivered_autonomy.name} and the modules sustain "
+				f"{modules_autonomy.name} (FR-122). "
+				+ (
+					f"The {MODE_G_CEILING.name} cap is FR-123's: P2, P3 and P8 are human "
+					"gates, so a Mode G delivery is L2 end-to-end however strong its "
+					"oracles are. "
+					if modules_autonomy > delivered_autonomy
+					else ""
+				)
+				+ "The two numbers are reported apart because FR-123 asks for the "
+				"distinction, not the lower one: 'autonomous module construction inside "
+				"a human-validated architecture'"
+			),
+		),
 	]
 
 	return DeliveryReport(
@@ -506,7 +547,8 @@ def report(
 		unverified=unverified,
 		unvalidated_assumptions=specification.assumptions if specification is not None else (),
 		envelope_actuals=envelope_actuals,
-		autonomy=ceiling(contract, decomposition),
+		autonomy=delivered_autonomy,
+		module_autonomy=modules_autonomy,
 		handover=handed,
 		checks=tuple(checks),
 	)

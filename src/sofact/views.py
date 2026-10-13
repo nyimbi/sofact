@@ -29,6 +29,7 @@ from sofact._uuid7 import uuid7str
 
 __all__ = [
 	"INTEGRATION_REQUIREMENTS",
+	"MODE_G_CEILING",
 	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
 	"Assumption",
@@ -267,6 +268,24 @@ def ceiling_for_rank(rank: int) -> AutonomyLevel:
 	if rank <= 4:
 		return AutonomyLevel.L3
 	return AutonomyLevel.L2
+
+
+MODE_G_CEILING: Final[AutonomyLevel] = AutonomyLevel.L2
+"""The end-to-end autonomy of a Mode G delivery, and it is a cap (FR-123).
+
+FR-123's argument is that P2, P3 and P8 are human gates, so a delivery assembled through
+them cannot be reported as L3 or L4 no matter how strong the oracles are. Individual
+modules may run at L4 internally — that is what :func:`ceiling_for_rank` and
+:data:`MODULE_CLASS_CEILING` compute — and the *delivery* is L2. §2.3's honest headline
+is the same sentence: autonomous module construction inside a human-validated
+architecture.
+
+A constant rather than a lookup, because the pipeline this build implements is Mode G's
+(§1.2: a goal and no codebase, P0–P9) and every report this build can render is a Mode G
+report. A mode-keyed table with a default would be a cap that fails open on a mode nobody
+has written yet, which is the one failure a cap may not have; when a Mode M pipeline
+exists this becomes a lookup and the type will force the change.
+"""
 
 
 # --------------------------------------------------------------------------- #
@@ -2565,11 +2584,22 @@ class DeliveryReport(View):
 	"""
 
 	autonomy: AutonomyLevel
-	"""The lowest ceiling anything in the delivery carries (FR-122, FR-123).
+	"""The lowest ceiling anything in the delivery carries (FR-122), capped at L2 (FR-123).
 
-	The *lower* of the contract's measured ceiling and every module class's ceiling,
-	because FR-122 makes the lower number govern and a delivery that reported the
-	contract's ceiling alone would claim an autonomy a G7 module forbids.
+	The *delivery's* number, which FR-123 fixes at L2 for a Mode G run because P2, P3 and
+	P8 are human gates. The modules' number is :attr:`module_autonomy` and is usually
+	higher; the two are separate fields because the requirement is a distinction and one
+	number cannot state one.
+	"""
+
+	module_autonomy: AutonomyLevel
+	"""What the modules sustain internally: the lower of the contract's measured ceiling
+	and every module class's (FR-122), with no Mode G cap applied.
+
+	Reported beside :attr:`autonomy` because FR-123 requires the *distinction* to be
+	explicit — "individual modules may run at L4 internally; the delivery is L2" — and a
+	report carrying only the capped number would read as a pipeline that cannot build
+	above L2, which is a different and false claim.
 	"""
 
 	handover: Handover

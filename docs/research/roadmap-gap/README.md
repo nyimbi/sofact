@@ -1,8 +1,9 @@
 # Roadmap gap audit — the specification against the implementation
 
-**Date: 2026-10-12.** This is a **snapshot**. The tree changed while it was being
-written: FR-112's check landed mid-audit (ADR-0027, commit-in-progress), and the
-counts below reflect the tree after that change. Re-run the greps before acting.
+**Date: 2026-10-12, counts refreshed 2026-10-13.** This is a **snapshot**. The tree
+changed while it was being written: FR-112's check landed mid-audit (ADR-0027,
+commit-in-progress), and the counts below reflect the tree after that change. Re-run
+the greps before acting.
 
 Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 `tests/ci/*.py`. Verdict classes:
@@ -12,7 +13,9 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at this snapshot: **725 passed, 0 failed**.
+`tests/ci` at the last refresh: **982 passed, 0 failed**. The table below was written
+at 725; the verdicts are the part that matters and the ones closed since carry their
+date.
 
 ---
 
@@ -92,9 +95,9 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
 | FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
 | FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
-| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (61 tests). **FR-120 is not built**: there is no machine-usable API surface beyond the CLI, and `DELIVERY_REQUIREMENTS` names it rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes. |
-| FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040) | `delivery.ceiling` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
-| FR-123 Mode G delivery caps at L2 and must be reported | **Partly** (2026-10-13, ADR-0040) | `DeliveryReport.autonomy` is now a delivery-level number and `sofact deliver` prints it with the sentence that it is the lowest ceiling anything in the delivery carries. **The L2 cap for a Mode G delivery is not enforced** — nothing distinguishes a Mode G delivery from any other at the point the number is computed. |
+| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (65 tests). **FR-120 is not built**: there is no machine-usable API surface beyond the CLI, and `DELIVERY_REQUIREMENTS` names it rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes. |
+| FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040/0041) | `delivery.module_autonomy` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
+| FR-123 Mode G delivery caps at L2 and must be reported | **Implemented** (2026-10-13, ADR-0041) | `MODE_G_CEILING` (`views.py`) is applied **last and unconditionally** in `delivery.ceiling`, including when no decomposition exists — a cap that failed open on missing input would be no cap. The report carries **two** numbers, `autonomy` (capped) and `module_autonomy` (not), because FR-123 asks for the *distinction*: one number cannot state "modules at L4 internally, delivery at L2". `autonomy_capped_for_mode_g` is a gate check and `sofact deliver` prints both lines. Canaried by removing the cap: `test_a_delivery_is_never_above_l2` and `test_the_cap_applies_with_no_decomposition` both fail. |
 | FR-124 per-deployment topology ceilings | **Not built** | No deployment topology type. |
 | FR-125 G1–G2 target classes, class distribution reported | **Implemented** | `class_distribution` (`views.py:650`) reported in the gate (`decomposition.py:484`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-126 G7 human-authored | **Implemented** | `MODULE_CLASS_CEILING` (`views.py:478`); `test_g7_is_the_only_l1_class` (`test_decomposition.py:217`), `test_every_g7_marker_classifies_as_g7` (`:204`). |
@@ -157,8 +160,8 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 73 |
-| Partly | 27 |
+| Implemented | 74 |
+| Partly | 26 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 19 |
 | **Total rows** | **119** |
@@ -239,11 +242,10 @@ bound) is **partly** (per-step only).
    (§23 M1) remains unbuilt — it is a convenience over the phase machine rather than a
    prerequisite for it.
 
-Honourable mentions, in the same ranking: FR-122/123/124 (no autonomy number is
-ever computed at delivery level, so the spec's most emphatic honesty requirement is
-unenforced), FR-127 (traceability is a gate check, not the first-class graph escape
-attribution needs), FR-130/131 are implemented but FR-058's *portability* claim
-rests on a second adapter that has never been measured.
+Honourable mentions, in the same ranking: FR-124 (no deployment topology type, so
+per-deployment ceilings have nothing to attach to), FR-127 (traceability is a gate
+check, not the first-class graph escape attribution needs), FR-130/131 are implemented
+but FR-058's *portability* claim rests on a second adapter that has never been measured.
 
 ---
 

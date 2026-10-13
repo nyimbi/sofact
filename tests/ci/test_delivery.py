@@ -37,12 +37,14 @@ from sofact.delivery import (
 	ceiling,
 	chain,
 	handover,
+	module_autonomy,
 	verified_and_unverified,
 )
 from sofact.service import FactoryService
 from sofact.views import (
 	DELIVERY_ARTIFACTS,
 	DELIVERY_REQUIREMENTS,
+	MODE_G_CEILING,
 	MODULE_CLASS_CEILING,
 	Assumption,
 	AutonomyLevel,
@@ -171,6 +173,7 @@ def a_report(**overrides: object) -> DeliveryReport:
 		"unvalidated_assumptions": (),
 		"envelope_actuals": None,
 		"autonomy": AutonomyLevel.L2,
+		"module_autonomy": AutonomyLevel.L2,
 		"handover": Handover(
 			system="the ledger service",
 			entry_point="/srv/ledger",
@@ -554,15 +557,17 @@ class TestVerifiedAndUnverified:
 
 
 # --------------------------------------------------------------------------- #
-# FR-122/FR-123 — the autonomy claim is the lower of the two ceilings
+# FR-122/FR-123 — two numbers: what the modules sustain, and what the delivery claims
 # --------------------------------------------------------------------------- #
 
 
-class TestTheCeilingIsTheLowerBound:
-	def test_a_contract_alone_gives_its_ownceiling(self) -> None:
+class TestTheModulesCeiling:
+	"""FR-122: the lower of the contract's measured ceiling and every module class's."""
+
+	def test_a_contract_alone_gives_its_own_ceiling(self) -> None:
 		contract = one_clause_contract("one", command="true")
 
-		assert ceiling(contract, None) == contract.ceiling
+		assert module_autonomy(contract, None) == contract.ceiling
 
 	def test_a_module_class_can_lower_the_delivery_below_the_contract(self) -> None:
 		"""FR-126 makes a G7 module — auth, secrets, payments, PII — human-authored
@@ -581,9 +586,9 @@ class TestTheCeilingIsTheLowerBound:
 		decomposition = propose(contract)
 
 		assert {module.module_class for module in decomposition.modules} == {ModuleClass.G7}
-		assert ceiling(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
+		assert module_autonomy(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
 
-	def test_no_module_can_raise_the_delivery_above_the_contract(self) -> None:
+	def test_no_module_can_raise_the_ceiling_above_the_contract(self) -> None:
 		"""The other direction, which is why the rule is a minimum rather than a lookup:
 		a weak oracle caps the contract, and a G1 module does not undo that."""
 		weak = one_clause_contract("the ledger records entries")
@@ -591,7 +596,7 @@ class TestTheCeilingIsTheLowerBound:
 
 		decomposition = propose(weak)
 
-		assert ceiling(weak, decomposition) == weak.ceiling
+		assert module_autonomy(weak, decomposition) == weak.ceiling
 
 	def test_the_lowest_module_class_governs_when_several_disagree(self) -> None:
 		"""Three clauses, three classes, and the delivery claims the lowest — the whole
@@ -607,10 +612,65 @@ class TestTheCeilingIsTheLowerBound:
 		classes = {module.module_class for module in decomposition.modules}
 
 		assert len(classes) > 1, "the fixture must exercise a disagreement"
-		assert ceiling(contract, decomposition) == min(
+		assert module_autonomy(contract, decomposition) == min(
 			MODULE_CLASS_CEILING[module_class] for module_class in classes
 		)
+		assert module_autonomy(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
+
+
+class TestTheModeGCap:
+	"""FR-123: the delivery is L2 however strong the modules are, and both are reported."""
+
+	def test_a_delivery_is_never_above_l2(self) -> None:
+		"""The requirement's whole content, and the reason it is a cap rather than a
+		lookup: a contract of strong oracles admits L4 for its modules, and the *delivery*
+		is still L2 because P2, P3 and P8 are human gates."""
+		strong = one_clause_contract("the ledger records entries", command="true")
+		assert strong.ceiling > MODE_G_CEILING, "the fixture must reach above the cap"
+
+		assert ceiling(strong, None) == MODE_G_CEILING
+		assert module_autonomy(strong, None) == strong.ceiling
+
+	def test_the_cap_applies_with_no_decomposition(self) -> None:
+		"""A cap that failed open on missing input would be no cap: the decomposition is
+		the *lowering* half of FR-122, and the ceiling is the *capping* half of FR-123,
+		so the second has to hold when the first has nothing to say."""
+		strong = one_clause_contract("the ledger records entries", command="true")
+
+		assert ceiling(strong, None) == MODE_G_CEILING
+		assert ceiling(strong, None) <= module_autonomy(strong, None)
+
+	def test_a_g7_module_does_not_raise_the_delivery_to_the_cap(self) -> None:
+		"""The cap is a ceiling, not a floor. A G7 module caps at L1 (FR-126), so a
+		delivery whose weakest class is G7 reports L1 — and a rule written as "the
+		delivery is L2" rather than "at most L2" would report the flattering number."""
+		contract = one_clause_contract(
+			"the password reset flow authenticates a user", command="true"
+		)
+		decomposition = propose(contract)
+
 		assert ceiling(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
+		assert ceiling(contract, decomposition) < MODE_G_CEILING
+
+	async def test_the_report_states_both_numbers(self, home: Path, tmp_path: Path) -> None:
+		"""FR-123 asks for the *distinction*, not the lower number: "individual modules
+		may run at L4 internally; the delivery is L2". One number cannot state one, and a
+		report carrying only the capped value would read as a pipeline that cannot build
+		above L2 — a different and false claim."""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(service, commands="true")
+		await specify_and_approve(service, contract_id)
+		await decompose_and_approve(service, contract_id)
+		plan = await service.compile_plan(contract_id)
+
+		report = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+
+		assert report.autonomy <= MODE_G_CEILING
+		assert report.module_autonomy >= report.autonomy
+		check = next(c for c in report.checks if c.name == "autonomy_capped_for_mode_g")
+		assert check.passed is True
+		assert report.module_autonomy.name in check.detail
 
 
 # --------------------------------------------------------------------------- #
