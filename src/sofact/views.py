@@ -2554,11 +2554,11 @@ class GoalPlan(View):
 
 
 class IntegrationFindingKind(StrEnum):
-	"""What a P7 integration check found (FR-111-116).
+	"""What a P7 integration check found (FR-110-116).
 
-	Three kinds, and each is produced by a check that runs. A kind the code cannot emit
-	would be an enum member nothing reaches, which reads as a capability in the type and
-	is a gap in the report.
+	Every kind here is produced by a check that runs. A kind the code cannot emit would
+	be an enum member nothing reaches, which reads as a capability in the type and is a
+	gap in the report.
 	"""
 
 	UNDECLARED_DEPENDENCY = "undeclared_dependency"
@@ -2615,6 +2615,28 @@ class IntegrationFindingKind(StrEnum):
 	rather than a halt.
 	"""
 
+	UNSATISFIED_BOUNDARY_CONTRACT = "unsatisfied_boundary_contract"
+	"""A module reaches for a name its dependency never declared (FR-110, O8).
+
+	This is O8, and it is the one defect neither of its neighbours can see. FR-113 asks
+	whether the dependency *edge* was declared, and it is satisfied by a `depends_on` that
+	names the right module whatever the consumer then does with it. FR-112 asks whether a
+	module built the surface it declared, and it compares a module against *its own*
+	declaration. Neither asks the question O8 exists for: does the name the consumer
+	reached for appear on the producer's declared surface at all?
+
+	A consumer can therefore import a declared dependency and call a name that module
+	never promised — an internal, a private helper, a name that was renamed. Every
+	existing check passes: the edge was declared, and the producer matched its own
+	declaration exactly. The system does not run, and the failure is invisible to
+	per-module verification by construction, which is FR-110's whole premise.
+
+	``modules`` is both ends of the boundary — the consumer that reached and the producer
+	that was reached for — because the finding is a disagreement between two declarations
+	and either one may be the one to change. A repair scoped to one end alone would be a
+	guess about which declaration is wrong.
+	"""
+
 
 class IntegrationFinding(View):
 	"""One violation, attributed to the modules it implicates (FR-114).
@@ -2643,6 +2665,7 @@ INTEGRATION_REQUIREMENTS: Final[tuple[str, ...]] = (
 	"FR-026",
 	"FR-083",
 	"FR-097",
+	"FR-110",
 	"FR-111",
 	"FR-112",
 	"FR-113",

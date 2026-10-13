@@ -1643,11 +1643,14 @@ conforming. This is the point at which the model earns its maintenance cost.
 no single module can satisfy. These are the criteria that validate the
 decomposition, not the modules.
 
-**And P7 is now six checks over six requirements as of ADR-0038.** FR-115 and FR-116
+**And P7 is now eight checks as of ADR-0051.** FR-115 and FR-116
 were the two P7 reported as unimplemented on every run — honestly, and in a way that let
 a green line read as "P7 passed" while a third of §10 was never attempted. Both now run,
 and both are only as reachable as P2's specification makes them, so the report says which
-state a project is in rather than smoothing the two together.
+state a project is in rather than smoothing the two together. FR-110's O8 check
+(`boundary_contracts`) is the eighth and the one §10 does not state: it is §9.4's, and it
+asks the question FR-112 and FR-113 each hold half of — whether the name a consumer
+reached for across a declared edge was one the producer ever declared.
 
 FR-115's *present* is a set comparison over declarations, never a search for the entity's
 name in a producer's source: an entity names the clauses that introduced it and a module

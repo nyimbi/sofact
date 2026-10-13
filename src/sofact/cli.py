@@ -176,10 +176,12 @@ _FRESH_OPTION = typer.Option(
 )
 _NOT_IMPLEMENTED_WHY = (
 	"A green line above is not a claim about these. FR-112 needs a module to declare a "
-	"machine-readable surface before its public-API diff has two sides; FR-115 and "
-	"FR-116 need an approved specification that declares a system model and criteria "
-	"spanning more than one clause, so a project that described no system reports them "
-	"here rather than passing them."
+	"machine-readable surface before its public-API diff has two sides; FR-110 needs two "
+	"modules, one of them declaring a surface and the other declaring a dependency on it, "
+	"before there is a boundary to contract across; FR-115 and FR-116 need an approved "
+	"specification that declares a system model and criteria spanning more than one "
+	"clause, so a project that described no system reports them here rather than passing "
+	"them."
 )
 _DELIVERY_ROOT_OPTION = typer.Option(
 	None,

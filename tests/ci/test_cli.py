@@ -1562,6 +1562,13 @@ class TestTheIntegrateVerb:
 		assert "needs the system model of §6.3 as a type" not in result.output, (
 			"the old message said the type did not exist, which is no longer true"
 		)
+		assert "boundary_contracts" in result.output, "O8 runs and says so (FR-110)"
+		assert "FR-110" in named, (
+			f"no module declared a surface, so there is no boundary to contract across: {named}"
+		)
+		assert "before there is a boundary" in result.output, (
+			"the requirement is named *and* the reason it is open is given"
+		)
 
 	def test_a_declared_criterion_moves_fr_116_from_open_to_checked(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

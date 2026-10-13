@@ -1,8 +1,16 @@
 """P7 — integration: what can be checked about the assembled system, and what cannot.
 
-§10 states six requirements and this module computes five of them. Four are facts about
-artefacts SoFact holds:
+§10 states six requirements and this module computes five of them, plus **O8** (§9.4),
+which is P7's own and not one of the six. The four that are facts about artefacts SoFact
+holds:
 
+* **FR-110 (O8)** — the boundary contract. Every other check here compares a module
+  against *itself*: FR-112 against its own declaration, FR-113 against its own
+  ``depends_on``. Neither asks whether the name a consumer reached for across a declared
+  edge was ever promised by the producer, and that is the incoherence O8 exists for —
+  FR-110's own premise is that per-module verification "structurally cannot detect
+  cross-module incoherence". A consumer that imports a declared dependency and calls a
+  name that module never declared passes both neighbours and does not run.
 * **FR-111** — the build order. A module built before a module it depends on has no
   sealed work is a dependency violated by sequencing, which is visible in the dispatch
   log alone.
@@ -76,6 +84,7 @@ from sofact.views import (
 __all__ = [
 	"INTEGRATION_CHECKS",
 	"attribute_files",
+	"check_boundary_contracts",
 	"check_build_order",
 	"check_imports",
 	"check_interface_conformance",
@@ -88,6 +97,7 @@ __all__ = [
 ]
 
 INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
+	"boundary_contracts",
 	"build_order",
 	"import_discipline",
 	"interface_conformance",
@@ -816,6 +826,100 @@ def check_interface_conformance(
 	return tuple(findings)
 
 
+def _reached_names(tree: ast.Module) -> tuple[tuple[str, tuple[str, ...]], ...]:
+	"""Every name a file reaches for on another module, as ``(module, names)`` pairs (FR-110).
+
+	Only ``from X import a, b`` yields names, because only that form *names* what it
+	reaches for. ``import X`` followed by ``X.foo`` reaches ``foo`` too, but the reach is
+	an attribute access somewhere below the import, and following it is the same
+	whole-program analysis FR-113 declines to attempt — so it is left unexamined and the
+	check reports it as uncovered rather than pretending it looked.
+
+	A star import is returned with the single name ``*``, which the caller treats as
+	uncheckable: ``from X import *`` reaches every public name X has, and the set is
+	whatever X happened to define rather than a list this can compare.
+	"""
+	pairs: list[tuple[str, tuple[str, ...]]] = []
+	for node in ast.walk(tree):
+		if isinstance(node, ast.ImportFrom) and not node.level and node.module:
+			pairs.append((node.module, tuple(alias.name for alias in node.names)))
+	return tuple(pairs)
+
+
+def check_boundary_contracts(
+	ownership: dict[str, tuple[str, ...]],
+	*,
+	declared: dict[str, tuple[InterfaceMember, ...]],
+	dependencies: dict[str, set[str]],
+	sources: dict[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""Does each module reach only for names its dependency declared? (FR-110, O8)
+
+	O8's question, and the one neither neighbour asks. :func:`check_imports` establishes
+	that the *edge* was declared — and it is satisfied by a ``depends_on`` naming the right
+	module, whatever the consumer then does with it. :func:`check_interface_conformance`
+	compares a module against its *own* declaration. So a consumer can import a declared
+	dependency and call a name that module never promised, and every check passes while the
+	assembled system does not run.
+
+	Only *declared* edges are examined. An undeclared one is already FR-113's finding, and
+	reporting it here too would name one defect twice under two requirement ids — the
+	mistake :func:`check_model_is_the_interface_source` exists to avoid. What this adds is
+	the case FR-113 clears: the edge is declared, and the name reached across it is not on
+	the producer's surface.
+
+	A producer that declares no surface cannot be checked, and the caller reports it as
+	uncovered rather than as conforming — the same distinction FR-112 draws between an
+	empty diff and no diff. ``dependencies`` maps module name to the names of the modules
+	it declared in ``depends_on``; a reach into a module that is not in that set is left to
+	FR-113.
+	"""
+	assert ownership, "cannot check boundary contracts with no attributed files"
+	known = {path for paths in ownership.values() for path in paths}
+	findings: list[IntegrationFinding] = []
+	for consumer in sorted(ownership):
+		allowed = dependencies.get(consumer, set())
+		for path in ownership[consumer]:
+			if not path.endswith(_SOURCE_SUFFIXES):
+				continue
+			text = sources.get(path)
+			if text is None:
+				continue
+			try:
+				tree = ast.parse(text)
+			except SyntaxError:
+				continue
+			for imported, names in _reached_names(tree):
+				if names == ("*",):
+					continue
+				target = _resolve(imported, path, known)
+				if target is None or target in ownership[consumer]:
+					continue
+				owner = _module_of_path(target, ownership)
+				if owner is None or owner == consumer or owner not in allowed:
+					continue
+				surface = declared.get(owner)
+				if not surface:
+					continue
+				promised = {member.name for member in surface}
+				for name in names:
+					if name in promised:
+						continue
+					findings.append(
+						IntegrationFinding(
+							kind=IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT,
+							detail=(
+								f"{consumer} reaches {owner}.{name} through its declared "
+								f"dependency, and {owner}'s surface does not declare {name!r} "
+								"(FR-110)"
+							),
+							modules=(consumer, owner),
+							evidence=(f"{path}: from {imported} import {name}",),
+						)
+					)
+	return tuple(findings)
+
+
 def integrate(
 	plan: GoalPlan,
 	decomposition: Decomposition,
@@ -890,6 +994,17 @@ def integrate(
 		if ownership and declared_surfaces and text
 		else ()
 	)
+	# O8 runs over the *declared* edges and the *declared* surfaces, which is the pair
+	# FR-113 and FR-112 each hold one half of. It needs both: an edge to reach across and
+	# a surface to compare the reach against, so with either missing there is no boundary
+	# contract to check and the report says which state the project is in.
+	boundary_findings = (
+		check_boundary_contracts(
+			ownership, declared=declared_surfaces, dependencies=declared, sources=text
+		)
+		if ownership and declared_surfaces and text
+		else ()
+	)
 	model_findings = (
 		check_model_conformance(decomposition, model, module_for_clause=module_for_clause)
 		if model is not None and not model.is_empty
@@ -917,6 +1032,7 @@ def integrate(
 		*import_findings,
 		*budget_findings,
 		*conformance_findings,
+		*boundary_findings,
 		*model_findings,
 		*model_interface_findings,
 		*criterion_findings,
@@ -952,6 +1068,27 @@ def integrate(
 	unattributed = tuple(f"{path}" for path in orphans)
 	diffed = tuple(name for name in built if declared_surfaces.get(name))
 	undiffed = tuple(name for name in built if not declared_surfaces.get(name))
+	# An edge is checkable when the consumer was built and the module it reaches declares
+	# a surface to compare the reach against. Both ends matter: a declared edge into a
+	# module with no surface is a boundary nothing can be said about, and counting it as
+	# checked would be the vacuous pass FR-110's whole premise warns about.
+	borders = tuple(
+		sorted(
+			f"{consumer} -> {owner}"
+			for consumer in built
+			for owner in declared.get(consumer, set())
+			if declared_surfaces.get(owner)
+		)
+	)
+	unbordered = tuple(
+		sorted(
+			f"{consumer} -> {owner}: {owner} declares no surface, so the reach across it "
+			"was not compared against anything"
+			for consumer in built
+			for owner in declared.get(consumer, set())
+			if not declared_surfaces.get(owner)
+		)
+	)
 	# A module is *measured* only when it sealed at least one file and every one of them
 	# could be read. A module that sealed nothing has no artefact for a bound to be about,
 	# and one whose files were not read has a bound that is unmeasured rather than met —
@@ -967,6 +1104,36 @@ def integrate(
 	)
 
 	checks = (
+		IntegrationCheck(
+			name="boundary_contracts",
+			passed=not boundary_findings,
+			detail=(
+				f"{len(borders)} declared boundary(ies) checked; every name reached across "
+				"one is on the producer's declared surface (FR-110)"
+				if borders and not boundary_findings
+				else f"{len(boundary_findings)} name(s) reached across a declared boundary "
+				"that the producer never declared"
+				if boundary_findings
+				else "no module declared both a surface and a dependency on another module "
+				"that declares one, so no boundary contract was exercised"
+			),
+			requirements=("FR-110",),
+			covered=tuple(f"{edge}: every name reached across it is declared" for edge in borders),
+			uncovered=(
+				*unbordered,
+				*(
+					f"{name}: no declared surface, so a reach into it was not compared"
+					for name in undiffed
+				),
+				"only `from X import a, b` reaches are seen; `import X` followed by `X.foo` "
+				"reaches the same surface through an attribute access this analysis does not "
+				"follow",
+				"`from X import *` is not checked: the names it reaches are whatever X "
+				"happened to define, not a list this can compare",
+				"an undeclared edge is FR-113's finding and is not reported here; this "
+				"check is about what crossed a boundary that was declared",
+			),
+		),
 		IntegrationCheck(
 			name="build_order",
 			passed=not build_findings,

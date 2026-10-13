@@ -25,6 +25,7 @@ from sofact.decomposition import propose
 from sofact.integration import (
 	INTEGRATION_CHECKS,
 	attribute_files,
+	check_boundary_contracts,
 	check_build_order,
 	check_imports,
 	check_interface_conformance,
@@ -673,6 +674,246 @@ class TestTheInterfaceDiff:
 
 
 # --------------------------------------------------------------------------- #
+# FR-110 (O8): the boundary contract
+# --------------------------------------------------------------------------- #
+
+
+def _surface(*names: str) -> tuple[InterfaceMember, ...]:
+	return tuple(InterfaceMember(name=name, kind=InterfaceMemberKind.FUNCTION) for name in names)
+
+
+class TestTheBoundaryContract:
+	"""O8: what a consumer reached for across a declared edge, and whether it was promised.
+
+	Every case here has the two neighbours *passing*. That is the point of the class: a
+	consumer that declares its dependency (FR-113 clear) and a producer that matches its
+	own declaration (FR-112 clear) can still disagree about the boundary between them,
+	and nothing else in P7 looks at both ends of an edge at once.
+	"""
+
+	def test_a_reach_for_an_undeclared_name_is_a_finding(self) -> None:
+		findings = check_boundary_contracts(
+			{"app": ("app.py",), "store": ("store.py",)},
+			declared={"store": _surface("save")},
+			dependencies={"app": {"store"}},
+			sources={"app.py": "from store import save, purge\n"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT]
+		assert "purge" in findings[0].detail
+		assert findings[0].modules == ("app", "store"), (
+			"the finding names both ends: either declaration may be the wrong one"
+		)
+		assert findings[0].evidence == ("app.py: from store import purge",)
+
+	def test_a_reach_for_a_declared_name_is_not_a_finding(self) -> None:
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={"store": _surface("save")},
+				dependencies={"app": {"store"}},
+				sources={"app.py": "from store import save\n"},
+			)
+			== ()
+		)
+
+	def test_an_undeclared_edge_is_left_to_fr_113(self) -> None:
+		"""One defect, one requirement id: FR-113 owns the undeclared edge."""
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={"store": _surface("save")},
+				dependencies={"app": set()},
+				sources={"app.py": "from store import purge\n"},
+			)
+			== ()
+		)
+
+	def test_a_producer_with_no_declared_surface_is_not_compared(self) -> None:
+		"""Nothing to compare against is not an empty comparison (FR-112's distinction)."""
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={},
+				dependencies={"app": {"store"}},
+				sources={"app.py": "from store import purge\n"},
+			)
+			== ()
+		)
+
+	def test_a_module_reaching_its_own_file_is_not_a_boundary(self) -> None:
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py", "helper.py")},
+				declared={"app": _surface("save")},
+				dependencies={"app": {"app"}},
+				sources={"app.py": "from helper import anything\n"},
+			)
+			== ()
+		)
+
+	def test_a_star_import_is_uncheckable_rather_than_a_finding(self) -> None:
+		"""The names it reaches are whatever the producer defined, not a list to compare."""
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={"store": _surface("save")},
+				dependencies={"app": {"store"}},
+				sources={"app.py": "from store import *\n"},
+			)
+			== ()
+		)
+
+	def test_a_plain_import_of_a_declared_dependency_is_not_followed(self) -> None:
+		"""`import store` reaches nothing this can name; the attribute access is below it."""
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={"store": _surface("save")},
+				dependencies={"app": {"store"}},
+				sources={"app.py": "import store\n\nstore.purge()\n"},
+			)
+			== ()
+		)
+
+	def test_a_file_that_does_not_parse_is_not_a_violation(self) -> None:
+		assert (
+			check_boundary_contracts(
+				{"app": ("app.py",), "store": ("store.py",)},
+				declared={"store": _surface("save")},
+				dependencies={"app": {"store"}},
+				sources={"app.py": "from store import (((\n"},
+			)
+			== ()
+		)
+
+	def test_a_package_init_is_a_real_boundary(self) -> None:
+		"""The same resolution FR-113 uses, so the two agree about which file was reached."""
+		findings = check_boundary_contracts(
+			{"app": ("app.py",), "store": ("store/__init__.py",)},
+			declared={"store": _surface("save")},
+			dependencies={"app": {"store"}},
+			sources={"app.py": "from store import purge\n"},
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT]
+
+
+class TestTheBoundaryContractInTheReport:
+	def test_a_declared_surface_and_edge_discharge_fr_110(self) -> None:
+		"""The complement of ``not_implemented``: two modules, both declaring, one edge."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		first, second = proposal.modules[0], proposal.modules[-1]
+		declared = Decomposition(
+			id=proposal.id,
+			goal_id=proposal.goal_id,
+			contract_id=proposal.contract_id,
+			created_at=proposal.created_at,
+			modules=(
+				first.model_copy(update={"surface": _surface("produce")}),
+				second.model_copy(
+					update={"surface": _surface("consume"), "depends_on": (first.id,)}
+				),
+			),
+		)
+		dispatches = [
+			sealed(module=first.name, files=("a.py",), plan=plan),
+			sealed(module=second.name, files=("b.py",), ordinal=1, plan=plan),
+		]
+
+		report = integrate(
+			plan,
+			declared,
+			dispatches,
+			sources={
+				"a.py": "def produce():\n\tpass\n",
+				"b.py": "from a import produce\n\ndef consume():\n\tpass\n",
+			},
+		)
+
+		assert "FR-110" not in report.not_implemented, "a declared boundary was contracted across"
+		boundary = next(c for c in report.checks if c.name == "boundary_contracts")
+		assert boundary.passed
+		assert boundary.covered, "a check that ran must say what it covered"
+		assert report.passed
+
+	def test_a_reach_for_an_undeclared_name_fails_the_report_and_scopes_to_both_ends(
+		self,
+	) -> None:
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		first, second = proposal.modules[0], proposal.modules[-1]
+		declared = Decomposition(
+			id=proposal.id,
+			goal_id=proposal.goal_id,
+			contract_id=proposal.contract_id,
+			created_at=proposal.created_at,
+			modules=(
+				first.model_copy(update={"surface": _surface("produce")}),
+				second.model_copy(
+					update={"surface": _surface("consume"), "depends_on": (first.id,)}
+				),
+			),
+		)
+		dispatches = [
+			sealed(module=first.name, files=("a.py",), plan=plan),
+			sealed(module=second.name, files=("b.py",), ordinal=1, plan=plan),
+		]
+
+		report = integrate(
+			plan,
+			declared,
+			dispatches,
+			sources={
+				"a.py": "def produce():\n\tpass\n",
+				"b.py": "from a import produce, purge\n\ndef consume():\n\tpass\n",
+			},
+		)
+
+		assert not report.passed
+		assert report.violating_modules == tuple(sorted({first.name, second.name})), (
+			"FR-114's repair scope is both ends of the boundary, never the plan"
+		)
+		assert IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT in {
+			f.kind for f in report.findings
+		}
+
+	def test_the_neighbours_pass_while_the_boundary_fails(self) -> None:
+		"""The defect O8 exists for: FR-112 and FR-113 both clear on the same input.
+
+		The consumer declared the edge (FR-113 clear) and the producer built exactly what
+		it declared (FR-112 clear), yet the system does not run. If either neighbour caught
+		this, O8 would be redundant — and this test is what says it is not.
+		"""
+		ownership = {"app": ("app.py",), "store": ("store.py",)}
+		sources = {
+			"app.py": "from store import save, purge\n",
+			"store.py": "def save():\n\tpass\n",
+		}
+		declared = {"store": _surface("save")}
+
+		assert check_imports(ownership, declared={"app": {"store"}}, sources=sources) == (), (
+			"FR-113: the edge was declared"
+		)
+		assert (
+			check_interface_conformance(
+				ownership, declared=declared, sources={"store.py": "def save():\n\tpass\n"}
+			)
+			== ()
+		), "FR-112: the producer built what it declared"
+
+		findings = check_boundary_contracts(
+			ownership, declared=declared, dependencies={"app": {"store"}}, sources=sources
+		)
+		assert [f.kind for f in findings] == [
+			IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT
+		], "and only O8 sees it, which is FR-110's premise stated as a test"
+
+
+# --------------------------------------------------------------------------- #
 # what the report says it did not discharge
 # --------------------------------------------------------------------------- #
 
@@ -688,8 +929,10 @@ class TestWhatIsNotImplemented:
 		but it has no interface to bind until the specification's model declares one.
 		FR-115 and FR-116 are, because this project's specification declared no system
 		model and no system-level criteria: the checks ran and had nothing to conform, so
-		they claim nothing. A report that omitted any of them would let a green line read
-		as "P7 is done".
+		they claim nothing. FR-110 is the same shape as FR-112 and lands here for the same
+		reason: a boundary contract needs a surface on each side, and with no surface
+		anywhere there is no reach to compare against anything. A report that omitted any
+		of them would let a green line read as "P7 is done".
 		"""
 		contract = two_clause_contract()
 		proposal = propose(contract)
@@ -698,7 +941,7 @@ class TestWhatIsNotImplemented:
 
 		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
 
-		assert report.not_implemented == ("FR-083", "FR-112", "FR-115", "FR-116"), (
+		assert report.not_implemented == ("FR-083", "FR-110", "FR-112", "FR-115", "FR-116"), (
 			"the conformance check ran but diffed nothing, so FR-112 is not discharged"
 		)
 		assert report.passed, "the implemented checks passed; that is not the same as P7 done"
@@ -720,8 +963,9 @@ class TestWhatIsNotImplemented:
 
 		report = integrate(plan, declared, dispatches, sources={"a.py": "def run():\n\tpass\n"})
 
-		assert report.not_implemented == ("FR-083", "FR-115", "FR-116"), (
-			"a declared surface discharges FR-112; it does not put an interface on the model"
+		assert report.not_implemented == ("FR-083", "FR-110", "FR-115", "FR-116"), (
+			"a declared surface discharges FR-112; it does not put an interface on the model, "
+			"and with one module there is no boundary to contract across"
 		)
 		assert report.passed
 
@@ -777,8 +1021,9 @@ class TestWhatIsNotImplemented:
 			verdicts=verdicts,
 		)
 
-		assert report.not_implemented == ("FR-083", "FR-112"), (
-			"both new checks discharged their requirement; FR-083 had no interface to bind"
+		assert report.not_implemented == ("FR-083", "FR-110", "FR-112"), (
+			"both new checks discharged their requirement; FR-083 had no interface to bind "
+			"and no module declared a surface, so there was no boundary to contract across"
 		)
 		assert report.passed
 
