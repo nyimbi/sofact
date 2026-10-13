@@ -165,7 +165,7 @@ _NOT_IMPLEMENTED_WHY = (
 _DELIVERY_ROOT_OPTION = typer.Option(
 	None,
 	"--root",
-	help="The delivery root the FR-117 artefacts are looked for under.",
+	help="Where to write the FR-117 artefacts the factory owes, and where it looks for all four.",
 )
 _SYSTEM_OPTION = typer.Option(
 	None, "--system", help="What was delivered, named for the Mode M handover."
@@ -2364,6 +2364,18 @@ async def _deliver(
 	plan = await svc.latest_plan(built.id)
 	if plan is None:
 		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	if root is None:
+		# Required rather than defaulted, because the two artefacts the factory owes are
+		# the delivery, and a default would put them wherever the operator happened to be
+		# standing. This is also where FR-117's fourth artefact kind gets the *declared
+		# artefact root* the envelope names as the precondition for counting delivered
+		# lines: before this flag there was no place a delivery was declared to be.
+		typer.secho(
+			"no delivery root. The factory writes the two artefacts FR-117 names that it "
+			"owes (RUNBOOK.md, DELIVERY.md), so it needs to know where: pass `--root <dir>`.",
+			fg="yellow",
+		)
 		raise typer.Exit(code=1)
 	report = await svc.render_delivery(
 		plan.id,

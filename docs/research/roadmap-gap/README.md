@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1003 passed, 0 failed**. The table below was written
+`tests/ci` at the last refresh: **1020 passed, 0 failed**. The table below was written
 at 725; the verdicts are the part that matters and the ones closed since carry their
 date.
 
@@ -95,7 +95,7 @@ date.
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
 | FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
 | FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
-| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (65 tests). **FR-120 is not built**: there is no machine-usable API surface beyond the CLI, and `DELIVERY_REQUIREMENTS` names it rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes. |
+| FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (65 tests). **FR-120 is not built**: there is no machine-usable API surface beyond the CLI, and `DELIVERY_REQUIREMENTS` names it rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes — **and the factory now writes those two** (2026-10-13, ADR-0044): `sofact.writing` renders `DELIVERY.md` and `RUNBOOK.md` deterministically from the report, `render_delivery` computes the delivery as a fixed point (render, write, render until a render agrees with disk), and `sofact deliver` requires `--root`. Before this, `sofact deliver` could not succeed on a fresh project: the factory reported its own output as missing. |
 | FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040/0041) | `delivery.module_autonomy` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
 | FR-123 Mode G delivery caps at L2 and must be reported | **Implemented** (2026-10-13, ADR-0041) | `MODE_G_CEILING` (`views.py`) is applied **last and unconditionally** in `delivery.ceiling`, including when no decomposition exists — a cap that failed open on missing input would be no cap. The report carries **two** numbers, `autonomy` (capped) and `module_autonomy` (not), because FR-123 asks for the *distinction*: one number cannot state "modules at L4 internally, delivery at L2". `autonomy_capped_for_mode_g` is a gate check and `sofact deliver` prints both lines. Canaried by removing the cap: `test_a_delivery_is_never_above_l2` and `test_the_cap_applies_with_no_decomposition` both fail. |
 | FR-124 per-deployment topology ceilings | **Not built** | No deployment topology type. |
@@ -229,7 +229,10 @@ bound) is **partly** (per-step only).
    the operator — the artefact check is scoped to the two the factory owes, because a
    check that can never pass is one an operator learns to bypass — and **FR-120's
    machine-usable API surface** is unbuilt, which `DELIVERY_REQUIREMENTS` names rather
-   than drops from the list. FR-122/123 are partly closed by `delivery.ceiling`; FR-123's
+   than drops from the list. The two the factory does owe were *also* missing until
+   2026-10-13 (ADR-0044): the check was scoped to `RUNBOOK.md` and `DELIVERY.md` and
+   nothing produced them, so `sofact deliver` could not succeed on a fresh project.
+   `sofact.writing` now renders both from the report, deterministically and model-free. FR-122/123 are partly closed by `delivery.ceiling`; FR-123's
    Mode G L2 cap is not enforced.
 5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
    2026-10-13 (ADR-0030, ADR-0031, ADR-0035, ADR-0037).** Phases are a state machine in

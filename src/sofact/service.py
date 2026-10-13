@@ -21,6 +21,7 @@ from typing import Any, Final, cast
 from sofact._uuid7 import uuid7str
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
+from sofact.delivery import DELIVERY_ARTIFACT_PATHS
 from sofact.delivery import report as delivery_report
 from sofact.elicitation import (
 	DimensionSpec,
@@ -137,6 +138,7 @@ from sofact.views import (
 	VerificationReport,
 	now,
 )
+from sofact.writing import render_delivery_artifacts
 
 __all__ = [
 	"DEFAULT_HARNESS",
@@ -2477,6 +2479,19 @@ class FactoryService:
 
 		The envelope is the deployment's, and ``None`` means none was configured — which
 		the report states rather than reporting every dimension as within bounds.
+
+		**The two artefacts SoFact owes are written here** (FR-117). ADR-0040 scoped the
+		artefact check to the two kinds the factory produces, and nothing produced them: a
+		report over a root with nothing in it correctly failed its own check, so
+		``sofact deliver`` could not succeed on a fresh project. A factory that refuses to
+		deliver until a human has hand-written the documents it claims to produce is not a
+		factory. The rendering is deterministic and model-free (``sofact.writing``), so this
+		is a write of facts the log already holds rather than a generation step — and
+		``root is None`` writes nothing, which the report then says in its own words.
+
+		Because the documents render the report and the report checks for the documents,
+		the delivery is computed as a **fixed point** rather than in one pass. See the loop
+		below for why two rounds settle it.
 		"""
 		plan = await self.plan_by_id(plan_id)
 		contract = await self.contract_by_id(plan.contract_id)
@@ -2501,24 +2516,90 @@ class FactoryService:
 		# The dispatches are read from the log rather than passed, because "was this
 		# module built" is not a fact the plan records and a caller that could supply the
 		# set could supply one that makes an unbuilt module look delivered.
-		delivered = delivery_report(
-			contract,
-			goal_id=plan.goal_id,
-			plan=plan,
-			decomposition=decomposition,
-			specification=specification,
-			verdicts=self._worst_verdict_per_clause(state),
-			envelope_actuals=actuals,
-			gate_costs=state.gate_costs,
-			root=root,
-			system=system or (goal.statement[:80] if goal is not None else contract.id),
-			entry_point=entry_point or str(root or self.home),
-		)
+		#
+		# The identity is minted here rather than inside `report` because the two
+		# documents quote it: a runbook that could not name the report it came from would
+		# be a document the deploy gate could approve against a different set of checks
+		# (FR-119). Everything else the render reads is read once, above, and reused.
+		identity = uuid7str()
+		rendered_at = now()
+
+		def render() -> DeliveryReport:
+			"""One render of the report, reading nothing the caller has not already read."""
+			return delivery_report(
+				contract,
+				goal_id=plan.goal_id,
+				plan=plan,
+				decomposition=decomposition,
+				specification=specification,
+				verdicts=self._worst_verdict_per_clause(state),
+				envelope_actuals=actuals,
+				gate_costs=state.gate_costs,
+				root=root,
+				system=system or (goal.statement[:80] if goal is not None else contract.id),
+				entry_point=entry_point or str(root or self.home),
+				report_id=identity,
+				rendered_at=rendered_at,
+			)
+
+		# The documents and the report describe each other: the report's artefact check
+		# reads the filesystem, and the documents render the report. So the delivery is a
+		# **fixed point** rather than a sequence — render, write, and render again until a
+		# render agrees with what is on disk. Two rounds settle it because the only thing
+		# the first write can change is presence, and presence does not change back. The
+		# loop is bounded rather than `while True` so that a root the render cannot agree
+		# with is a refusal with a sentence rather than a spin.
+		#
+		# Every argument is the same object each round and the identity is pinned, so a
+		# round can only differ from the last by `artifacts` — by exactly the two files
+		# the previous round wrote. Nothing is re-read from the log, so nothing drifts.
+		#
+		# The `else` cannot fire while the render is a function of the log and the write
+		# either succeeds or raises. It stays because the property it asserts is the one
+		# FR-119 depends on: a report the gate shows must describe the root it was shown
+		# over, and a root that changes under the render makes that unachievable.
+		delivered = render()
+		if root is not None:
+			for _ in range(2):
+				self._write_delivery_artifacts(delivered, root)
+				settled = render()
+				agreed = settled.artifacts == delivered.artifacts
+				delivered = settled
+				if agreed:
+					break
+			else:
+				raise ValueError(
+					f"the delivery artefacts under {root} do not settle: two rounds of "
+					"rendering and writing still disagree about which are present, so the "
+					"report the deploy gate would show describes a root that is changing "
+					"under it (FR-119)"
+				)
 		self._commit(
 			LedgerKind.DELIVERY_RENDERED,
 			{"delivery": delivered.model_dump(mode="json")},
 		)
 		return delivered
+
+	def _write_delivery_artifacts(self, delivered: DeliveryReport, root: Path) -> None:
+		"""Write the two FR-117 artefacts SoFact owes under ``root`` (FR-117).
+
+		ADR-0040 scoped the artefact check to the two kinds the factory produces, and
+		nothing produced them: a report over a root with nothing in it correctly failed its
+		own check, so ``sofact deliver`` could not succeed on a fresh project. A factory
+		that refuses to deliver until a human has hand-written the documents it claims to
+		produce is not a factory.
+
+		The rendering is deterministic and model-free (``sofact.writing``), so this writes
+		facts the log already holds rather than generating anything. An existing file is
+		overwritten: re-rendering supersedes without erasing (FR-070), and the log keeps
+		the report the previous render recorded.
+		"""
+		assert root is not None, "the caller checks for a root before writing"
+		root.mkdir(parents=True, exist_ok=True)
+		documents = render_delivery_artifacts(delivered)
+		for kind, text in documents.items():
+			assert kind in DELIVERY_ARTIFACT_PATHS, f"{kind.value} is not an artefact SoFact writes"
+			(root / DELIVERY_ARTIFACT_PATHS[kind]).write_text(text, encoding="utf-8")
 
 	async def current_delivery(self) -> DeliveryReport | None:
 		"""The latest delivery report this project holds, or ``None`` (FR-117)."""

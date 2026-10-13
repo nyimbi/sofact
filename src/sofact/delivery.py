@@ -27,11 +27,18 @@ reason rather than omitted: a deployable artifact needs a packaging decision no 
 target environment the operator names at deploy time. A report that carried only the
 runbook and the report itself would read as a delivery with two artefacts, which is not
 the same statement as a delivery missing two.
+
+The two it *can* produce — ``RUNBOOK.md`` and ``DELIVERY.md`` — are rendered by
+:mod:`sofact.writing`, which this module does not import: the report says whether they are
+present and :meth:`~sofact.service.FactoryService.render_delivery` writes them. Keeping the
+dependency one-way is what lets a report be rendered from the log alone, with no delivery
+root and nothing written (ADR-0044).
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -390,6 +397,8 @@ def report(
 	root: Path | None = None,
 	system: str,
 	entry_point: str,
+	report_id: str | None = None,
+	rendered_at: datetime | None = None,
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -401,6 +410,12 @@ def report(
 	``None``, which makes the two SoFact writes absent with that reason. A report is
 	rendered *from the log*; writing the artefacts is a separate act, so the default is
 	the honest state of a report nobody has written files for yet.
+
+	``report_id`` and ``rendered_at`` pin the report's identity, and a caller that is
+	writing the artefacts supplies them. The two documents quote the report id — that is
+	what lets a deploy gate tie a runbook to the checks it approved (FR-119) — so a writer
+	has to know the id *before* the report exists. Rendering twice to discover it would be
+	rendering the same facts twice, and the second render is the one a reader would trust.
 	"""
 	assert contract.clauses, "cannot report a delivery for a contract with no clauses"
 	requirement_for_clause: dict[str, str] = {}
@@ -564,11 +579,11 @@ def report(
 	]
 
 	return DeliveryReport(
-		id=uuid7str(),
+		id=report_id or uuid7str(),
 		goal_id=goal_id,
 		contract_id=contract.id,
 		plan_id=plan.id,
-		rendered_at=now(),
+		rendered_at=rendered_at or now(),
 		artifacts=artifacts,
 		chain=links,
 		verified=verified,

@@ -133,21 +133,17 @@ def an_oracle(clause_id: str | None = None, *, command: str | None = "true") -> 
 	)
 
 
-def _a_written_root(tmp_path: Path) -> Path:
-	"""A delivery root holding the two artefacts FR-117 names that the factory owes.
+def _a_delivery_root(tmp_path: Path) -> Path:
+	"""An empty delivery root to hand :meth:`render_delivery`.
 
-	A report over a root with nothing in it *correctly* fails its own artefact check, so
-	a test that wants the machine half to hold has to write them — the same rule the CLI
-	suite's helper follows.
+	Empty on purpose. The factory writes the two artefacts FR-117 names that it owes
+	(``sofact.writing``), so a test that pre-wrote them would pass whether or not the
+	factory produced them — and producing them is the thing under test. The name is the
+	CLI suite's for the same helper, so the two suites cannot drift into asserting
+	different behaviour about the same directory.
 	"""
 	root = tmp_path / "delivery"
 	root.mkdir()
-	(root / DELIVERY_ARTIFACT_PATHS[DeliveryArtifactKind.RUNBOOK]).write_text(
-		"# runbook\n", encoding="utf-8"
-	)
-	(root / DELIVERY_ARTIFACT_PATHS[DeliveryArtifactKind.REPORT]).write_text(
-		"# delivery\n", encoding="utf-8"
-	)
 	return root
 
 
@@ -669,7 +665,7 @@ class TestTheModeGCap:
 		await decompose_and_approve(service, contract_id)
 		plan = await service.compile_plan(contract_id)
 
-		report = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+		report = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
 
 		assert report.autonomy <= MODE_G_CEILING
 		assert report.module_autonomy >= report.autonomy
@@ -745,7 +741,7 @@ class TestTheGateCostIsReported:
 		await decompose_and_approve(service, contract_id)
 		plan = await service.compile_plan(contract_id)
 
-		rendered = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+		rendered = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
 
 		assert rendered.gate_costs == ()
 		assert rendered.rework_fraction is None
@@ -783,7 +779,7 @@ class TestTheGateCostIsReported:
 		cost = await service.record_gate_cost(
 			PhaseGate.SPECIFICATION, human_minutes=90.0, rework_fraction=0.25, by="operator"
 		)
-		rendered = await service.render_delivery(plan.id, root=_a_written_root(tmp_path))
+		rendered = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
 
 		assert rendered.gate_costs == (cost,)
 		assert rendered.rework_fraction == pytest.approx(0.25)
@@ -1000,6 +996,13 @@ class TestRenderingFromTheLog:
 		assert report.checks
 		assert report.handover.lanes
 		assert report.value_statement == DeliveryReport.VERIFIED_NOT_VALUE
+		# No root was named, so the factory wrote nothing — and says so in the words of
+		# the two artefacts rather than reporting them absent without a reason. This is
+		# the service-level arm of the CLI's "no delivery root" refusal.
+		owed = [a for a in report.artifacts if a.kind in DELIVERY_ARTIFACT_PATHS]
+		assert len(owed) == 2
+		assert all(not a.present for a in owed)
+		assert all("no delivery root was named" in (a.missing_because or "") for a in owed)
 
 	async def test_the_report_is_readable_after_a_second_render(
 		self, home: Path, tmp_path: Path
@@ -1036,7 +1039,7 @@ class TestRenderingFromTheLog:
 		await specify_and_approve(service, contract_id)
 		await decompose_and_approve(service, contract_id)
 		plan = await service.compile_plan(contract_id)
-		root = _a_written_root(tmp_path)
+		root = _a_delivery_root(tmp_path)
 		report = await service.render_delivery(plan.id, root=root)
 		assert report.passed, [check.name for check in report.failed]
 
@@ -1052,15 +1055,24 @@ class TestRenderingFromTheLog:
 	) -> None:
 		"""The other arm, and the reason it is its own test: a failed machine check is not
 		waivable by approval, and that has to be observable without depending on which arm
-		a conditional helper took."""
+		a conditional helper took.
+
+		The failing check is the artefact check reached the *honest* way rather than
+		induced by leaving the delivery root empty, which is what this test used to do.
+		An empty root no longer fails anything — the factory writes the two artefacts it
+		owes, so the delivery fills the root it is given — but a report rendered with no
+		root at all names the two owed artefacts absent with that reason, and the check
+		fails on a fact rather than on a fixture. The service API can be driven that way
+		even though the CLI refuses it, and this is the layer where the gate lives.
+		"""
 		service = synthetic_service(home, tmp_path, "complete")
 		await service.probe_harness(None)
 		_, contract_id = await elicitation_to_contract(service, commands="true")
 		await specify_and_approve(service, contract_id)
 		await decompose_and_approve(service, contract_id)
 		plan = await service.compile_plan(contract_id)
-		report = await service.render_delivery(plan.id, root=tmp_path / "nothing-here")
-		assert not report.passed, "an empty delivery root must fail the artefact check"
+		report = await service.render_delivery(plan.id)
+		assert [check.name for check in report.failed] == ["delivery_artifacts"], report.checks
 
 		with pytest.raises(ValueError, match="machine checks"):
 			await service.approve_deploy(report.id, by="operator")

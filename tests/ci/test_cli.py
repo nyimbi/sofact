@@ -1790,16 +1790,16 @@ class TestTheEnvelopeVerb:
 
 
 def _a_delivery_root(tmp_path: Path) -> Path:
-	"""A delivery root holding the two artefacts FR-117 names that the factory owes.
+	"""The delivery root to hand ``deliver``, created empty and left empty.
 
-	Written before the report is rendered, because a report over a root with nothing in
-	it *correctly* fails its own artefact check — and a helper that let that through
-	would make every test below a test of the refusal rather than of the report.
+	Empty on purpose. The factory writes the two artefacts FR-117 names that it owes
+	(``sofact.writing``), so a fresh root is the normal case and the one worth driving
+	the real CLI through: a helper that pre-wrote ``RUNBOOK.md`` and ``DELIVERY.md``
+	would pass whether or not the factory produced them, and producing them is the thing
+	under test.
 	"""
 	root = tmp_path / "delivery"
 	root.mkdir()
-	(root / "RUNBOOK.md").write_text("# runbook\n", encoding="utf-8")
-	(root / "DELIVERY.md").write_text("# delivery\n", encoding="utf-8")
 	return root
 
 
@@ -1835,12 +1835,37 @@ class TestTheDeliverVerb:
 		assert "no contract yet" in result.output
 		assert "Traceback" not in result.output
 
-	def test_an_empty_delivery_root_fails_the_artefact_check(
+	def test_no_delivery_root_is_a_message_not_a_traceback(self, home: Path) -> None:
+		"""The factory writes the artefacts it owes, so it needs a root to write them
+		under. Refusing without one is the honest version of that: a default would put a
+		delivery wherever the operator happened to be standing."""
+		conversation(home)
+		assert _contract(home).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "probe"]).exit_code == 0
+		assert RUNNER.invoke(app, ["--home", str(home), "plan"]).exit_code == 0
+
+		result = RUNNER.invoke(app, ["--home", str(home), "deliver"])
+
+		assert result.exit_code == 1, result.output
+		assert "no delivery root" in result.output
+		assert "--root" in result.output
+		assert "Traceback" not in result.output
+
+	def test_an_empty_delivery_root_is_filled_by_the_delivery(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:
-		"""The other arm of the scoping: the check is scoped, not disabled. A root with
-		nothing in it fails, and the verb exits non-zero rather than offering a gate over
-		a failed report."""
+		"""The factory writes the two artefacts it owes, so an empty root is the normal
+		case rather than a refusal.
+
+		This replaced a test that asserted the opposite — that a root with nothing in it
+		fails the artefact check — and the replacement is the stronger claim. The old
+		behaviour meant ``sofact deliver`` could not succeed on a fresh project: the
+		factory reported its own output as missing, and the only way past it was for a
+		human to hand-write the documents the factory claims to produce. What is asserted
+		now is that the files exist *and* carry the report's own id, which is what makes
+		them the delivery's documents rather than two placeholders that satisfied a
+		presence check.
+		"""
 		configure(tmp_path, monkeypatch)
 		conversation(home)
 		assert _contract(home).exit_code == 0
@@ -1851,9 +1876,14 @@ class TestTheDeliverVerb:
 
 		result = RUNNER.invoke(app, ["--home", str(home), "deliver", "--root", str(empty)])
 
-		assert result.exit_code == 1, result.output
-		assert "failed machine checks" in result.output
-		assert "cannot be passed over a failed check" in result.output
+		assert result.exit_code == 0, result.output
+		written = {path.name for path in empty.iterdir()}
+		assert written == {"RUNBOOK.md", "DELIVERY.md"}, written
+		report_id = result.output.split("delivery report ")[1].split("\n")[0].strip()
+		assert report_id in (empty / "DELIVERY.md").read_text(encoding="utf-8")
+		assert report_id in (empty / "RUNBOOK.md").read_text(encoding="utf-8")
+		assert "delivery_artifacts" in result.output
+		assert "exist under the delivery root" in result.output
 
 	def test_the_report_states_that_value_was_not_certified(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
