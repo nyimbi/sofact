@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1063 passed, 0 failed** (2026-10-13, after ADR-0046).
+`tests/ci` at the last refresh: **1075 passed, 0 failed** (2026-10-13, after ADR-0047).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -132,7 +132,7 @@ closed since carry their date.
 | FR-155 third-party plugin deletion test | **Not built** | The test is applied in prose (§8.7 table); no code, no gate. |
 | FR-156 capability by configuration not code | **Implemented** | `load_specs` (`harness.py:406`), `--tools`/`SOFACT_TOOLS`; `test_the_readme_example_loads_through_the_real_loader` (`test_cli.py:717`). |
 | FR-157 deployment-scoped autonomy target | **Not built** | No deployment scope type; the θ gate (FR-024–035) is absent so nothing can be scoped. |
-| FR-158 evolvability debt reported as first-class, Mode M L1 | **Not built** | No code. ADR-0011 Decision 1 says it "must be reported" — see §3. |
+| FR-158 evolvability debt reported as first-class, Mode M L1 | **Implemented** | `EVOLVABILITY_DEBT = 1.0` and `MODE_M_CEILING = L1` (`views.py:322`, `views.py:301`), the number surfaced as `DeliveryReport.evolvability_debt` beside FR-108's measured debt; `MAINTAINABILITY_NOT_VERIFIED` (`views.py:337`) is a `ClassVar` interpolating it, so the sentence and the number cannot drift; `MaintenanceLane.ceiling` refuses a lane above the cap and `delivery.handover` clamps §13's L4 lanes to it; the `maintainability_not_verified` check reports both ceilings as two numbers (FR-158(b)); both renderers and `sofact deliver` state it. 12 tests (`test_delivery.py::TestMaintainabilityIsNotVerified`). |
 | FR-159 differential change-cost oracle | **Not built** | ADR-0011 records it as "specified and **unbuilt**". |
 | FR-160 gate-cost measurement | **Implemented** | `GateCost` (`views.py`) carries the pair FR-160 names — `human_minutes` and `rework_fraction` — and `FactoryService.record_gate_cost` refuses a cost for a gate whose phase is not complete, because the approval is the evidence a human was there. `ProjectState.gate_cost` reads the latest per gate so `total_human_minutes` cannot double-count a re-measure, and `None` means unmeasured rather than free. `envelope.measure(human_minutes=...)` now measures §1.3's `HUMAN_MINUTES` (one fewer unmeasured dimension), the pair travels into `DeliveryReport.gate_costs` with a mean `rework_fraction`, and the `gate_cost_reported` check reports without failing on an unmeasured project. `sofact gate --cost P2:90:0.25` records one; `sofact deliver` prints the pair under its own heading (ADR-0043). 4 + 4 + 6 tests; canaried three times. |
 | FR-161 adapter table is data, not code | **Implemented** | `HarnessSpec.from_mapping` refuses unknown/missing fields by name (`harness.py:236`); `test_a_malformed_field_is_refused_by_name` (`test_harness.py:640`), `test_an_unknown_field_is_refused` (`:662`). |
@@ -255,13 +255,16 @@ but FR-058's *portability* claim rests on a second adapter that has never been m
 
 ## 3. Doc-versus-code discrepancies
 
-1. **ADR-0011 Decision 1 vs the code.** The record says evolvability debt "must be
-   reported" as a first-class term beside ground-truth debt, with a value of 1.0 by
-   construction. No code computes, stores, or reports it, and there is no
-   `evolvability_debt` field anywhere. The record is honest two sections later
-   ("specified and **unbuilt**"), so the *record* is consistent with itself; the
-   *index* (`docs/adr/README.md:55`, D18 row) restates it as "the debt is named and
-   defaulted to total", which reads as done.
+1. **ADR-0011 Decision 1 vs the code — closed 2026-10-13 (ADR-0047).** The record said
+   evolvability debt "must be reported" as a first-class term beside ground-truth debt,
+   with a value of 1.0 by construction; no code computed, stored, or reported it, and
+   there was no `evolvability_debt` anywhere, while the *index*
+   (`docs/adr/README.md:67`, D18 row) restated it as "the debt is named and defaulted to
+   total", which read as done. The debt is now a number on the report
+   (`EVOLVABILITY_DEBT`, surfaced as `DeliveryReport.evolvability_debt`), the Mode M
+   ceiling is a separate constant that no lane may exceed, and the delivery report
+   states the refusal. FR-159's instrument remains unbuilt and D18 remains open — that
+   is the decision the row is *about*, and it is not what was missing.
 2. **Spec §8.6 vs the code default.** §8.6 resolves D11 as "v1 drives `dsh` as the
    primary harness and `pi` as the second adapter", and ADR-0004's Decision says
    "the first adapter targets `dsh`". `service.py:108` sets

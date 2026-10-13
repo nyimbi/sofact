@@ -49,7 +49,10 @@ from sofact.service import FactoryService
 from sofact.views import (
 	DELIVERY_ARTIFACTS,
 	DELIVERY_REQUIREMENTS,
+	EVOLVABILITY_DEBT,
+	MAINTAINABILITY_NOT_VERIFIED,
 	MODE_G_CEILING,
+	MODE_M_CEILING,
 	MODULE_CLASS_CEILING,
 	TOPOLOGY_ISOLATION,
 	TOPOLOGY_MODIFIER,
@@ -85,6 +88,7 @@ from sofact.views import (
 	VerifiedClause,
 	now,
 )
+from sofact.writing import render_delivery_document, render_runbook
 
 BASELINE = DeploymentTopology.T2
 """§5.4's product target, whose ceiling modifier is zero.
@@ -145,12 +149,17 @@ def a_check(passed: bool = True) -> GateCheck:
 
 
 def a_lane(name: str = "L04", *oracles: InheritedOracle) -> MaintenanceLane:
-	"""One maintenance lane, empty of oracles when none are given."""
+	"""One maintenance lane, empty of oracles when none are given.
+
+	The ceiling is :data:`MODE_M_CEILING`, which is the highest a lane may declare while
+	FR-158 caps maintenance at L1; a lane at §13's L4 is refused by the type, and the test
+	for that refusal builds its own lane rather than going through this fixture.
+	"""
 	return MaintenanceLane(
 		lane=name,
 		description=f"the {name} lane",
 		inherited_oracles=oracles,
-		ceiling=AutonomyLevel.L3,
+		ceiling=MODE_M_CEILING,
 	)
 
 
@@ -311,6 +320,160 @@ class TestValueIsNotCertified:
 
 		assert "value" in statement
 		assert "untested" in statement or "not tested" in statement
+
+
+# --------------------------------------------------------------------------- #
+# FR-158: maintainability is refused, and the report says so
+# --------------------------------------------------------------------------- #
+
+
+class TestMaintainabilityIsNotVerified:
+	def test_the_statement_is_a_class_constant(self) -> None:
+		"""FR-158(c), and the reason it is a constant rather than a field.
+
+		The failure FR-158 corrects is not a report that omits the sentence — it is one
+		that says something adjacent and flattering about a green suite. A ``ClassVar``
+		makes the sentence unavailable to every code path, which is the difference between
+		a report that *says* maintainability was not verified and one written by a factory
+		that could not have claimed otherwise.
+		"""
+		assert isinstance(MAINTAINABILITY_NOT_VERIFIED, str)
+		assert "MAINTAINABILITY_NOT_VERIFIED" not in DeliveryReport.model_fields
+
+	def test_every_report_carries_the_same_sentence(self) -> None:
+		assert a_report().maintainability_statement == a_report().maintainability_statement
+		assert "not verified" in a_report().maintainability_statement
+
+	def test_the_sentence_names_the_debt_and_the_reason(self) -> None:
+		"""FR-158's own words: the debt is 1.0 *by construction*, not a measurement failure.
+
+		Both halves are asserted rather than one of them: an ``or`` here would be satisfied
+		by the word "debt" alone, and the number is the half the requirement is about.
+		"""
+		statement = MAINTAINABILITY_NOT_VERIFIED
+
+		assert f"{EVOLVABILITY_DEBT:g}" in statement, "the debt's value, not just its name"
+		assert "by construction" in statement, "and that it is structural, not a failure"
+		assert "oracle" in statement, "the reason is the absent oracle, not a shortcoming"
+
+	def test_mode_m_is_capped_at_l1_and_mode_g_is_not(self) -> None:
+		"""FR-158(a) and (b): the two ceilings are not one number, and must not be reported
+		as one."""
+		assert MODE_M_CEILING is AutonomyLevel.L1
+		assert MODE_G_CEILING is AutonomyLevel.L2
+		assert MODE_M_CEILING < MODE_G_CEILING, "maintenance is the narrower claim"
+
+	def test_a_lane_above_the_cap_is_refused_by_the_type(self) -> None:
+		"""A lane carrying §13's L4 into a handover would be a maintenance claim at L4.
+
+		The cap is on the type rather than on the caller, because a caller who had to
+		remember to clamp is a caller who can forget — which is the failure mode a
+		refusal exists to close.
+		"""
+		with pytest.raises(ValidationError, match="above the L1 a maintenance claim"):
+			MaintenanceLane(
+				lane="L01",
+				description="dependency bumps",
+				inherited_oracles=(),
+				ceiling=AutonomyLevel.L4,
+			)
+
+	def test_a_lane_at_the_cap_is_accepted(self) -> None:
+		"""The complement, so the refusal is a cap and not a blanket rejection."""
+		lane = MaintenanceLane(
+			lane="L01",
+			description="dependency bumps",
+			inherited_oracles=(),
+			ceiling=MODE_M_CEILING,
+		)
+
+		assert lane.ceiling is MODE_M_CEILING
+
+	def test_a_derived_handover_clamps_every_lane(self) -> None:
+		"""The lanes §13 gives an L4 reach the handover as L1, and the handover still has
+		them — a cap that dropped the lane would report a system with no maintenance story
+		at all, which is a different and false claim.
+
+		The contract names a suite, so it matches §13's L04 and the handover carries a lane
+		whose own level is above the cap. Without such a clause the handover falls to the
+		L00 lane, whose level is the contract's and is already at or below L1 — a handover
+		that clamped nothing would pass, which is the test asserting nothing.
+		"""
+		contract = one_clause_contract("the suite passes after a version bump")
+		handed = handover(contract, system="s", entry_point="e")
+
+		assert handed.lanes, "the cap must not empty the handover"
+		declared = {lane: level for lane, _, level, _ in LANE_ORACLE_KEYWORDS}
+		lowered = [
+			lane for lane in handed.lanes if declared.get(lane.lane, lane.ceiling) > MODE_M_CEILING
+		]
+		assert lowered, "no lane arrived above the cap, so the clamp is untested"
+		assert all(lane.ceiling is MODE_M_CEILING for lane in handed.lanes)
+		assert all(
+			lane.ceiling
+			is AutonomyLevel(min(declared.get(lane.lane, lane.ceiling), MODE_M_CEILING))
+			for lane in handed.lanes
+		), "every lane's level is its §13 level under the cap, not some other number"
+
+	def test_the_report_check_states_the_refusal(self) -> None:
+		"""The check reports rather than fails, because FR-158 makes the debt structural:
+		refusing a delivery for a debt every delivery carries would refuse all of them.
+
+		Built through :func:`sofact.delivery.report` rather than the hand-assembled
+		``a_report``, because the checks are what the *service* emits — a fixture that
+		listed the check by hand would assert the test file's own copy of the list.
+		"""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		rendered = report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=propose(contract),
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+		)
+		check = next(c for c in rendered.checks if c.name == "maintainability_not_verified")
+
+		assert check.passed
+		assert MODE_M_CEILING.name in check.detail
+
+	def test_the_debt_is_a_number_beside_the_ground_truth_debt(self) -> None:
+		"""FR-158 makes evolvability debt a first-class *term*, which means a number a
+		reader can compare — not a clause inside a sentence. It sits beside FR-108's
+		measured debt and is never folded into it: a report carrying one debt figure would
+		be read as carrying the measurable one."""
+		report = a_report()
+
+		assert report.evolvability_debt == EVOLVABILITY_DEBT
+		assert report.evolvability_debt == 1.0, "FR-158's value, and it is the whole point"
+		assert isinstance(report.evolvability_debt, float)
+		assert "evolvability_debt" not in DeliveryReport.model_fields, (
+			"a field would let a report carry a smaller number than the requirement's"
+		)
+
+	def test_the_sentence_and_the_number_are_one_fact(self) -> None:
+		"""The sentence interpolates the constant, so the two cannot drift apart."""
+		assert f"{EVOLVABILITY_DEBT:g}" in MAINTAINABILITY_NOT_VERIFIED
+
+	def test_the_delivery_document_states_it(self) -> None:
+		"""FR-158(c) says the *report* must state it; the rendered document is what an
+		operator reads, so a sentence the report carries and the document drops is a
+		statement nobody sees."""
+		rendered = render_delivery_document(a_report())
+
+		assert MAINTAINABILITY_NOT_VERIFIED in rendered
+		assert f"{EVOLVABILITY_DEBT:g}" in rendered, "the document carries the number too"
+
+	def test_the_runbook_states_it(self) -> None:
+		"""The runbook is the maintenance document, so it is where the claim would be made
+		by omission."""
+		rendered = render_runbook(a_report())
+
+		assert MAINTAINABILITY_NOT_VERIFIED in rendered
+		assert f"{EVOLVABILITY_DEBT:g}" in rendered
 
 
 # --------------------------------------------------------------------------- #

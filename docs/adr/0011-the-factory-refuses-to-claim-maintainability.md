@@ -94,3 +94,12 @@ whenever an oracle class is added.
 
 The differential instrument in FR-159 is specified and **unbuilt**. This record
 deliberately does not claim it works; D18 is where that is decided, after M0.
+
+Decisions 1 and 2 are enforced in code as of 2026-10-13
+([ADR-0047](0047-the-debt-is-a-number-and-mode-m-is-a-separate-ceiling.md)):
+`EVOLVABILITY_DEBT` is a constant surfaced as `DeliveryReport.evolvability_debt` beside
+FR-108's measured debt, `MODE_M_CEILING` is a constant no `MaintenanceLane` may exceed,
+and the delivery report and both rendered documents state the refusal. The index row that
+once read "the debt is named and defaulted to total" described a record rather than a
+behaviour; it now describes one. Decision 4's "NFR-024 governs the gap" remains a rule
+with no instrument behind it, and D18 remains open.

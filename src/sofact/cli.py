@@ -2563,6 +2563,16 @@ async def _deliver(
 		f"({len(handed.unmaintainable)} without a command)",
 		fg="cyan",
 	)
+	# FR-158: the maintenance claim is capped at L1 and the reader is told why, on the
+	# same screen as the lanes whose §13 levels are higher. Printing the lanes alone would
+	# show an operator L01 at L4 and leave the cap to be discovered at the gate. The debt
+	# is printed as its own number for FR-158(b): one debt figure would be read as the
+	# measurable one (FR-108), and it is the unmeasurable half that bounds the claim.
+	typer.secho(
+		f"    evolvability debt {report.evolvability_debt:g} (FR-158, unmeasured by construction)",
+		fg="yellow",
+	)
+	typer.secho(f"    {report.maintainability_statement}", fg="yellow")
 	for lane in handed.lanes:
 		typer.secho(
 			f"    {lane.lane} ({lane.ceiling.name}): {lane.description} — "

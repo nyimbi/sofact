@@ -28,9 +28,12 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"EVOLVABILITY_DEBT",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
+	"MAINTAINABILITY_NOT_VERIFIED",
 	"MODE_G_CEILING",
+	"MODE_M_CEILING",
 	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
 	"TOPOLOGY_ISOLATION",
@@ -294,6 +297,59 @@ has written yet, which is the one failure a cap may not have; when a Mode M pipe
 exists this becomes a lookup and the type will force the change.
 """
 
+
+MODE_M_CEILING: Final[AutonomyLevel] = AutonomyLevel.L1
+"""The end-to-end autonomy a *maintenance* claim may carry, and it is L1 (FR-158).
+
+FR-158(a): Mode M's claim is maintenance, and maintenance is the one claim no oracle in
+O1–O8 observes — a green suite says an obligation was satisfied, which is a strictly
+narrower and genuinely checkable claim than "this can be maintained". So the two ceilings
+are not one number, and this is the second of them.
+
+L1 and not L2, and the difference is the whole of the requirement. L2 means the factory
+proposes changes and a human verifies each one; L1 means the factory informs and never
+mutates. A maintenance run at L2 would be a run whose changes a human reviews, which is
+admissible only if the *review* is the oracle — and §20.2 measures review bandwidth as
+the binding resource, so making the human the oracle for maintenance is exactly the
+substitution FR-158 refuses. At L1 the factory reports what a change would cost and the
+human owns the outcome, which is the honest shape while the change-cost oracle is absent.
+
+Raising this is D18's decision and requires FR-159's instrument, not a larger number here:
+the value is a *consequence* of the absent oracle, so a deployment that raised it without
+building the oracle would be claiming a measurement it never took (NFR-024).
+"""
+
+EVOLVABILITY_DEBT: Final[float] = 1.0
+"""FR-158's debt term, as a number, beside FR-108's ground-truth debt.
+
+FR-108's debt is a *measured* fraction: the clauses no machine can currently check,
+counted off the contract. FR-158's is not measured at all — it is 1.0 for every module
+because no oracle in O1-O8 observes change cost, and 1.0 is the correct value rather than
+a measurement failure. The two are one *kind* of thing (a debt fraction the report
+carries) and not one number, which is why this is a separate constant with its own name
+and not a term folded into the ground-truth count: a reader who saw one debt figure
+would read the measurable one and take it for the whole.
+
+Interpolated into :data:`MAINTAINABILITY_NOT_VERIFIED` so the sentence and the number
+cannot drift into two statements of one fact.
+"""
+
+MAINTAINABILITY_NOT_VERIFIED: Final[str] = (
+	"Maintainability was not verified. Every oracle this factory ran decides whether a "
+	"clause was satisfied, and no oracle in O1-O8 observes what a change costs — so a "
+	"green suite here is evidence about obligations and no evidence at all about whether "
+	f"this system can be changed cheaply or safely. The evolvability debt of every module "
+	f"is {EVOLVABILITY_DEBT:g} by construction, which is the correct value rather than a "
+	"measurement failure (FR-158). Mode M is capped at L1 for the same reason."
+)
+"""FR-158(c), as a constant, for the reason :data:`DeliveryReport.VERIFIED_NOT_VALUE` is one.
+
+FR-158 says the delivery report "must state that maintainability was not verified". A
+free-text field would let a report state it in a sentence of the author's choosing, and
+the failure mode is not a report that omits the sentence — it is a report that says
+something adjacent and flattering. As a constant no code path can phrase it away, which
+is what makes the refusal structural rather than editorial.
+"""
 
 # --------------------------------------------------------------------------- #
 # §5.4 — deployment topology, and the ceiling it modifies (FR-019, FR-030, FR-031, FR-042)
@@ -2795,7 +2851,14 @@ class MaintenanceLane(View):
 	"""
 
 	ceiling: AutonomyLevel
-	"""The lane's §13 autonomy, a property of the lane and not of the delivery."""
+	"""The lane's §13 autonomy, capped at :data:`MODE_M_CEILING` (FR-158).
+
+	§13 gives each lane a level, and FR-158(a) lowers every one of them to L1 for as long
+	as no oracle observes change cost. The cap is applied by the type rather than by the
+	caller, because a lane that carried §13's L4 into a handover would be a maintenance
+	claim at L4 — the exact claim FR-158 refuses — and a caller who had to remember to
+	clamp it is a caller who can forget.
+	"""
 
 	@model_validator(mode="after")
 	def _a_lane_names_itself(self) -> Self:
@@ -2806,6 +2869,13 @@ class MaintenanceLane(View):
 			raise ValueError(
 				f"lane {self.lane!r} inherits two oracles for one clause, so one of them "
 				"is not what the contract says (FR-121)"
+			)
+		if self.ceiling > MODE_M_CEILING:
+			raise ValueError(
+				f"lane {self.lane!r} declares {self.ceiling.name}, above the "
+				f"{MODE_M_CEILING.name} a maintenance claim may carry: no oracle in O1-O8 "
+				"observes change cost, so the higher level would be a claim about "
+				"maintainability nothing measured (FR-158, NFR-024)"
 			)
 		return self
 
@@ -2888,6 +2958,12 @@ class DeliveryReport(View):
 	says the factory did not certify value and one that was written by a factory which
 	could not have certified it — FR-086 makes the claim unavailable to every code path,
 	and a free-text field would put it back.
+
+	FR-158(c) adds a sixth statement of the same kind: the report must say that
+	maintainability was not verified. It is :attr:`MAINTAINABILITY_NOT_VERIFIED`, a
+	constant on the type for FR-086's reason — the failure FR-158 corrects is not a report
+	that omits the sentence, it is one that says something adjacent and flattering about a
+	green suite.
 	"""
 
 	VERIFIED_NOT_VALUE: ClassVar[str] = (
@@ -3085,6 +3161,29 @@ class DeliveryReport(View):
 	def value_statement(self) -> str:
 		"""FR-086's statement, which is the same sentence on every report ever rendered."""
 		return self.VERIFIED_NOT_VALUE
+
+	@property
+	def maintainability_statement(self) -> str:
+		"""FR-158(c)'s statement, on every report until a change-cost oracle exists.
+
+		Not conditional on anything in the report, and that is the point: FR-158 makes the
+		debt 1.0 *by construction*, so there is no delivery this factory can render for
+		which the sentence would be different. A conditional here would be the code path
+		that claims maintainability, which is the path FR-158 exists to close.
+		"""
+		return MAINTAINABILITY_NOT_VERIFIED
+
+	@property
+	def evolvability_debt(self) -> float:
+		"""FR-158's debt term, as a number the report carries (FR-158).
+
+		Beside ground-truth debt and not inside it. FR-108's debt is measured — the
+		unverified clauses this report lists, each saying in :attr:`UnverifiedClause.because`
+		whether it is ground-truth debt — and FR-158's is not measured at all. A report
+		that carried one debt number would be read as carrying the measurable one, and the
+		unmeasurable half is the half that decides what the delivery may claim (NFR-024).
+		"""
+		return EVOLVABILITY_DEBT
 
 	@property
 	def passed(self) -> bool:

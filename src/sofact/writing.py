@@ -53,6 +53,7 @@ DELIVERY_HEADINGS: Final[tuple[str, ...]] = (
 	"Unvalidated assumptions",
 	"Envelope actuals",
 	"Gate cost",
+	"Debt",
 	"Autonomy",
 	"Maintenance handover",
 	"Machine checks",
@@ -114,6 +115,17 @@ def render_delivery_document(report: DeliveryReport) -> str:
 		f"- Requirements: {', '.join(DELIVERY_REQUIREMENTS)}",
 		"",
 		f"> {report.value_statement}",
+		"",
+		f"> {report.maintainability_statement}",
+		"",
+		"## Debt",
+		"",
+		"- **Ground-truth debt** (FR-108): the unverified clause(s) below, each saying "
+		"whether a machine could check it.",
+		f"- **Evolvability debt** (FR-158): {report.evolvability_debt:g} — every module, by "
+		"construction. No oracle in O1-O8 observes change cost, so this is the correct "
+		"value rather than a measurement failure, and it is reported as its own number "
+		"rather than folded into the one above.",
 		"",
 		"## What was built",
 		"",
@@ -273,6 +285,8 @@ def render_runbook(report: DeliveryReport) -> str:
 		"",
 		f"> {report.value_statement}",
 		"",
+		f"> {report.maintainability_statement}",
+		"",
 		"## How to run it",
 		"",
 		"This factory does not run the delivered system and does not choose how it is "
@@ -355,6 +369,13 @@ def render_runbook(report: DeliveryReport) -> str:
 	lines.append(
 		"The factory verified requirements, not value (FR-086). Nothing here is evidence "
 		"that the system is worth running."
+	)
+	lines.append("")
+	lines.append(
+		f"Evolvability debt is {report.evolvability_debt:g} (FR-158). This is not a "
+		"measurement of this system: no oracle in O1-O8 observes what a change costs, so "
+		"the value is total for every module the factory builds, and the debt a maintainer "
+		"inherits here is unmeasured rather than small."
 	)
 	lines.append("")
 	rendered = "\n".join(lines)

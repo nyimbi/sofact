@@ -44,7 +44,9 @@ from typing import Final
 
 from sofact._uuid7 import uuid7str
 from sofact.views import (
+	EVOLVABILITY_DEBT,
 	MODE_G_CEILING,
+	MODE_M_CEILING,
 	MODULE_CLASS_CEILING,
 	TOPOLOGY_ISOLATION,
 	TOPOLOGY_MODIFIER,
@@ -441,6 +443,14 @@ def handover(
 	its regression needs — which is the failure mode a maintenance mode exists to avoid.
 	:data:`LANE_ORACLE_KEYWORDS` decides which *lanes* exist; the oracles are the whole
 	contract's.
+
+	Every lane's ceiling is clamped to :data:`~sofact.views.MODE_M_CEILING` (FR-158).
+	§13 gives L01 and L04 an L4, and those are *Mode M* levels — the level at which the
+	maintenance lane's own work would run — which is a different claim from the level at
+	which the delivery may be maintained. FR-158(a) refuses the second for as long as no
+	oracle observes change cost, so the clamp is applied here and the lane type refuses an
+	unclamped one, which is what keeps §13's table and FR-158's cap from being two
+	statements of one number.
 	"""
 	oracles = _lane_oracles(contract)
 	lowered = [(clause.statement.lower(), clause.id) for clause in contract.clauses]
@@ -454,7 +464,7 @@ def handover(
 				lane=lane,
 				description=description,
 				inherited_oracles=tuple(o for o in oracles if o.clause_id in matching),
-				ceiling=ceiling,
+				ceiling=AutonomyLevel(min(ceiling, MODE_M_CEILING)),
 			)
 		)
 	if not lanes:
@@ -471,7 +481,7 @@ def handover(
 					"so the whole oracle set is handed over without a lane to file it under"
 				),
 				inherited_oracles=oracles,
-				ceiling=contract.ceiling,
+				ceiling=AutonomyLevel(min(contract.ceiling, MODE_M_CEILING)),
 			)
 		)
 	return Handover(system=system, entry_point=entry_point, lanes=tuple(lanes))
@@ -601,6 +611,21 @@ def report(
 				"the report states that requirements were verified and value was not "
 				"(FR-086). The sentence is a constant on the type, so no code path can "
 				"produce a report that omits it or claims otherwise"
+			),
+		),
+		GateCheck(
+			name="maintainability_not_verified",
+			passed=True,
+			detail=(
+				"the report states that maintainability was not verified and why (FR-158): "
+				f"evolvability debt is {EVOLVABILITY_DEBT:g} for every module by construction "
+				"— the value the requirement names, not a measurement failure — because no "
+				"oracle in O1-O8 observes change cost, and Mode M is capped at "
+				f"{MODE_M_CEILING.name} while Mode G's {MODE_G_CEILING.name} is unaffected. "
+				"The two are reported as two numbers (FR-158(b)). The sentence is a constant "
+				"on the type, so no code path can phrase the claim away. This check reports "
+				"rather than fails: FR-158 makes the debt structural, and refusing a delivery "
+				"for a debt every delivery carries would refuse all of them"
 			),
 		),
 		GateCheck(
