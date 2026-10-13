@@ -242,12 +242,20 @@ really entered — instead of asking it. `pi`, `dsh`, `claude` and `opencode` sh
 sofact probe                        # attempt a harness; record what was observed
 sofact dispatch --all               # run the plan; stops at the first refuted wave
 sofact repair                       # hand each refuted clause back to the producer
+sofact attempts                     # what the repair loop cost: attempts, tokens, wall clock
 sofact integrity                    # re-verify the pinned hashes
 sofact integrate                    # P7
 sofact deliver --root ./delivery    # P8: the report, its chain, its handover
 sofact deploy                       # present FR-119's gate; nothing deploys
 sofact deploy --approve <report-id> --by me   # pass it, as a person, on the record
 ```
+
+`attempts` folds the repair rows against the sessions they produced, and it **says when it
+could not measure everything**: a harness that reports no usage yields a *floor*, not a
+total, and the count of sessions that reported nothing travels with the number. Three zeros
+over a run that never repaired anything is not a cheap build, and the verb exits non-zero
+rather than print it
+([ADR-0055](docs/adr/0055-attempt-telemetry-is-a-join-and-the-unmeasured-token-count-is-part-of-it.md)).
 
 `probe` is not optional: dispatching against an assumed capability is exactly what the spec
 forbids, so `dispatch` refuses until a profile exists. Which harness is a **row of data, not

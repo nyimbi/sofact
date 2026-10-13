@@ -5188,6 +5188,157 @@ class RepairAttempt(View):
 		return self
 
 
+class AttemptTelemetry(View):
+	"""FR-102's attempt telemetry: what one repair attempt cost, and what it achieved.
+
+	"Build must report **attempt telemetry** (attempts, tokens, wall clock)." The three
+	quantities are per *attempt*, and an attempt is a :class:`RepairAttempt` row joined to
+	the :class:`DispatchRecord` its session produced. Before this type the two rows existed
+	and nothing joined them, so the three numbers FR-102 names could only be read one
+	dispatch at a time.
+
+	**``tokens`` is a floor, and says so.** A harness that reports no usage yields
+	``tokens_observed=None``, which is *unmeasured* rather than zero (NFR-024). Summing
+	``None`` as zero would report a cheap attempt where the truth is an unmeasured one, so
+	:attr:`tokens` sums only the attempts that reported and :attr:`unmeasured_tokens` counts
+	the rest. A total that hid its own coverage would be the defect FR-118 names — a
+	qualification that went missing where it was least visible.
+	"""
+
+	attempt_id: UUID7
+	clause_ids: tuple[UUID7, ...]
+	attempt: int
+	"""1-based, counting attempts at *this* clause, as :class:`RepairAttempt` numbers it."""
+
+	outcome: RepairOutcome
+	dispatch_id: UUID7 | None = None
+	"""``None`` when no session ran, so the attempt cost no wall clock and no tokens.
+
+	A refusal and a cheap attempt are different facts. ``NOT_COMPLETED`` with no dispatch
+	is the producer never starting; a dispatch that exited in a second is a producer that
+	started and stopped. Both have near-zero cost and only one of them is a measurement.
+	"""
+
+	wall_clock_seconds: float = 0.0
+	"""Observed session duration. ``0.0`` when no session ran — a fact, not a floor."""
+
+	tokens: int = 0
+	"""Sum of the token counts the sessions *did* report. A floor, not a total."""
+
+	unmeasured_tokens: int = 0
+	"""How many joined dispatches reported no usage. ``0`` means the sum is complete."""
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.attempt < 1:
+			raise ValueError(f"attempt must be 1-based, got {self.attempt}")
+		if self.wall_clock_seconds < 0:
+			raise ValueError(f"wall clock cannot be negative, got {self.wall_clock_seconds}")
+		if self.tokens < 0:
+			raise ValueError(f"tokens cannot be negative, got {self.tokens}")
+		if self.unmeasured_tokens < 0:
+			raise ValueError("unmeasured_tokens cannot be negative")
+		if self.dispatch_id is None and (self.wall_clock_seconds or self.tokens):
+			raise ValueError(
+				"an attempt with no dispatch reports no spend: a cost with no session "
+				"attached is a measurement of nothing"
+			)
+		return self
+
+	@property
+	def tokens_measured(self) -> bool:
+		"""True when every joined dispatch reported usage, so :attr:`tokens` is exact."""
+		return self.unmeasured_tokens == 0
+
+
+class AttemptTelemetryReport(View):
+	"""FR-102's aggregation: the attempt telemetry of one repair run, totalled.
+
+	The requirement asks build to *report* attempts, tokens and wall clock. The rows
+	carried the first and the dispatches carried the other two; this is the fold that
+	produces the three numbers in one place, per run and per clause.
+
+	**The vacuous pass is refused.** A run that made no attempt returns
+	``discharged == ()`` — the rule :attr:`OracleAuditReport.discharged` and
+	:attr:`EscapeReport.discharged` both state. "0 tokens over 0 attempts" is not a
+	measurement of a cheap build; it is the absence of a measurement, and a screen showing
+	it as a total would report a clean bill of health for work nobody did.
+
+	**What it is not.** It reports *cost*, never *value*. An attempt that burned the most
+	wall clock is not the attempt that fixed the clause — that is :attr:`outcome`'s job,
+	and the two are deliberately separate columns so a reader cannot read spend as progress.
+	"""
+
+	id: UUID7
+	plan_id: UUID7
+	rendered_at: datetime
+	attempts: tuple[AttemptTelemetry, ...] = ()
+	"""One entry per repair attempt, in log order."""
+
+	@property
+	def total_attempts(self) -> int:
+		"""How many attempts the run made. FR-102's first quantity."""
+		return len(self.attempts)
+
+	@property
+	def total_wall_clock_seconds(self) -> float:
+		"""Summed session duration. FR-102's third quantity."""
+		return sum(a.wall_clock_seconds for a in self.attempts)
+
+	@property
+	def total_tokens(self) -> int:
+		"""Summed tokens over the attempts that reported usage. A floor, not a total."""
+		return sum(a.tokens for a in self.attempts)
+
+	@property
+	def unmeasured_tokens(self) -> int:
+		"""Joined dispatches that reported no usage, across every attempt."""
+		return sum(a.unmeasured_tokens for a in self.attempts)
+
+	@property
+	def tokens_complete(self) -> bool:
+		"""True when every joined dispatch reported usage, so the token total is exact."""
+		return self.unmeasured_tokens == 0
+
+	@property
+	def by_clause(self) -> tuple[tuple[UUID7, int], ...]:
+		"""Attempt counts per clause, so a stubborn clause is visible as a cost centre.
+
+		Counted at the clause because that is the unit FR-101 bounds the loop in, and
+		because a plan with one stubborn clause would otherwise hide its spend inside a
+		run-wide total. An attempt covering several clauses counts once for each, which is
+		why the counts can sum past :attr:`total_attempts` — the alternative is a
+		per-clause figure that depends on what else the attempt happened to cover.
+		"""
+		counts: dict[UUID7, int] = {}
+		for attempt in self.attempts:
+			for clause_id in attempt.clause_ids:
+				counts[clause_id] = counts.get(clause_id, 0) + 1
+		return tuple(sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])))
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this reading carried out, which may be none.
+
+		A run that made no attempt claims nothing, for the reason
+		:attr:`EscapeReport.discharged` gives: the absence of a measurement is not a
+		measurement, and FR-102's numbers over an empty run are the shape a clean result
+		takes when there was no run at all.
+		"""
+		if not self.attempts:
+			return ()
+		return ATTEMPT_TELEMETRY_REQUIREMENTS
+
+
+ATTEMPT_TELEMETRY_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-102",)
+"""What :attr:`AttemptTelemetryReport.discharged` reports when the fold carried it out.
+
+One requirement, because FR-102 is one sentence with three nouns in it. Naming it here
+rather than in the fold keeps the two readings of "is this discharged" — the property and
+any future gate — from drifting apart.
+"""
+
+
 class DeclarationPrecision(View):
 	"""Goal-declaration precision (§20.4, FR-143, FR-147).
 
@@ -5818,6 +5969,20 @@ class ProjectState(View):
 	def dispatches_for_step(self, step_id: str) -> tuple[DispatchRecord, ...]:
 		"""Every attempt at one step, in log order. Retries appear as separate rows."""
 		return tuple(d for d in self.dispatches if d.step_id == step_id)
+
+	def origin_plan(self, contract_id: str) -> GoalPlan | None:
+		"""The first plan compiled from a contract — the one repairs are filed under.
+
+		Distinct from :meth:`latest_plan`, and the distinction is load-bearing rather than
+		cosmetic: a repair authors a *new plan revision* for each attempt, so the latest
+		plan is the tail of the revision chain while every :class:`RepairAttempt` carries
+		the id of the plan the loop was entered with. Asking "what did this contract's
+		build cost" of the latest plan therefore returns the revision, whose id appears on
+		no repair row, and the honest-looking answer is an empty total. The plan that owns
+		the attempts is the first one.
+		"""
+		matching = [p for p in self.plans if p.contract_id == contract_id]
+		return matching[0] if matching else None
 
 	def repairs_for_plan(self, plan_id: str) -> tuple[RepairAttempt, ...]:
 		"""Every repair attempt made against a plan, in log order."""

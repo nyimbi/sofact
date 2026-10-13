@@ -78,6 +78,7 @@ from sofact.specification import approve as record_specification_approval
 from sofact.specification import gate as gate_specification
 from sofact.specification import specify as propose_specification
 from sofact.state import fold
+from sofact.telemetry import measure_attempts
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	PHASE_GATE,
@@ -85,6 +86,7 @@ from sofact.views import (
 	PHASE_SEQUENCE,
 	Advice,
 	Assumption,
+	AttemptTelemetryReport,
 	ChainStatus,
 	Clause,
 	ClauseVerdict,
@@ -1366,6 +1368,11 @@ class FactoryService:
 		"""Most recent plan compiled from a contract, if any."""
 		state = await self.state()
 		return state.latest_plan(contract_id)
+
+	async def origin_plan(self, contract_id: str) -> GoalPlan | None:
+		"""The first plan compiled from a contract — the one repairs are filed under."""
+		state = await self.state()
+		return state.origin_plan(contract_id)
 
 	async def plan_by_id(self, plan_id: str) -> GoalPlan:
 		"""Fetch a plan by id, raising if it is unknown."""
@@ -2891,6 +2898,23 @@ class FactoryService:
 		if report_id is None:
 			return state.escapes
 		return state.escapes_for(report_id)
+
+	# ------------------------------------------------------- FR-102: telemetry
+
+	async def attempt_telemetry(self, plan_id: str) -> AttemptTelemetryReport:
+		"""Fold one plan's repair attempts and dispatches into FR-102's three numbers.
+
+		Scoped to a plan rather than to the ledger, because an attempt belongs to the run
+		that made it: a run-wide total would let one plan's spend hide inside another's.
+		The caller names the plan it is asking about, and a plan with no attempts gets an
+		empty report whose ``discharged`` is empty rather than a clean-looking zero.
+		"""
+		state = await self.state()
+		return measure_attempts(
+			plan_id=plan_id,
+			repairs=state.repairs,
+			dispatches=state.dispatches,
+		)
 
 	# --------------------------------------------------------- FR-143: precision
 

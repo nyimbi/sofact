@@ -2267,6 +2267,80 @@ async def _repair(
 		raise typer.Exit(code=1)
 
 
+@app.command()
+def attempts(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Report what the repair loop cost: attempts, tokens, wall clock (FR-102)."""
+	asyncio.run(_attempts(_service(_home_of(ctx, home))))
+
+
+async def _attempts(svc: FactoryService) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	# The plan repairs are *filed under*, not the plan the log ends on. Each attempt
+	# authors a new revision, so ``latest_plan`` is the tail of that chain and its id
+	# appears on no repair row — asking it for the cost would answer, honestly and
+	# uselessly, that nothing was spent.
+	plan = await svc.origin_plan(built.id)
+	if plan is None:
+		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+
+	telemetry = await svc.attempt_telemetry(plan.id)
+	typer.secho(f"\nattempt telemetry — plan {plan.id}", fg="cyan", bold=True)
+	if not telemetry.attempts:
+		# The vacuous pass, refused in words as well as in the type: an empty run's
+		# zeros are the shape a clean result takes when there was no run at all.
+		typer.secho(
+			"  no repair attempt was made against this plan, so there is nothing to "
+			"total. Zero tokens over zero attempts is not a cheap build — it is the "
+			"absence of a measurement (FR-102, NFR-024).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+
+	for row in telemetry.attempts:
+		style = _REPAIR_STYLE[row.outcome]
+		clauses = f"{len(row.clause_ids)} clause(s)"
+		spend = f"{row.wall_clock_seconds:.1f}s"
+		if row.dispatch_id is None:
+			spend = "no session"
+		elif row.tokens_measured:
+			spend = f"{spend}, {row.tokens} tokens"
+		else:
+			spend = f"{spend}, tokens unmeasured"
+		typer.secho(f"\n  attempt {row.attempt} — {row.outcome.value}", fg=style)
+		typer.echo(f"      {clauses}, {spend}")
+
+	typer.secho(
+		f"\n  {telemetry.total_attempts} attempt(s), {telemetry.total_wall_clock_seconds:.1f}s",
+		fg="cyan",
+	)
+	# The token line states its own coverage. A harness that reports no usage yields
+	# ``None``, not zero, so a total that hid how much it had not measured would read as
+	# a cheap build (FR-118's missing qualification, in arithmetic form).
+	if telemetry.tokens_complete:
+		typer.echo(f"  {telemetry.total_tokens} tokens (every session reported usage)")
+	else:
+		typer.secho(
+			f"  {telemetry.total_tokens} tokens — a floor: "
+			f"{telemetry.unmeasured_tokens} session(s) reported no usage, so the true "
+			"spend is higher and this number does not know by how much (NFR-024).",
+			fg="yellow",
+		)
+
+	by_clause = telemetry.by_clause
+	if len(by_clause) > 1:
+		typer.echo("\n  per clause:")
+		for clause_id, count in by_clause:
+			typer.echo(f"      {clause_id[:8]}  {count} attempt(s)")
+
+
 @app.command(name="contract")
 def build_contract(
 	ctx: typer.Context,

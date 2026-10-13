@@ -80,7 +80,7 @@ closed since carry their date.
 | FR-099 idempotent per task | **Partly** | Stated in the goal text (`planner.py:114`); `test_re_running_the_same_step_is_idempotent` (`test_git.py:158`) covers the git half only. |
 | FR-100 branch per module, never in place | **Implemented** | `ensure_module_branch` (`git.py:139`), `seal_branch` (`:258`); `test_the_branch_is_not_in_place` (`test_git.py:91`), `test_two_steps_of_one_module_share_its_branch` (`:115`). |
 | FR-101 escalate with diagnosis, not retry forever | **Implemented** | `repair_plan` bounded per clause; `test_the_loop_is_bounded_and_says_so_when_it_gives_up` (`test_service.py:961`). |
-| FR-102 attempt telemetry | **Partly** | Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`); `test_a_step_runs_and_is_recorded` (`test_service.py:525`). **No attempt-level aggregation.** |
+| FR-102 attempt telemetry | **Implemented (2026-10-14, ADR-0055)** | `measure_attempts` (`telemetry.py`) folds a plan's `RepairAttempt` rows against the `DispatchRecord` each produced, giving the requirement's three nouns at attempt level: attempts, tokens, wall clock. Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`) were already recorded; the gap was the **join**, and it is where the module spends its care — `tokens_observed` is `int \| None` and `None` is *unmeasured*, never zero (NFR-024), so `AttemptTelemetryReport` sums what reported and carries `unmeasured_tokens` with `tokens_complete` saying whether the sum is exact. An attempt whose dispatch is absent (a torn read on an append-only log) is a floor, not a free session; an attempt that never ran is zero spend *and* nothing hidden — different facts, different rows. `discharged` returns `()` when no attempt was made, so a run that repaired nothing lands FR-102 in `not_implemented` rather than printing three green zeros. `sofact attempts` exits non-zero on that empty run. **The defect the suite caught:** the verb asked `latest_plan`, which returns the *revision* a repair authored, while every `RepairAttempt.plan_id` is the **origin** the loop was entered with — so the total was honestly and uselessly empty. `ProjectState.origin_plan` and `FactoryService.origin_plan` resolve it, and `TestTheAttemptsAreFiledUnderTheOriginPlan` asserts the two ids differ rather than merely that a number is non-zero. `TestTheFoldCountsWhatWasMeasured` (3), `TestTheTotalSaysWhatItLeftOut` (4), `TestTheRowTypeRefusesImpossibleSpend` (2), `TestTheVacuousPassIsRefused` (2), `TestTheAttemptsAreFiledUnderTheOriginPlan` (3), `TestTheScopeIsThePlan` (2), `TestTheReportIsAPureFold` (1), `TestPerClauseCounts` (1), `TestTheCliReportsIt` (2) in `test_telemetry.py`. |
 | FR-103 oracle manufacturing from contract structure | **Partly** | `suggest_oracle` (`contract.py:46`) proposes a class and a command from clause polarity; `test_negative_clauses_suggest_a_property_and_positive_ones_a_contract` (`test_contract.py:64`). No test *generation*, no rank ordering, no mutation. |
 | FR-104 ranks 1–2 mandatory above L2 | **Partly, and it conflicts with §14** | `STRONG_ORACLE_MAX_RANK` (`views.py:269`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. **The code is right and the requirement is the outlier:** FR-104 says ranks 1–2 are mandatory above L2, but §14's own module-class table puts **G3 (API/service) and G4 (persistence) at L3 with rank-3 contract tests** — the same L3 `ceiling_for_rank(3)` grants. Read literally, FR-104 would make §14's G3 and G4 unreachable. Resolving it needs a spec decision (narrow FR-104 to G7-class modules, or lower §14's G3/G4), not a code change; recorded here so the conflict is not mistaken for a missing cap. |
 | FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:994`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
@@ -145,22 +145,22 @@ closed since carry their date.
 
 ### Counts
 
-Recounted from the table above on 2026-10-13 after the FR-021-023 escape unit, by
-reading the verdict cell of every row with a script rather than by arithmetic on the
+Recounted from the table above on 2026-10-14 after the FR-102 attempt-telemetry unit,
+by reading the verdict cell of every row with a script rather than by arithmetic on the
 previous snapshot — the earlier numbers in this file (47/21/1/48, then 59/28/1/31, then
-67/26/0/26, then 69/25/0/25, then 71/25/0/23, then 72/25/0/22, then 76/26/0/17) did not
-match the rows they claimed to count. The script reads the cell rather than grepping the
-line, because a row whose *evidence* names another verdict would otherwise be counted
-twice; it classifies on the cell's **leading** token, so the rows whose verdict carries a
-date or a qualification still land in the right bucket.
+67/26/0/26, then 69/25/0/25, then 71/25/0/23, then 72/25/0/22, then 76/26/0/17, then
+86/26/0/7) did not match the rows they claimed to count. The script reads the cell rather
+than grepping the line, because a row whose *evidence* names another verdict would
+otherwise be counted twice; it classifies on the cell's **leading** token, so the rows
+whose verdict carries a date or a qualification still land in the right bucket.
 
 **The previous snapshot was itself stale, and the recount found it.** Running the script
 against `HEAD` gives 85/25/0/9 where the file recorded 76/26/0/17 — nine rows had been
 closed by the ADR-0035..0053 units without the count being moved, which is the same
-class of defect this audit exists to find in other people's documents. This change moves
-exactly two rows (FR-021-023 Not built → Implemented, FR-157 Not built → Partly), so
-85/25/0/9 becomes 86/26/0/7; the difference from the recorded baseline is the correction,
-not the work.
+class of defect this audit exists to find in other people's documents. The ADR-0054 unit
+moved exactly two rows (FR-021-023 Not built → Implemented, FR-157 Not built → Partly),
+so 85/25/0/9 became 86/26/0/7; this change moves one (FR-102 Partly → Implemented), and
+87/25/0/7 is asserted against the 119 row count rather than trusted.
 
 The `Implemented` count includes FR-152's row, whose cell reads
 `**Implemented (as a documented refusal)**` — the one verdict spelled with a
@@ -170,8 +170,8 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 86 |
-| Partly | 26 |
+| Implemented | 87 |
+| Partly | 25 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 7 |
 | **Total rows** | **119** |
@@ -340,8 +340,10 @@ but FR-058's *portability* claim rests on a second adapter that has never been m
 
 ### Method note
 
-Every "Implemented" verdict above names a test. Two verdicts were **downgraded on
-inspection** for want of one: FR-091 (the count is reported; nothing minimises it)
-and FR-102 (per-dispatch telemetry exists; the requirement is about attempts, which
-are not aggregated anywhere). No requirement was marked Implemented on the strength
-of a docstring, a goal-text line, or a README row.
+Every "Implemented" verdict above names a test. One verdict was **downgraded on
+inspection** for want of one: FR-091 (the count is reported; nothing minimises it).
+FR-102 was downgraded on the same ground — per-dispatch telemetry existed, but the
+requirement is about *attempts*, which nothing aggregated — and was **restored on
+2026-10-14** when the aggregation, its tests and the defect they caught landed
+(ADR-0055). No requirement was marked Implemented on the strength of a docstring, a
+goal-text line, or a README row.
