@@ -1642,6 +1642,70 @@ class TestTheIntegrateVerb:
 		assert "system-level criteria (FR-116)" in result.output
 		assert "over 2 clause(s)" in result.output
 
+	def test_an_interface_reaches_the_proposal_and_the_terminal(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-083 needs a declaration site, and a verb that could not accept one is not it.
+
+		The same reasoning ``--criterion`` carries: a requirement the operator's own
+		statement discharges needs a way in, or the gate behind it can never pass while
+		still reporting itself as a gate.
+		"""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home",
+				str(home),
+				"specify",
+				*SPECIFY_ARGS,
+				"--interface",
+				"ledger:record(f,entry_id),LIMIT(k):1",
+			],
+		)
+
+		assert result.exit_code == 0, result.output
+		assert "1 interface(s)" in result.output
+		assert "ledger (FR-083)" in result.output
+		assert "function record(entry_id)" in result.output
+		assert "constant LIMIT" in result.output
+
+	def test_an_interface_over_a_clause_that_does_not_exist_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The refusal names the arity, because a wrong index is the likely mistake."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "specify", *SPECIFY_ARGS, "--interface", "ledger:record:99"],
+		)
+
+		assert result.exit_code == 1
+		assert "bad option" in result.output
+		assert "the contract has 5 clause(s)" in result.output
+
+	def test_an_interface_member_with_an_unknown_kind_is_refused(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The default is stated rather than implied, so a wrong kind is a refusal, not a guess."""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert _contract(home).exit_code == 0
+
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "specify", *SPECIFY_ARGS, "--interface", "ledger:record(x):1"],
+		)
+
+		assert result.exit_code == 1
+		assert "use f, c or k" in result.output
+
 
 # --------------------------------------------------------------------------- #
 # FR-093: the module's Definition of Done reaches the operator's terminal

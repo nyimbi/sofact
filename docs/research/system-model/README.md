@@ -3,12 +3,16 @@
 Snapshot: 2026-10-12. Scope: what a machine-readable system model has to be for
 FR-112 and FR-115 to become checkable, and what it must *not* be.
 
-**Outcome:** the proposal below was adopted for its interface half —
+**Outcome, updated 2026-10-13:** the proposal below was adopted for its interface half —
 [ADR-0027](../../adr/0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md)
 implements `Module.surface` and the two-directional diff, which makes FR-112 checkable
-for any module that declares a surface. Nothing derives a surface yet, so the check runs
-and diffs nothing on a proposal. FR-115 is untouched: entities and relationships are a
-separate decision, as the last section says.
+for any module that declares a surface. [ADR-0049](../../adr/0049-the-model-declares-an-interface-and-the-module-binds-it.md)
+then closed the hole this note left open: point 1 below put `InterfaceSurface` **on
+`Module`**, which is a declaration *beside* the model and so left FR-083's "single source"
+half-discharged — a module could agree with its own code and disagree with the model with
+every check green. `SystemInterface` now makes the model the declaration site, `Module.surface`
+the binding, and `propose` derives the binding. FR-115 was closed separately by
+[ADR-0038](../../adr/0038-a-system-criterion-spans-clauses-and-its-verdicts-are-the-worst.md).
 
 ## The blocker, stated exactly
 
@@ -122,7 +126,12 @@ Concretely:
   is a decision for the ADR that implements this, not for the research.
 - **Whether entities and relationships are in v1.** Interfaces alone unblock FR-112;
   FR-115 needs entities and relationships too. The honest sequence is FR-112 first,
-  then FR-115, rather than a model type that claims both and checks one.
+  then FR-115, rather than a model type that claims both and checks one. **Settled:**
+  both are in, ADR-0027 built FR-112 and ADR-0038 built FR-115.
+- **Where the interface is *declared*.** This note answered "on the module" and ADR-0027
+  built that, which made FR-112 checkable and left FR-083 half-discharged. **Settled by
+  ADR-0049:** the model declares it, the module binds it, and `propose` derives the
+  binding so the two cannot disagree on a proposal.
 - **[S07]'s empirical support.** Medium confidence, preprint, URL unresolved. The
   design does not rest on the claim being true — it rests on FR-083, which is the
   operator's requirement, not the paper's.

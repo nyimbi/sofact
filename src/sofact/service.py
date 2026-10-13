@@ -1192,7 +1192,12 @@ class FactoryService:
 		"""
 		specification = await self.require_approved_specification(contract_id)
 		contract = await self.contract_by_id(contract_id)
-		proposal = propose(contract)
+		# FR-083: the model is the single source for interface definitions, so the
+		# proposal derives every module's surface from it rather than inventing one. The
+		# model comes from the *approved* specification — the same artefact the gate below
+		# is about — so a proposal cannot be derived from a model the operator has not
+		# approved, which is the whole point of the gate one phase earlier.
+		proposal = propose(contract, specification.system_model)
 		self._commit(
 			LedgerKind.DECOMPOSITION_PROPOSED,
 			{"decomposition": proposal.model_dump(mode="json")},

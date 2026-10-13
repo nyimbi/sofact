@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from enum import IntEnum, StrEnum
 from typing import Annotated, Any, ClassVar, Final, Self
@@ -133,6 +134,7 @@ __all__ = [
 	"StepOutcome",
 	"SystemCriterion",
 	"SystemEntity",
+	"SystemInterface",
 	"SystemInvariant",
 	"SystemModel",
 	"SystemRelationship",
@@ -1536,19 +1538,64 @@ class SystemInvariant(View):
 	entity_names: tuple[NonEmptyStr, ...] = ()
 
 
+class SystemInterface(View):
+	"""A surface the system exposes, declared *in the model* rather than on a module.
+
+	FR-083's second clause is the one that has been open since ADR-0027: "the system model
+	must be **the single source for interface definitions**. Hand-written interfaces that
+	disagree with the model are an integration defect by construction." ADR-0027 put the
+	declared surface on :class:`Module` instead, which made FR-112 checkable and left FR-083
+	half-discharged — a surface declared on a module is a surface declared *beside* the
+	model, so a model and a module can disagree and nothing says which one is the truth.
+
+	This type closes that by making the model the place an interface is *declared* and the
+	module the place it is *bound*. The binding is what keeps it honest: an interface here
+	names the clause it comes from, and a module owns clauses, so ``entity -> clause ->
+	module`` is the same set comparison :class:`SystemEntity` already uses — no name
+	searching, no fuzzy matching.
+
+	``members`` is the same :class:`InterfaceMember` a module declares, deliberately: the
+	two are one vocabulary, so a surface moved from a module to the model is the *same*
+	declaration in a different place rather than a translation between two shapes. That is
+	what makes FR-083's "single source" checkable — P7 can diff the model's interfaces
+	against the built surface directly, and a module whose ``surface`` disagrees with the
+	model's interface for its own clause is a finding rather than a silent second opinion.
+	"""
+
+	name: NonEmptyStr
+	clause_ids: tuple[UUID7, ...] = ()
+	members: tuple[InterfaceMember, ...] = ()
+
+	@model_validator(mode="after")
+	def _an_interface_comes_from_something(self) -> Self:
+		if not self.clause_ids:
+			raise ValueError(
+				f"interface {self.name!r} names no clause, so no module can be shown to "
+				"owe it and FR-083's binding has nothing to bind to (FR-081, FR-083)"
+			)
+		return self
+
+
 class SystemModel(View):
-	"""The machine-readable model: entities, relationships, invariants (FR-078, FR-083).
+	"""The machine-readable model: entities, relationships, invariants, interfaces.
 
 	FR-083: "must be machine-readable and must be the single source for interface
-	definitions". The interface half lives on :class:`Module.surface`, derived from the
-	contract, and this type carries the half that is not per-module — the entities and
-	relationships that only exist once the system is assembled, which is exactly what
-	FR-115 checks and what ADR-0027 could not reach.
+	definitions". Both halves are here now. ``interfaces`` is the declaration, and
+	:class:`Module.surface` is the *binding* of it to the module that owes it — the module
+	still carries the surface FR-112 diffs a build against, and the model now carries the
+	one the operator declared, so the two are compared rather than one being trusted.
+
+	What the model does **not** carry is a second copy of every module's surface. A model
+	that duplicated it would be two declarations to keep in step, which is the drift FR-084
+	exists to make expensive and the reason MDSE failed. An interface here is declared once
+	per clause; a module's surface is derived from the interfaces its clauses introduce,
+	and a disagreement between them is the integration defect FR-083 says it is.
 	"""
 
 	entities: tuple[SystemEntity, ...] = ()
 	relationships: tuple[SystemRelationship, ...] = ()
 	invariants: tuple[SystemInvariant, ...] = ()
+	interfaces: tuple[SystemInterface, ...] = ()
 
 	@model_validator(mode="after")
 	def _relationships_name_declared_entities(self) -> Self:
@@ -1569,15 +1616,64 @@ class SystemModel(View):
 					)
 		return self
 
+	@model_validator(mode="after")
+	def _no_two_interfaces_share_a_name(self) -> Self:
+		"""Two interfaces under one name is a model whose meaning depends on lookup order.
+
+		The same refusal :data:`~sofact.api.MACHINE_OPERATIONS` makes about operation
+		names, one type along: FR-083 makes this the single source, and a source that
+		answers a question two ways is not a source. It is also the case a merge would
+		produce — two clauses each contributing an interface called ``store`` — so the
+		refusal names both clauses rather than the name alone.
+		"""
+		seen: dict[str, str] = {}
+		for interface in self.interfaces:
+			previous = seen.get(interface.name)
+			if previous is not None:
+				raise ValueError(
+					f"the model declares two interfaces called {interface.name!r} "
+					f"(clauses {previous} and {interface.clause_ids[0]}); FR-083 makes the "
+					"model the single source for interface definitions, and a source that "
+					"answers one name twice is not one"
+				)
+			seen[interface.name] = interface.clause_ids[0]
+		return self
+
 	@property
 	def is_empty(self) -> bool:
 		"""Whether the model declares nothing, so nothing can be conformed against."""
-		return not (self.entities or self.relationships or self.invariants)
+		return not (self.entities or self.relationships or self.invariants or self.interfaces)
 
 	@property
 	def entity_names(self) -> frozenset[str]:
 		"""Every declared entity name, for reference checks."""
 		return frozenset(e.name for e in self.entities)
+
+	def interfaces_for_clauses(self, clause_ids: Iterable[str]) -> tuple[SystemInterface, ...]:
+		"""The interfaces whose clauses intersect ``clause_ids``, in declaration order.
+
+		This is FR-083's binding, and it is the whole of it: a module owns clauses, an
+		interface names clauses, so a module's declared surface is the members of the
+		interfaces its clauses introduce. No name matching, so an interface called
+		``store`` and a module called ``store`` are related by the clause they share and
+		not by their spelling — which is the difference between a check and a coincidence.
+		"""
+		wanted = set(clause_ids)
+		return tuple(i for i in self.interfaces if wanted & set(i.clause_ids))
+
+	def surface_for_clauses(self, clause_ids: Iterable[str]) -> tuple[InterfaceMember, ...]:
+		"""Every member the model declares for a module owning ``clause_ids``.
+
+		Deduplicated by name, first declaration winning, because two interfaces over one
+		module's clauses may legitimately name the same member — the same entity appearing
+		in two clauses is the ordinary case — and a surface is a set of public names, not a
+		multiset of the statements that introduced them.
+		"""
+		members: dict[str, InterfaceMember] = {}
+		for interface in self.interfaces_for_clauses(clause_ids):
+			for member in interface.members:
+				members.setdefault(member.name, member)
+		return tuple(members.values())
 
 
 class SystemCriterion(View):
@@ -2412,6 +2508,24 @@ class IntegrationFindingKind(StrEnum):
 	UNOWNED_ENTITY = "unowned_entity"
 	"""No module owns any clause that introduces the entity (FR-115)."""
 
+	MODEL_INTERFACE_NOT_BOUND = "model_interface_not_bound"
+	"""A model interface's clause reaches no module, so nothing was asked to expose it.
+
+	FR-083's defect by construction: the model is the single source for interface
+	definitions, so an interface the decomposition never bound to a module is a declared
+	surface the system was never told to have.
+	"""
+
+	SURFACE_DISAGREES_WITH_MODEL = "surface_disagrees_with_model"
+	"""A module's declared surface is not the one the model derives for its clauses (FR-083).
+
+	This is the finding FR-083 exists to produce. A surface declared on a module *beside*
+	the model is a second opinion about the same public names, and the two can differ —
+	so the model is not the source, it is one of two sources. Derived surfaces cannot
+	differ, and a hand-revised module is exactly the case that can, which is why the check
+	compares rather than assumes.
+	"""
+
 	UNSATISFIED_SYSTEM_CRITERION = "unsatisfied_system_criterion"
 	"""A system-level criterion has no satisfied verdict from any module (FR-116)."""
 
@@ -2450,6 +2564,7 @@ class IntegrationFinding(View):
 
 INTEGRATION_REQUIREMENTS: Final[tuple[str, ...]] = (
 	"FR-026",
+	"FR-083",
 	"FR-097",
 	"FR-111",
 	"FR-112",
@@ -2468,6 +2583,12 @@ FR-026 and FR-097 are here rather than among §10's own numbers because both are
 a *built module*, and P7 is the only stage that knows which files a module produced
 (FR-113's attribution is the same fact). A bound checked anywhere else would be checked
 against a guess at what the module contains.
+
+FR-083 is here because it is §6.3's model requirement and its second clause is a claim
+about *integration*: "hand-written interfaces that disagree with the model are an
+integration defect by construction". P2 declares the model and P3 binds it, but only P7
+holds both the model and the decomposition, so only P7 can see a module whose declared
+surface is not the one the model derives.
 """
 
 

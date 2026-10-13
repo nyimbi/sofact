@@ -43,6 +43,7 @@ from sofact.views import (
 	Module,
 	ModuleClass,
 	OracleClass,
+	SystemModel,
 	content_hash,
 	now,
 )
@@ -309,7 +310,7 @@ def completion_criteria(clause: Clause) -> tuple[str, ...]:
 	return exit_evidence_for(clause)
 
 
-def propose(contract: Contract) -> Decomposition:
+def propose(contract: Contract, model: SystemModel | None = None) -> Decomposition:
 	"""Propose a decomposition of ``contract`` into modules, deterministically (FR-087).
 
 	One module per clause, grouped by the class the clause's words imply, with
@@ -321,6 +322,19 @@ def propose(contract: Contract) -> Decomposition:
 	This is a *proposal*. It is sound in the sense FR-089 and FR-092 mean — acyclic,
 	ordered, traceable — and that is the only sense in which a machine may call a
 	decomposition sound.
+
+	``model`` is FR-083's binding, and passing it is what makes the model the *single
+	source for interface definitions* rather than a parallel declaration. Each module's
+	surface is the members the model declares for the interfaces its clauses introduce —
+	so the surface is **derived**, and a module cannot hold an opinion about its own
+	public names that differs from the model's. A model that declares no interfaces
+	derives nothing and every surface stays empty, which is the honest state ADR-0027
+	recorded rather than a guess: nothing in a contract's clauses is a signature.
+
+	``None`` means the caller has no model, which is the state of every project whose P2
+	declared none. It is not the same as a model with no interfaces, and the difference
+	shows up at P7: the first is a project that never declared one, the second is one
+	whose declaration is empty.
 	"""
 	assert contract.clauses, "cannot decompose a contract with no clauses"
 	timestamp = now()
@@ -334,6 +348,11 @@ def propose(contract: Contract) -> Decomposition:
 			module_class=classify(clause.statement),
 			interface=_interface(clause),
 			clause_ids=(clause.id,),
+			# FR-083: the model is the single source, so the surface is read off it
+			# rather than invented here. A module's clauses may intersect several
+			# interfaces, and the model's own deduplication by name is what keeps two
+			# clauses naming the same member from producing two surface entries.
+			surface=model.surface_for_clauses((clause.id,)) if model is not None else (),
 			completion_criteria=completion_criteria(clause),
 			# FR-097's budget, declared here rather than defaulted on the type: a proposal
 			# is the one place the factory can put a number in front of the operator at P3,

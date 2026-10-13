@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1113 passed, 0 failed** (2026-10-13, after ADR-0048).
+`tests/ci` at the last refresh: **1131 passed, 0 failed** (2026-10-13, after ADR-0049).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -61,8 +61,8 @@ closed since carry their date.
 | FR-080 P2 gate presents the spec in the operator's language | **Implemented** (2026-10-12) | `SpecificationGate` + `sofact specify`/`--approve`; the proposal, its checks, its non-goals, its assumptions and its value hypothesis print in the operator's own words, since every statement is theirs. Approval is a separate act and cannot waive a failed check. |
 | FR-081 internal consistency check | **Partly** (2026-10-12) | Two of three clauses. **Every entity referenced by a requirement** is a gate check over declared links, and **every requirement maps to a module** is checked in the P3 gate where modules exist. **"No two requirements may contradict" is not machine-decidable in prose** — the check covers the polarity case only (one statement asserted and denied) and says so in its own detail line rather than claiming a clean bill. |
 | FR-082 testability check, `human-verified` marking | **Implemented** (2026-10-12) | `VerificationMethod` (`views.py`); a requirement whose oracle names no command is `HUMAN`, counted and printed at the gate. The check **reports rather than fails**, which is FR-082's own rule: a criterion needing a person is permitted, it must have its cost counted. |
-| FR-083 machine-readable system model as the single interface source | **Partly** | The model is machine-readable and carries entities/relationships/invariants. It is **not yet the single source for interface definitions**: ADR-0027 still declares surfaces on `Module`, and nothing derives a module's surface from the model. |
-| FR-084 model updated as part of any change | **Not built** | No model. |
+| FR-083 machine-readable system model as the single interface source | **Implemented** (2026-10-13, ADR-0049) | Both clauses. The model carries `SystemInterface` values (`views.py`), each naming the clause it comes from and the `InterfaceMember` values it exposes — the same member type a module declares, so a surface moved from a module to the model is one vocabulary in two places. The model is the **declaration site** and `Module.surface` its **binding**: `propose(contract, model)` *derives* each module's surface from the interfaces its clauses introduce, so the proposer never chooses a public name and a proposal cannot disagree with its own model. P7 checks both directions — `MODEL_INTERFACE_NOT_BOUND` for an interface no module owns, `SURFACE_DISAGREES_WITH_MODEL` for a module whose surface is not the one the model derives (`check_model_is_the_interface_source`, `integration.py`) — and P2 refuses an interface citing a clause outside the contract. `TestTheModelIsTheInterfaceSource` (`test_integration.py`), `--interface` round-trip (`test_cli.py`). **FR-084 is not thereby discharged**: updating the model as part of a change is a process obligation, and what is now observable is its consequence. |
+| FR-084 model updated as part of any change | **Partly** (2026-10-13, ADR-0049) | A model now exists and is the single source for interface definitions, so a stale model is *detectable*: a model that stopped matching the decomposition is a P7 finding (`MODEL_INTERFACE_NOT_BOUND`, `SURFACE_DISAGREES_WITH_MODEL`). What is not built is the obligation itself — "updated as part of any change" is a process rule over every change, not a property a check observes, and no mechanism forces a model edit to accompany an unrelated one. |
 | FR-085 falsifiable value hypothesis | **Implemented** | `ValueHypothesis` (`views.py`) names effect, beneficiary and refuting instrument; `value_hypothesis_is_falsifiable` is a gate check. |
 | FR-086 factory must not certify value | **Implemented** (2026-10-13, ADR-0040) | The type carries no verdict field and nothing in `specification.py` can mark a hypothesis satisfied — the factory's only permitted statement about one is that it was *declared*, and `sofact specify` prints it under "declared, never certified". **The delivery half is now discharged**: `DeliveryReport.VERIFIED_NOT_VALUE` is a `ClassVar`, so no code path can produce a report that omits the sentence or claims otherwise, and the deploy gate prints it. `test_the_sentence_is_a_class_constant` (`test_delivery.py`), `test_the_report_states_that_value_was_not_certified` (`test_cli.py`). |
 | FR-087 decomposition machine-proposed, human-validated | **Implemented** | `propose` (`decomposition.py:282`), `approve` (`:493`); `test_the_proposal_is_deterministic` (`test_decomposition.py:93`), `test_approval_names_who_and_when` (`:340`). |
@@ -102,7 +102,7 @@ closed since carry their date.
 | FR-125 G1–G2 target classes, class distribution reported | **Implemented** | `class_distribution` (`views.py:650`) reported in the gate (`decomposition.py:484`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-126 G7 human-authored | **Implemented** | `MODULE_CLASS_CEILING` (`views.py:478`); `test_g7_is_the_only_l1_class` (`test_decomposition.py:217`), `test_every_g7_marker_classifies_as_g7` (`:204`). |
 | FR-127 intent traceability graph first-class | **Partly** | Traceability is a gate *check* over the clause→module relation (`decomposition.py:438`), not a graph with escape attribution. |
-| FR-128 model as single source of interface truth | **Not built** | No model (FR-083). ADR-0027 declares surfaces on the module instead. |
+| FR-128 model as single source of interface truth | **Implemented** (2026-10-13, ADR-0049) | The same mechanism as FR-083's second clause: the model declares the interface, the module binds it, and `propose` derives the binding rather than accepting one. This row and FR-083 were one gap counted twice; both close together. |
 | FR-129 no shared model context across phases | **Partly** | `sofact.llm` is advisory and used only for elicitation advice; no other phase calls a model. Nothing *enforces* the separation. |
 | FR-130 attributable approval | **Implemented** | `approve(..., by=…)` (`decomposition.py:493`); `test_approval_names_who_and_when` (`test_decomposition.py:340`), `test_half_an_approval_is_refused_by_the_type` (`:351`). |
 | FR-131 UUID7 + version hash per artifact | **Implemented** | `uuid7str` shim, `content_hash` (`views.py:117`); `test_uuid7_is_version_7` (`test_views.py:38`), `test_content_hash_is_stable_across_a_model_round_trip` (`:76`). |
@@ -187,15 +187,14 @@ bound) is **partly** (per-step only).
    requirements traceable to clauses, a machine-readable model of entities,
    relationships and invariants, non-goals, assumptions and a value hypothesis — and
    gates on it. What remains of this gap, named so it does not read as finished:
-   **FR-083 is half done** (the model is machine-readable but is not yet the single
-   source for interface definitions, which ADR-0027 still routes around by declaring
-   surfaces on `Module`), **FR-078 omits state machines**, **FR-081's first clause is
-   not machine-decidable** and the check says so rather than pretending.
+   **FR-083 closed 2026-10-13** (ADR-0049): the model declares the interface, the
+   module binds it, and `propose` derives the binding, so a proposal cannot disagree
+   with its own model and P7 reports the case where one does. What remains of this
+   gap is small and named: **FR-078 omits state machines**, and **FR-081's first
+   clause is not machine-decidable**, which the check says rather than pretending.
    **FR-115/FR-116 closed 2026-10-13** (ADR-0038): P7 conforms the assembled system
    against the model and checks the criteria no module can satisfy, so §10 has no
-   unbuilt requirement. What is left of this gap is entirely FR-083 — the model is
-   machine-readable and *checked* but is still not the single source for interface
-   definitions, which ADR-0027 routes around by declaring surfaces on `Module`.
+   unbuilt requirement.
 2. **No confinement boundary of any kind (FR-016–020, FR-059).** FR-141 is **built**
    as of 2026-10-12 (ADR-0033) and no longer belongs in this gap: two sessions at once
    cannot see or overwrite each other's files. What remains is that a worktree

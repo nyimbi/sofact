@@ -331,10 +331,42 @@ def gate(specification: Specification, contract: Contract) -> SpecificationGate:
 			passed=not model.is_empty,
 			detail=(
 				f"{len(model.entities)} entity(ies), {len(model.relationships)} "
-				f"relationship(s), {len(model.invariants)} invariant(s)"
+				f"relationship(s), {len(model.invariants)} invariant(s), "
+				f"{len(model.interfaces)} interface(s)"
 				if not model.is_empty
-				else "the model declares no entities, relationships or invariants, so "
-				"nothing can be conformed against (FR-078, FR-115)"
+				else "the model declares no entities, relationships, invariants or "
+				"interfaces, so nothing can be conformed against (FR-078, FR-115)"
+			),
+		)
+	)
+
+	# FR-083: every interface in the model names clauses the contract actually contains.
+	# The model is the single source for interface definitions, and a source that points
+	# at a clause nobody wrote is a declaration nothing can be built from -- P3 binds an
+	# interface to a module *through its clauses*, so a phantom clause is an interface
+	# that reaches no module and would surface at P7 as `model_interface_not_bound`,
+	# one phase after the operator could have fixed it.
+	#
+	# Checked here rather than only at P7 for the reason FR-057's envelope is checked at
+	# P3: the contradiction is in the *declaration*, and a gate that reports it a phase
+	# later has spent a decomposition discovering it.
+	phantom_interfaces = tuple(
+		sorted(
+			f"{interface.name} -> {cid}"
+			for interface in model.interfaces
+			for cid in interface.clause_ids
+			if cid not in contract_clause_ids
+		)
+	)
+	checks.append(
+		GateCheck(
+			name="every_interface_cites_a_real_clause",
+			passed=not phantom_interfaces,
+			detail=(
+				f"all {len(model.interfaces)} interface(s) cite clauses in the contract"
+				if not phantom_interfaces
+				else "interfaces citing clauses outside the contract: "
+				+ ", ".join(phantom_interfaces)
 			),
 		)
 	)

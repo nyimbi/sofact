@@ -80,6 +80,7 @@ __all__ = [
 	"check_imports",
 	"check_interface_conformance",
 	"check_model_conformance",
+	"check_model_is_the_interface_source",
 	"check_module_budget",
 	"check_system_criteria",
 	"integrate",
@@ -90,6 +91,7 @@ INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
 	"build_order",
 	"import_discipline",
 	"interface_conformance",
+	"model_interface_source",
 	"module_budget",
 	"model_conformance",
 	"system_criteria",
@@ -476,6 +478,106 @@ def check_model_conformance(
 	return tuple(findings)
 
 
+def check_model_is_the_interface_source(
+	decomposition: Decomposition,
+	model: SystemModel,
+	*,
+	module_for_clause: Mapping[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""FR-083: is the model actually the single source for interface definitions?
+
+	The requirement's second clause is the one that has been open since ADR-0027: the
+	model "must be **the single source for interface definitions**. Hand-written
+	interfaces that disagree with the model are an integration defect by construction."
+	ADR-0027 made FR-112 checkable by declaring a surface on :class:`Module`, which is a
+	declaration *beside* the model — so a model and a module could hold two opinions about
+	one module's public names and nothing said which was the truth.
+
+	The check has two halves, and they are the two ways a model stops being the source:
+
+	1. **An interface no module is bound to.** The model declares a surface and the
+	decomposition never asked anyone to expose it, so the declaration reached nothing.
+	This is :data:`~sofact.views.IntegrationFindingKind.MODEL_INTERFACE_NOT_BOUND`, and
+	it is a *decomposition* defect — the repair is a revised decomposition, not a
+	rebuilt module, which is why its ``modules`` is empty rather than naming a guess.
+	2. **A module whose declared surface is not the one the model derives.** Since
+	:func:`~sofact.decomposition.propose` derives the surface from the model, this
+	cannot happen on a proposal; it happens on a module revised by hand or by a future
+	proposer that stopped reading the model, which is exactly the drift FR-084 makes
+	expensive. The comparison is by name and kind, not by the whole member: a
+	parameter list that differs is FR-112's ``wrong_arity``, reported against the build
+	where the build is the evidence.
+
+	``model.interfaces`` empty means nothing was declared, and the check reports nothing
+	rather than passing — the absence is owned by the P2 gate's ``system_model_declared``,
+	and a check that manufactured findings for a project with no model would make every
+	run red until the model was authored, which is the pressure that gets a gate disabled.
+	"""
+	findings: list[IntegrationFinding] = []
+	if not model.interfaces:
+		return ()
+	bound = {
+		interface.name: {
+			module_for_clause[clause_id]
+			for clause_id in interface.clause_ids
+			if clause_id in module_for_clause
+		}
+		for interface in model.interfaces
+	}
+	for interface in model.interfaces:
+		if not bound[interface.name]:
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.MODEL_INTERFACE_NOT_BOUND,
+					detail=(
+						f"the model declares interface {interface.name!r} over "
+						f"{len(interface.clause_ids)} clause(s) and no module owns any of "
+						"them, so the system was never asked to expose it (FR-083)"
+					),
+					modules=(),
+					evidence=tuple(
+						f"{interface.name} -> clause {cid}" for cid in interface.clause_ids
+					),
+				)
+			)
+	for module in decomposition.modules:
+		derived = {member.name: member for member in model.surface_for_clauses(module.clause_ids)}
+		if not derived:
+			# No interface reaches this module's clauses, so the model says nothing about
+			# its surface and there is nothing to disagree with. Reporting the absence
+			# here would double-count the unbound interface above.
+			continue
+		declared = {member.name: member for member in module.surface}
+		for name in sorted(set(derived) - set(declared)):
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.SURFACE_DISAGREES_WITH_MODEL,
+					detail=(
+						f"the model declares {name!r} for {module.name} through its clauses "
+						"and the module's own surface does not carry it, so the model is "
+						"not the single source for this module's interface (FR-083)"
+					),
+					modules=(module.name,),
+					evidence=(f"{module.name}: model declares {name}",),
+				)
+			)
+		for name in sorted(set(declared) - set(derived)):
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.SURFACE_DISAGREES_WITH_MODEL,
+					detail=(
+						f"{module.name} declares {name!r} on its surface and no interface "
+						"in the model does, so the module holds an interface definition the "
+						"model does not — a hand-written interface beside the model rather "
+						"than from it (FR-083)"
+					),
+					modules=(module.name,),
+					evidence=(f"{module.name}: declares {name}, which the model does not",),
+				)
+			)
+	return tuple(findings)
+
+
 def check_system_criteria(
 	criteria: Sequence[SystemCriterion],
 	*,
@@ -793,6 +895,18 @@ def integrate(
 		if model is not None and not model.is_empty
 		else ()
 	)
+	# FR-083 is computed whenever a model exists, including one that declares no
+	# interfaces -- the two states are different and the check's own detail says which.
+	# Gating on `model.interfaces` here would make "the model declares no interfaces" and
+	# "there is no model" print the same line, which is the distinction the whole report
+	# is built to keep.
+	model_interface_findings = (
+		check_model_is_the_interface_source(
+			decomposition, model, module_for_clause=module_for_clause
+		)
+		if model is not None
+		else ()
+	)
 	criterion_findings = check_system_criteria(
 		criteria,
 		verdicts=verdicts or {},
@@ -804,9 +918,25 @@ def integrate(
 		*budget_findings,
 		*conformance_findings,
 		*model_findings,
+		*model_interface_findings,
 		*criterion_findings,
 	)
 	conformed = tuple(sorted(e.name for e in (model.entities if model is not None else ())))
+	# The interfaces the model declares, as objects rather than names: the check below
+	# needs each one's clauses, and a name-keyed lookup would be a second way to reach
+	# what the model already holds.
+	declared_interfaces = model.interfaces if model is not None else ()
+	model_interfaces = tuple(interface.name for interface in declared_interfaces)
+	bound_interfaces = tuple(
+		sorted(
+			{
+				module_for_clause[clause_id]
+				for interface in declared_interfaces
+				for clause_id in interface.clause_ids
+				if clause_id in module_for_clause
+			}
+		)
+	)
 	criterion_clauses = tuple(sorted({cid for c in criteria for cid in c.clause_ids}))
 	verdict_source = "the log's latest verdict per clause" if verdicts else "no verdicts"
 
@@ -920,6 +1050,48 @@ def integrate(
 				"arity because SoFact does not know the operator's language (ADR-0025)",
 				"a name's kind is not compared; a declared constant built as a function "
 				"reports only if its arity differs",
+			),
+		),
+		IntegrationCheck(
+			name="model_interface_source",
+			passed=not model_interface_findings,
+			detail=(
+				f"{len(model_interfaces)} model interface(s) bound to "
+				f"{len(bound_interfaces)} module(s), and every module's declared surface is "
+				"the one the model derives for its clauses (FR-083)"
+				if model_interfaces and not model_interface_findings
+				else f"{len(model_interface_findings)} disagreement(s) between the model and "
+				"the surfaces derived from it"
+				if model_interface_findings
+				else "the model declares no interfaces, so it is not yet the source for any"
+				if model is not None
+				else "the specification declared no system model, so there is no source"
+			),
+			requirements=("FR-083",),
+			covered=tuple(
+				f"{interface.name}: bound to {module_for_clause[cid]}"
+				for interface in declared_interfaces
+				for cid in interface.clause_ids
+				if cid in module_for_clause
+			),
+			uncovered=(
+				*(
+					f"{interface.name}: its clauses reach no module, so nothing was asked "
+					"to expose it"
+					for interface in declared_interfaces
+					if not any(cid in module_for_clause for cid in interface.clause_ids)
+				),
+				"the model is compared against the *declared* surfaces, not against the "
+				"build: whether a declared name exists in the code is FR-112's diff, and "
+				"running it here would report one defect twice under two requirement ids",
+				"a member's parameters are not compared here; an arity difference between "
+				"a derived and a declared surface is FR-112's `wrong_arity`",
+			)
+			if model is not None and model.interfaces
+			else (
+				"no interface is declared in the model, so FR-083's single-source clause "
+				"is unexercised — ADR-0027's state, and the reason the requirement stayed "
+				"half-discharged until the model carried interfaces",
 			),
 		),
 		IntegrationCheck(

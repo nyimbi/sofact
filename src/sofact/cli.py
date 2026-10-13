@@ -54,6 +54,8 @@ from sofact.views import (
 	GoalStyle,
 	HarnessProfile,
 	IntegrityOutcome,
+	InterfaceMember,
+	InterfaceMemberKind,
 	MachineRequest,
 	Phase,
 	PhaseStatus,
@@ -71,6 +73,7 @@ from sofact.views import (
 	StepOutcome,
 	SystemCriterion,
 	SystemEntity,
+	SystemInterface,
 	SystemModel,
 	ValueHypothesis,
 	VerdictOutcome,
@@ -91,6 +94,15 @@ _ENTITY_OPTION = typer.Option(
 	None,
 	"--entity",
 	help="A system-model entity, as NAME:CLAUSE-INDEX. Repeatable (FR-078).",
+)
+_IFACE_OPTION = typer.Option(
+	None,
+	"--interface",
+	help=(
+		"A system-model interface, as NAME:MEMBER,MEMBER:CLAUSE-INDEX. A member is "
+		"``name``, ``name(kind)`` or ``name(kind,param,param)`` where kind is f, c or k "
+		"for function, class or constant. Repeatable (FR-083)."
+	),
 )
 _ASSUMPTION_OPTION = typer.Option(
 	None,
@@ -854,6 +866,7 @@ def specify(
 	ctx: typer.Context,
 	home: Path | None = _HOME_OPTION,
 	entity: list[str] | None = _ENTITY_OPTION,
+	interface: list[str] | None = _IFACE_OPTION,
 	assumption: list[str] | None = _ASSUMPTION_OPTION,
 	value: str | None = _VALUE_OPTION,
 	criterion: list[str] | None = _CRITERION_OPTION,
@@ -882,6 +895,7 @@ def specify(
 		_specify(
 			_service(_home_of(ctx, home)),
 			entities=tuple(entity or ()),
+			interfaces=tuple(interface or ()),
 			assumptions=tuple(assumption or ()),
 			value=value,
 			criteria=tuple(criterion or ()),
@@ -911,6 +925,114 @@ def _entity_option(raw: str, contract: Contract) -> SystemEntity:
 		)
 	clause = contract.clauses[index - 1]
 	return SystemEntity(name=name.strip(), description=clause.statement, clause_ids=(clause.id,))
+
+
+def _iface_option(raw: str, contract: Contract) -> SystemInterface:
+	"""Parse ``NAME:MEMBER,MEMBER:CLAUSE-INDEX`` into a model interface (FR-083).
+
+	``NAME`` is the interface's name, the members are comma-separated and the clause index
+	is last, so the separator between members and clause is the *final* colon. A member is
+	``name``, ``name(kind)`` or ``name(kind,param,param)``; kind is one letter because this
+	is a command line and the vocabulary is three words, and the long form is accepted too
+	so a script and a person can write the same thing.
+
+	The members use the *same* :class:`~sofact.views.InterfaceMember` a module declares,
+	which is what makes FR-083's single-source claim checkable: a surface declared here and
+	a surface declared on a module are one vocabulary in two places, and P7 compares them
+	rather than translating between them.
+	"""
+	assert raw.strip(), "cannot parse an empty interface"
+	head, sep, index_text = raw.rpartition(":")
+	if not sep or not head.strip() or not index_text.strip():
+		raise ValueError(f"--interface wants NAME:MEMBERS:CLAUSE-INDEX, got {raw!r}")
+	name, _, members_text = head.partition(":")
+	if not name.strip():
+		raise ValueError(f"--interface names no interface, got {raw!r}")
+	try:
+		index = int(index_text)
+	except ValueError as exc:
+		raise ValueError(f"--interface clause index must be a number, got {index_text!r}") from exc
+	if not 1 <= index <= len(contract.clauses):
+		raise ValueError(
+			f"--interface names clause {index}, but the contract has "
+			f"{len(contract.clauses)} clause(s)"
+		)
+	return SystemInterface(
+		name=name.strip(),
+		clause_ids=(contract.clauses[index - 1].id,),
+		members=tuple(_member(m) for m in _split_members(members_text)),
+	)
+
+
+def _split_members(text: str) -> tuple[str, ...]:
+	"""Split a member list on the commas that separate members, not the ones inside a signature.
+
+	``record(f,entry_id),LIMIT(k)`` is two members, and a naive ``split(",")`` reads it as
+	four — the first of which, ``record(f``, opens a parenthesis it never closes. The
+	grammar puts a comma in two places (between members, and between parameters) so the
+	only separator that counts is the one at depth zero. Depth is tracked rather than the
+	string being validated here: ``_member`` owns the grammar and reports what is wrong
+	with a member, and a splitter that also rejected would report one defect twice.
+	"""
+	members: list[str] = []
+	depth = 0
+	current: list[str] = []
+	for char in text:
+		if char == "(":
+			depth += 1
+		elif char == ")":
+			depth -= 1
+		if char == "," and depth <= 0:
+			members.append("".join(current))
+			current = []
+			continue
+		current.append(char)
+	members.append("".join(current))
+	return tuple(member.strip() for member in members if member.strip())
+
+
+_KINDS: dict[str, InterfaceMemberKind] = {
+	"f": InterfaceMemberKind.FUNCTION,
+	"function": InterfaceMemberKind.FUNCTION,
+	"c": InterfaceMemberKind.CLASS,
+	"class": InterfaceMemberKind.CLASS,
+	"k": InterfaceMemberKind.CONSTANT,
+	"constant": InterfaceMemberKind.CONSTANT,
+}
+
+
+def _member(raw: str) -> InterfaceMember:
+	"""One declared member: ``name``, ``name(kind)`` or ``name(kind,param,param)``.
+
+	The kind defaults to ``function`` because a name with parameters can only be one, and
+	a bare name is far more often a function than a constant — but the default is *stated*
+	rather than implied, so an operator who meant a constant writes ``k`` and does not
+	discover the choice at P7 when the diff reports a kind it never asked for.
+	"""
+	text = raw.strip()
+	if not text:
+		raise ValueError("an empty member was given in --interface")
+	name, paren, rest = text.partition("(")
+	if not name.strip():
+		raise ValueError(f"--interface member {raw!r} names nothing")
+	if not paren:
+		return InterfaceMember(name=name.strip(), kind=InterfaceMemberKind.FUNCTION)
+	if not rest.endswith(")"):
+		raise ValueError(f"--interface member {raw!r} opens a parenthesis it does not close")
+	parts = [p.strip() for p in rest[:-1].split(",")]
+	kind_text = parts[0].lower()
+	kind = _KINDS.get(kind_text)
+	if kind is None:
+		raise ValueError(
+			f"--interface member {raw!r} names kind {kind_text!r}; use f, c or k "
+			"(function, class, constant)"
+		)
+	parameters = tuple(p for p in parts[1:] if p)
+	if kind is not InterfaceMemberKind.FUNCTION and parameters:
+		raise ValueError(
+			f"--interface member {raw!r} is a {kind.value} and cannot carry parameters"
+		)
+	return InterfaceMember(name=name.strip(), kind=kind, parameters=parameters)
 
 
 def _assumption_option(raw: str) -> Assumption:
@@ -981,6 +1103,7 @@ async def _specify(
 	svc: FactoryService,
 	*,
 	entities: tuple[str, ...],
+	interfaces: tuple[str, ...],
 	assumptions: tuple[str, ...],
 	value: str | None,
 	criteria: tuple[str, ...],
@@ -996,7 +1119,10 @@ async def _specify(
 		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
 		raise typer.Exit(code=1)
 	try:
-		model = SystemModel(entities=tuple(_entity_option(e, built) for e in entities))
+		model = SystemModel(
+			entities=tuple(_entity_option(e, built) for e in entities),
+			interfaces=tuple(_iface_option(i, built) for i in interfaces),
+		)
 		declared = tuple(_assumption_option(a) for a in assumptions)
 		hypothesis = _value_option(value) if value is not None else None
 		system_criteria = tuple(_criterion_option(c, built) for c in criteria)
@@ -1044,9 +1170,15 @@ def _print_specification(proposal: Specification, result: SpecificationGate) -> 
 		typer.secho(
 			f"  model: {len(model.entities)} entity(ies), "
 			f"{len(model.relationships)} relationship(s), "
-			f"{len(model.invariants)} invariant(s)",
+			f"{len(model.invariants)} invariant(s), "
+			f"{len(model.interfaces)} interface(s)",
 			fg="cyan",
 		)
+		for interface in model.interfaces:
+			typer.secho(f"    {interface.name} (FR-083)", fg="cyan")
+			for member in interface.members:
+				arity = f"({', '.join(member.parameters)})" if member.parameters else ""
+				typer.echo(f"      {member.kind.value} {member.name}{arity}")
 	if proposal.non_goals:
 		typer.secho("  non-goals", fg="cyan")
 		for non_goal in proposal.non_goals:

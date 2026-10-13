@@ -29,6 +29,7 @@ from sofact.integration import (
 	check_imports,
 	check_interface_conformance,
 	check_model_conformance,
+	check_model_is_the_interface_source,
 	check_module_budget,
 	check_system_criteria,
 	integrate,
@@ -59,6 +60,7 @@ from sofact.views import (
 	StepOutcome,
 	SystemCriterion,
 	SystemEntity,
+	SystemInterface,
 	SystemModel,
 	SystemRelationship,
 	VerdictOutcome,
@@ -682,10 +684,12 @@ class TestWhatIsNotImplemented:
 		FR-112 is *not* in the tuple here even though the conformance check runs, because
 		the check diffs nothing when no module declared a surface -- the decomposition
 		states interfaces as prose and a proposal has no signature to derive one from.
+		FR-083 is here for the same reason one level up: the interface-source check runs,
+		but it has no interface to bind until the specification's model declares one.
 		FR-115 and FR-116 are, because this project's specification declared no system
 		model and no system-level criteria: the checks ran and had nothing to conform, so
-		they claim nothing. A report that omitted them would let a green line read as
-		"P7 is done".
+		they claim nothing. A report that omitted any of them would let a green line read
+		as "P7 is done".
 		"""
 		contract = two_clause_contract()
 		proposal = propose(contract)
@@ -694,7 +698,7 @@ class TestWhatIsNotImplemented:
 
 		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
 
-		assert report.not_implemented == ("FR-112", "FR-115", "FR-116"), (
+		assert report.not_implemented == ("FR-083", "FR-112", "FR-115", "FR-116"), (
 			"the conformance check ran but diffed nothing, so FR-112 is not discharged"
 		)
 		assert report.passed, "the implemented checks passed; that is not the same as P7 done"
@@ -716,7 +720,9 @@ class TestWhatIsNotImplemented:
 
 		report = integrate(plan, declared, dispatches, sources={"a.py": "def run():\n\tpass\n"})
 
-		assert report.not_implemented == ("FR-115", "FR-116")
+		assert report.not_implemented == ("FR-083", "FR-115", "FR-116"), (
+			"a declared surface discharges FR-112; it does not put an interface on the model"
+		)
 		assert report.passed
 
 	def test_a_declared_model_and_criteria_discharge_fr_115_and_fr_116(self) -> None:
@@ -771,7 +777,9 @@ class TestWhatIsNotImplemented:
 			verdicts=verdicts,
 		)
 
-		assert report.not_implemented == ("FR-112",), "both new checks discharged their requirement"
+		assert report.not_implemented == ("FR-083", "FR-112"), (
+			"both new checks discharged their requirement; FR-083 had no interface to bind"
+		)
 		assert report.passed
 
 	def test_a_surface_that_does_not_match_fails_the_report(self) -> None:
@@ -1147,3 +1155,306 @@ class TestTheSystemCriteria:
 		line = next(c for c in result.checks if c.name == "system_criteria_reported")
 		assert line.passed
 		assert "1 system-level criterion(s) spanning 2 clause(s)" in line.detail
+
+
+# --------------------------------------------------------------------------- #
+# FR-083: the model as the single source for interface definitions
+# --------------------------------------------------------------------------- #
+
+
+class TestTheModelIsTheInterfaceSource:
+	"""FR-083's second clause, which ADR-0027 left half-discharged.
+
+	"The system model must be machine-readable and must be the single source for
+	interface definitions. Hand-written interfaces that disagree with the model are an
+	integration defect by construction." ADR-0027 put a declared surface on ``Module``,
+	which made FR-112 checkable and left the model holding one opinion while a module
+	held another. These tests exercise both directions of the comparison and the two
+	states in which it legitimately compares nothing.
+	"""
+
+	def _interface(self, name: str, clause_id: str, *members: InterfaceMember) -> SystemInterface:
+		return SystemInterface(name=name, clause_ids=(clause_id,), members=members)
+
+	def _model(self, *interfaces: SystemInterface) -> SystemModel:
+		return SystemModel(interfaces=interfaces)
+
+	def _map(self, contract: Contract, proposal: Decomposition) -> dict[str, str]:
+		"""The clause -> module map ``integrate`` builds, over a proposal's own modules."""
+		return {
+			clause_id: module.name for module in proposal.modules for clause_id in module.clause_ids
+		}
+
+	def test_propose_derives_a_modules_surface_from_the_model(self) -> None:
+		"""The binding itself: a proposal's surface is the model's, not the proposer's.
+
+		This is what makes FR-083's "single source" a property rather than a promise. The
+		proposer never chooses a public name; it reads the interfaces whose clauses the
+		module owns.
+		"""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger",
+				first,
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+				InterfaceMember(name="LIMIT", kind=InterfaceMemberKind.CONSTANT),
+			)
+		)
+
+		proposal = propose(contract, model)
+
+		owner = next(m for m in proposal.modules if first in m.clause_ids)
+		assert [member.name for member in owner.surface] == ["record", "LIMIT"]
+		other = next(m for m in proposal.modules if first not in m.clause_ids)
+		assert other.surface == (), "a module whose clauses introduce no interface declares none"
+
+	def test_a_proposal_built_from_the_model_never_disagrees_with_it(self) -> None:
+		"""The default path emits no finding, which is the point of deriving rather than diffing."""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger", first, InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION)
+			)
+		)
+		proposal = propose(contract, model)
+
+		findings = check_model_is_the_interface_source(
+			proposal, model, module_for_clause=self._map(contract, proposal)
+		)
+
+		assert findings == ()
+
+	def test_an_interface_no_module_owns_is_a_decomposition_defect(self) -> None:
+		"""The model asked for a surface the decomposition never assigned to anyone."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		model = self._model(
+			self._interface(
+				"ledger",
+				uuid7str(),
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+
+		findings = check_model_is_the_interface_source(
+			proposal, model, module_for_clause=self._map(contract, proposal)
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.MODEL_INTERFACE_NOT_BOUND]
+		assert findings[0].modules == (), (
+			"the repair is a revised decomposition, not a rebuilt module"
+		)
+		assert "ledger" in findings[0].detail
+
+	def test_a_module_whose_surface_dropped_a_derived_member_is_a_finding(self) -> None:
+		"""The hand-revised module: the model declares a name the module stopped exposing."""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger",
+				first,
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+				InterfaceMember(name="sum", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+		proposal = propose(contract, model)
+		owner = next(m for m in proposal.modules if first in m.clause_ids)
+		revised = with_surface(
+			proposal,
+			owner.name,
+			InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+		)
+
+		findings = check_model_is_the_interface_source(
+			revised, model, module_for_clause=self._map(contract, revised)
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.SURFACE_DISAGREES_WITH_MODEL]
+		assert findings[0].modules == (owner.name,), "the repair is that module's surface"
+		assert "sum" in findings[0].detail
+
+	def test_a_module_whose_surface_added_an_undeclared_member_is_a_finding(self) -> None:
+		"""The other direction: a name the module exposes that the model never declared.
+
+		This is the one ADR-0027's placement made possible — the module is the declaration
+		site, so it can declare something the model has never heard of, and nothing said
+		which was the truth.
+		"""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger", first, InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION)
+			)
+		)
+		proposal = propose(contract, model)
+		owner = next(m for m in proposal.modules if first in m.clause_ids)
+		revised = with_surface(
+			proposal,
+			owner.name,
+			InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+			InterfaceMember(name="backdoor", kind=InterfaceMemberKind.FUNCTION),
+		)
+
+		findings = check_model_is_the_interface_source(
+			revised, model, module_for_clause=self._map(contract, revised)
+		)
+
+		assert [f.kind for f in findings] == [IntegrationFindingKind.SURFACE_DISAGREES_WITH_MODEL]
+		assert "backdoor" in findings[0].detail
+
+	def test_a_model_with_no_interfaces_reports_nothing_rather_than_passing(self) -> None:
+		"""The empty model is ADR-0027's state, and it is a measurement rather than a pass.
+
+		Manufacturing findings here would make every project red until it authored a model,
+		which is the pressure that gets a check disabled. The check reports nothing; the
+		*report* is what must not call FR-083 discharged, and that is asserted below.
+		"""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+
+		findings = check_model_is_the_interface_source(
+			proposal, SystemModel(), module_for_clause=self._map(contract, proposal)
+		)
+
+		assert findings == ()
+
+	def test_a_report_whose_model_declares_no_interface_does_not_claim_fr_083(self) -> None:
+		"""Claiming is not discharging, which is the whole reason ``covered`` is separate."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		dispatches = [sealed(module=proposal.modules[0].name, files=("a.py",), plan=plan)]
+
+		report = integrate(
+			plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"}, model=SystemModel()
+		)
+
+		check = next(c for c in report.checks if c.name == "model_interface_source")
+		assert check.requirements == ("FR-083",), "the check claims it"
+		assert not check.discharged, "and claims nothing, because it bound no interface"
+		assert "FR-083" in report.not_implemented
+		assert "declares no interfaces" in check.detail
+
+	def test_a_bound_interface_discharges_fr_083_and_the_report_stops_naming_it(self) -> None:
+		"""The complement: a model that is the source moves FR-083 out of ``not_implemented``."""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger", first, InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION)
+			)
+		)
+		proposal = propose(contract, model)
+		plan = compile_plan(contract)
+		owner = next(m for m in proposal.modules if first in m.clause_ids)
+		dispatches = [sealed(module=owner.name, files=("a.py",), plan=plan)]
+
+		report = integrate(
+			plan,
+			proposal,
+			dispatches,
+			sources={"a.py": "def record():\n\tpass\n"},
+			model=model,
+		)
+
+		assert "FR-083" not in report.not_implemented
+		assert report.passed
+		check = next(c for c in report.checks if c.name == "model_interface_source")
+		assert any("ledger: bound to" in line for line in check.covered)
+
+	def test_a_disagreement_fails_the_report_and_blames_the_module(self) -> None:
+		"""FR-083 is a hard stop like every other integration check (FR-061, FR-114).
+
+		The revised module declares *nothing*, which is the case FR-112 cannot see: its
+		conformance check skips a module with no declared surface, because there is nothing
+		to diff. FR-083 does not, because the model still declares one — so a module that
+		quietly stopped exposing what the model says it owes is caught here and nowhere
+		else.
+		"""
+		contract = two_clause_contract()
+		first = contract.clauses[0].id
+		model = self._model(
+			self._interface(
+				"ledger", first, InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION)
+			)
+		)
+		proposal = propose(contract, model)
+		owner = next(m for m in proposal.modules if first in m.clause_ids)
+		revised = with_surface(proposal, owner.name)
+		plan = compile_plan(contract)
+		dispatches = [sealed(module=owner.name, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, revised, dispatches, sources={"a.py": "VALUE = 1\n"}, model=model)
+
+		assert not report.passed
+		assert owner.name in report.violating_modules
+
+	def test_two_interfaces_sharing_a_name_are_refused_by_the_model(self) -> None:
+		"""A source that answers one name twice is not a source, so the type refuses it."""
+		contract = two_clause_contract()
+		first, second = contract.clauses[0].id, contract.clauses[1].id
+
+		with pytest.raises(ValidationError, match="two interfaces called"):
+			self._model(self._interface("store", first), self._interface("store", second))
+
+	def test_an_interface_naming_no_clause_is_refused(self) -> None:
+		"""FR-083's binding is by clause, so an interface with none binds to nothing."""
+		with pytest.raises(ValidationError, match="names no clause"):
+			SystemInterface(name="ledger")
+
+	def test_the_p2_gate_refuses_an_interface_over_a_phantom_clause(self) -> None:
+		"""Caught at P2 rather than surfacing at P7 as an interface no module owns.
+
+		Same reasoning FR-057's envelope check uses at P3: a defect the operator can fix at
+		the gate that produced it should not travel one phase to be reported.
+		"""
+		contract = two_clause_contract()
+		model = self._model(
+			self._interface(
+				"ledger",
+				uuid7str(),
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+
+		result = spec_gate(specify(contract, system_model=model), contract)
+
+		line = next(c for c in result.checks if c.name == "every_interface_cites_a_real_clause")
+		assert not line.passed
+		assert "ledger" in line.detail
+
+	def test_the_p2_gate_passes_a_model_whose_interfaces_cite_real_clauses(self) -> None:
+		contract = two_clause_contract()
+		model = self._model(
+			self._interface(
+				"ledger",
+				contract.clauses[0].id,
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+
+		result = spec_gate(specify(contract, system_model=model), contract)
+
+		line = next(c for c in result.checks if c.name == "every_interface_cites_a_real_clause")
+		assert line.passed
+		assert "1 interface(s)" in line.detail
+
+	def test_a_model_with_no_interfaces_passes_the_p2_interface_check(self) -> None:
+		"""A model that declares no interface is not thereby a specification defect.
+
+		``system_model_declared`` is where a missing model is failed; failing here too
+		would report one absence twice, and the second report is the one that reads as a
+		check nobody can satisfy.
+		"""
+		contract = two_clause_contract()
+
+		result = spec_gate(specify(contract), contract)
+
+		line = next(c for c in result.checks if c.name == "every_interface_cites_a_real_clause")
+		assert line.passed
+		assert "0 interface(s)" in line.detail
