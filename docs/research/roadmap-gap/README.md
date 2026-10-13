@@ -232,8 +232,10 @@ bound) is **partly** (per-step only).
    than drops from the list. The two the factory does owe were *also* missing until
    2026-10-13 (ADR-0044): the check was scoped to `RUNBOOK.md` and `DELIVERY.md` and
    nothing produced them, so `sofact deliver` could not succeed on a fresh project.
-   `sofact.writing` now renders both from the report, deterministically and model-free. FR-122/123 are partly closed by `delivery.ceiling`; FR-123's
-   Mode G L2 cap is not enforced.
+   `sofact.writing` now renders both from the report, deterministically and model-free.
+   FR-123 is closed (ADR-0041) and FR-122 is half closed by `delivery.ceiling`: the
+   module number and the delivery number are both reported, and no per-*phase*
+   computation exists.
 5. ~~**No phase state machine and no resume (FR-060, FR-062, NFR-028).**~~ **Closed
    2026-10-13 (ADR-0030, ADR-0031, ADR-0035, ADR-0037).** Phases are a state machine in
    the ledger, a transition is its own row, `sofact phase` exits non-zero while a gate
