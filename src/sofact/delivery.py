@@ -46,6 +46,8 @@ from sofact._uuid7 import uuid7str
 from sofact.views import (
 	MODE_G_CEILING,
 	MODULE_CLASS_CEILING,
+	TOPOLOGY_ISOLATION,
+	TOPOLOGY_MODIFIER,
 	UNPRODUCIBLE,
 	UNPRODUCIBLE_KINDS,
 	AutonomyLevel,
@@ -54,6 +56,7 @@ from sofact.views import (
 	DeliveryArtifact,
 	DeliveryArtifactKind,
 	DeliveryReport,
+	DeploymentTopology,
 	EnvelopeActuals,
 	GateCheck,
 	GateCost,
@@ -67,6 +70,8 @@ from sofact.views import (
 	VerdictOutcome,
 	VerifiedClause,
 	now,
+	topology_ceiling,
+	topology_refusal,
 )
 
 __all__ = [
@@ -78,7 +83,9 @@ __all__ = [
 	"chain",
 	"handover",
 	"module_autonomy",
+	"refused_by_topology",
 	"report",
+	"topology_statement",
 	"verified_and_unverified",
 ]
 
@@ -238,7 +245,74 @@ def verified_and_unverified(
 	return tuple(verified), tuple(unverified)
 
 
-def module_autonomy(contract: Contract, decomposition: Decomposition | None) -> AutonomyLevel:
+def topology_statement(
+	topology: DeploymentTopology,
+	*,
+	configured: bool,
+) -> str:
+	"""The topology, its isolation and its modifier, as one sentence (FR-030).
+
+	FR-030 asks for three things reported together — "the active topology, its isolation
+	guarantees, and its ceiling modifier" — and this is the one place they are joined, so
+	a report, a gate check and the rendered document cannot state two of the three
+	differently. A modifier reported without its isolation is a number to trust rather
+	than a fact to check, which is R2's failure.
+
+	``configured`` is separate from the topology because "this deployment is T1" and
+	"nobody declared a topology, so T1's degraded ceiling is being used" are different
+	facts about the world (FR-042). The second is the one an operator needs to see: it is
+	the difference between a factory that chose the dev configuration and one that never
+	said where it was running.
+	"""
+	modifier = TOPOLOGY_MODIFIER[topology]
+	sign = f"{modifier:+d}" if modifier else "0"
+	return f"{topology.value} ({TOPOLOGY_ISOLATION[topology]}), ceiling modifier {sign}" + (
+		"" if configured else " — **not declared**, so the degraded default is in use"
+	)
+
+
+def refused_by_topology(
+	contract: Contract,
+	decomposition: Decomposition | None,
+	*,
+	topology: DeploymentTopology,
+) -> tuple[str, ...]:
+	"""Module classes this topology refuses outright, with the reason (FR-031).
+
+	FR-031 refuses rather than downgrades, and it refuses a *specific* thing: a lane that
+	would be L4 in T2 running at T1. So the test is per module class — the classes whose
+	:data:`~sofact.views.MODULE_CLASS_CEILING` is L4 are exactly the ones T2 admits at L4
+	— and the refusal names the class and the level.
+
+	Scoped to the decomposition because that is where module classes exist. A contract
+	with no decomposition has no class to refuse, and reporting a refusal for a class
+	nobody proposed would refuse a build that has not been decomposed yet; the contract's
+	own ceiling is still lowered by the modifier through :func:`module_autonomy`, so
+	nothing escapes the topology by being undecomposed.
+
+	The returned reasons are empty at T2/T3/T4 by construction (their modifiers are zero,
+	so :func:`~sofact.views.topology_refusal` returns ``None`` for every level), which is
+	why this is a tuple rather than an ``assert``: a deployment that refuses nothing must
+	be able to say it refused nothing.
+	"""
+	assert contract.clauses, "cannot refuse a topology for a contract with no clauses"
+	if decomposition is None:
+		return ()
+	reasons: list[str] = []
+	for module in decomposition.modules:
+		level = MODULE_CLASS_CEILING[module.module_class]
+		refusal = topology_refusal(level, topology)
+		if refusal is not None:
+			reasons.append(f"{module.name} ({module.module_class.value}): {refusal}")
+	return tuple(reasons)
+
+
+def module_autonomy(
+	contract: Contract,
+	decomposition: Decomposition | None,
+	*,
+	topology: DeploymentTopology = DeploymentTopology.T1,
+) -> AutonomyLevel:
 	"""The autonomy the *modules* sustain: the lower of the two measured ceilings (FR-122).
 
 	The contract's ceiling is ``ceiling_for_rank`` on the weakest oracle (FR-007); the
@@ -249,16 +323,28 @@ def module_autonomy(contract: Contract, decomposition: Decomposition | None) -> 
 
 	This is the number FR-123 calls the *internal* one. It is not the delivery's, and the
 	difference between the two is what :func:`ceiling` computes and the report states.
+
+	``topology`` applies §5.4's modifier to the result (FR-019, FR-124), and it is
+	applied *here* rather than inside :func:`ceiling` because §5.4's modifier is a
+	statement about what the hardware isolates, which is what bounds the modules' blast
+	radius. The default is T1 — the degraded configuration — so a caller that has not
+	said where the factory is running gets the lower ceiling rather than the product
+	target's (FR-042).
 	"""
 	assert contract.clauses, "cannot compute an autonomy for a contract with no clauses"
 	measured = contract.ceiling
 	if decomposition is not None:
 		for module in decomposition.modules:
 			measured = AutonomyLevel(min(measured, MODULE_CLASS_CEILING[module.module_class]))
-	return measured
+	return topology_ceiling(measured, topology)
 
 
-def ceiling(contract: Contract, decomposition: Decomposition | None) -> AutonomyLevel:
+def ceiling(
+	contract: Contract,
+	decomposition: Decomposition | None,
+	*,
+	topology: DeploymentTopology = DeploymentTopology.T1,
+) -> AutonomyLevel:
 	"""The autonomy the *delivery* may claim: the module number, capped at L2 (FR-123).
 
 	FR-123's argument is that P2, P3 and P8 are human gates, so a Mode G delivery is L2
@@ -270,8 +356,15 @@ def ceiling(contract: Contract, decomposition: Decomposition | None) -> Autonomy
 	The cap is not a claim about the modules. :func:`module_autonomy` is reported beside
 	this number, because "individual modules may run at L4 internally; the delivery is L2"
 	is a *distinction* and one number cannot express it.
+
+	``topology`` reaches this only through :func:`module_autonomy`. The modifier is not
+	applied twice: FR-123's L2 is already at or below every topology's number, so lowering
+	the delivery again would report T1 as L1 for a reason §5.4 does not state, and the
+	report would attribute to the deployment a reduction the cap had already made.
 	"""
-	return AutonomyLevel(min(module_autonomy(contract, decomposition), MODE_G_CEILING))
+	return AutonomyLevel(
+		min(module_autonomy(contract, decomposition, topology=topology), MODE_G_CEILING)
+	)
 
 
 def _lane_oracles(contract: Contract) -> tuple[InheritedOracle, ...]:
@@ -399,6 +492,9 @@ def report(
 	entry_point: str,
 	report_id: str | None = None,
 	rendered_at: datetime | None = None,
+	topology: DeploymentTopology = DeploymentTopology.T1,
+	topology_configured: bool = False,
+	topology_override: str | None = None,
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -416,6 +512,18 @@ def report(
 	what lets a deploy gate tie a runbook to the checks it approved (FR-119) — so a writer
 	has to know the id *before* the report exists. Rendering twice to discover it would be
 	rendering the same facts twice, and the second render is the one a reader would trust.
+
+	``topology`` is the deployment this delivery was rendered under (FR-030, FR-124). It
+	defaults to T1 — the degraded configuration — so a caller that has not said where the
+	factory runs reports the lower ceiling rather than the product target's, and
+	``topology_configured`` says which of the two happened (FR-042).
+
+	``topology_override`` is the operator's explicit acceptance of a topology refusal
+	(FR-031). It is a *string naming who accepted it* rather than a boolean, because the
+	requirement's own word is "recorded": an override with no name attached is
+	indistinguishable from the silent downgrade the requirement forbids, and the whole
+	point of the refusal is that the difference between "lowered by the deployment" and
+	"lowered by weak oracles" survives into the log.
 	"""
 	assert contract.clauses, "cannot report a delivery for a contract with no clauses"
 	requirement_for_clause: dict[str, str] = {}
@@ -426,8 +534,9 @@ def report(
 	links = chain(contract, decomposition, plan, requirement_for_clause=requirement_for_clause)
 	verified, unverified = verified_and_unverified(contract, verdicts)
 	handed = handover(contract, system=system, entry_point=entry_point)
-	modules_autonomy = module_autonomy(contract, decomposition)
-	delivered_autonomy = ceiling(contract, decomposition)
+	modules_autonomy = module_autonomy(contract, decomposition, topology=topology)
+	delivered_autonomy = ceiling(contract, decomposition, topology=topology)
+	refused = refused_by_topology(contract, decomposition, topology=topology)
 
 	artifacts = tuple(artifact(kind, root) for kind in DeliveryArtifactKind)
 	# Scoped, and the scoping is the whole of this line's content: two of FR-117's four
@@ -576,6 +685,46 @@ def report(
 				"a human-validated architecture'"
 			),
 		),
+		GateCheck(
+			name="topology_ceiling_applied",
+			passed=True,
+			detail=(
+				f"this delivery was rendered under {topology_statement(topology, configured=topology_configured)}. "
+				+ (
+					f"The modules' number is {modules_autonomy.name} *after* the modifier, "
+					"and the delivery's is "
+					f"{delivered_autonomy.name} because FR-123's cap is at or below every "
+					"topology's number (FR-019, FR-124)"
+					if TOPOLOGY_MODIFIER[topology]
+					else "§5.4's modifier for this topology is zero, so the modules' number "
+					f"({modules_autonomy.name}) is the one the oracles and module classes "
+					"compute (FR-019, FR-124)"
+				)
+			),
+		),
+		GateCheck(
+			name="topology_refuses_l4_at_a_degraded_deployment",
+			passed=not refused or topology_override is not None,
+			detail=(
+				f"{len(refused)} module class(es) would be L4 in T2 and are refused at "
+				f"{topology.value} (FR-031): "
+				+ "; ".join(refused)
+				+ (
+					f". An explicit operator override was recorded by {topology_override}, "
+					"which is what FR-031 requires instead of a silent downgrade — so these "
+					"classes run here by a named decision rather than by a quieter number"
+					if topology_override is not None
+					else ". Record an explicit operator override to run them here, or move "
+					"the deployment. The refusal above states the *fact*; the remedy is here "
+					"because this check is where the override is read, and a sentence telling "
+					"an operator to record one would otherwise print over a refusal that was "
+					"already accepted"
+				)
+				if refused
+				else f"no module class this decomposition proposes would be L4 in T2, so "
+				f"{topology.value} refuses nothing (FR-031)"
+			),
+		),
 	]
 
 	return DeliveryReport(
@@ -593,6 +742,8 @@ def report(
 		gate_costs=gate_costs,
 		autonomy=delivered_autonomy,
 		module_autonomy=modules_autonomy,
+		topology=topology,
+		topology_configured=topology_configured,
 		handover=handed,
 		checks=tuple(checks),
 	)

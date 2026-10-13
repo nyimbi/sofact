@@ -95,6 +95,7 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeliveryGate,
 	DeliveryReport,
+	DeploymentTopology,
 	DeployRecord,
 	DispatchRecord,
 	ElicitationAnswer,
@@ -357,6 +358,7 @@ class FactoryService:
 		*,
 		specs: Mapping[str, HarnessSpec] | None = None,
 		envelope: DeliveryEnvelope | None = None,
+		topology: DeploymentTopology | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -370,17 +372,40 @@ class FactoryService:
 		configuration, and a factory that silently applied a default would report
 		actuals against numbers nobody chose. ``None`` leaves P3's FR-057 check asserting
 		nothing and the delivery report saying so.
+
+		``topology`` is §5.4's, and ``None`` means *this deployment did not declare one*
+		rather than "T1". Both report T1 — the degraded configuration, because a ceiling
+		must not fail open — but they are different facts and FR-042 requires the report
+		to distinguish them: a factory deliberately running on a dev machine and one that
+		never said where it runs are not the same deployment, and only the second is a
+		missing setting. So the *absence* is preserved as ``None`` and reaches the report
+		as ``topology_configured=False``.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
 		self.llm = llm
 		self._specs: Mapping[str, HarnessSpec] = SPECS if specs is None else dict(specs)
 		self._envelope = envelope
+		self._topology = topology
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
 		"""The configured §1.3 envelope, or ``None`` when this deployment set none."""
 		return self._envelope
+
+	def topology(self) -> DeploymentTopology:
+		"""The active topology, defaulting to T1 when none was declared (§5.4, FR-042).
+
+		The default is applied on *read* rather than in ``__init__`` so that
+		:meth:`topology_configured` can still tell the two apart. A constructor that
+		substituted T1 for ``None`` would make "the dev configuration was chosen" and
+		"nobody said" the same fact in the log, which is the conflation FR-042 forbids.
+		"""
+		return self._topology or DeploymentTopology.T1
+
+	def topology_configured(self) -> bool:
+		"""Whether this deployment declared its topology, or fell back to T1 (FR-042)."""
+		return self._topology is not None
 
 	def __repr__(self) -> str:
 		return f"FactoryService(home={self.home}, entries={len(self.ledger)})"
@@ -883,7 +908,13 @@ class FactoryService:
 		contract = await self.contract_by_id(contract_id)
 		state = await self.state()
 		selected = run_id if run_id is not None else latest_run_id(contract, state.evidence)
-		report = verify(contract, state.evidence, run_id=selected)
+		report = verify(
+			contract,
+			state.evidence,
+			run_id=selected,
+			topology=self.topology(),
+			topology_configured=self.topology_configured(),
+		)
 		self._commit(
 			LedgerKind.VERDICT_RENDERED,
 			{"report": report.model_dump(mode="json")},
@@ -949,6 +980,8 @@ class FactoryService:
 					contract_hash=prior.contract_hash,
 					weakest_oracle_rank=prior.weakest_oracle_rank,
 					ceiling=prior.ceiling,
+					topology=self.topology(),
+					topology_configured=self.topology_configured(),
 					verdicts=prior.verdicts,
 					at=now(),
 					run_id=prior.run_id,
@@ -971,7 +1004,14 @@ class FactoryService:
 				LedgerKind.EVIDENCE_RECORDED,
 				{"evidence": item.model_dump(mode="json")},
 			)
-		report = verify(contract, produced, run_id=run_id, cache_key=key)
+		report = verify(
+			contract,
+			produced,
+			run_id=run_id,
+			cache_key=key,
+			topology=self.topology(),
+			topology_configured=self.topology_configured(),
+		)
 		self._commit(
 			LedgerKind.VERDICT_RENDERED,
 			{"report": report.model_dump(mode="json")},
@@ -2461,6 +2501,7 @@ class FactoryService:
 		root: Path | None = None,
 		system: str | None = None,
 		entry_point: str | None = None,
+		topology_override: str | None = None,
 	) -> DeliveryReport:
 		"""Render FR-118's delivery report for a plan's work, and record it (FR-117).
 
@@ -2540,6 +2581,9 @@ class FactoryService:
 				entry_point=entry_point or str(root or self.home),
 				report_id=identity,
 				rendered_at=rendered_at,
+				topology=self.topology(),
+				topology_configured=self.topology_configured(),
+				topology_override=topology_override,
 			)
 
 		# The documents and the report describe each other: the report's artefact check

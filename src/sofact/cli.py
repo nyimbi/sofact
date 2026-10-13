@@ -35,6 +35,8 @@ from sofact.service import (
 from sofact.views import (
 	PHASE_GATE,
 	PHASE_SEQUENCE,
+	TOPOLOGY_ISOLATION,
+	TOPOLOGY_MODIFIER,
 	UNPRODUCIBLE_KINDS,
 	Assumption,
 	ClaimKind,
@@ -43,6 +45,7 @@ from sofact.views import (
 	Decomposition,
 	DecompositionGate,
 	DeliveryEnvelope,
+	DeploymentTopology,
 	DispatchRecord,
 	EnvelopeDimension,
 	GoalPlan,
@@ -173,6 +176,14 @@ _SYSTEM_OPTION = typer.Option(
 _ENTRY_POINT_OPTION = typer.Option(
 	None, "--entry-point", help="Where a Mode M maintenance run begins (FR-121)."
 )
+_TOPOLOGY_OVERRIDE_OPTION = typer.Option(
+	None,
+	"--override-topology",
+	help=(
+		"Who accepts running a class FR-031 refuses at this topology. A name, not a flag: "
+		"an unnamed override is the silent downgrade the requirement forbids."
+	),
+)
 _REPORT_ID_ARGUMENT = typer.Argument(None, help="The delivery report to gate.")
 _APPROVE_OPTION = typer.Option(None, "--approve", help="Pass the gate for this report, naming it.")
 _GATE_BY_OPTION = typer.Option("operator", "--by", help="Who is passing the gate (FR-119).")
@@ -201,6 +212,7 @@ def _service(home: Path | None) -> FactoryService:
 		llm=LlmClient(),
 		specs=_configured_specs(),
 		envelope=_configured_envelope(),
+		topology=_configured_topology(),
 	)
 
 
@@ -220,6 +232,34 @@ def _configured_envelope() -> DeliveryEnvelope | None:
 		return load_envelope(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_ENVELOPE: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_topology() -> DeploymentTopology | None:
+	"""The §5.4 topology this deployment declared, if it declared one (FR-124, FR-042).
+
+	``None`` means *no topology was declared*, which is not the same as "T1". Both report
+	T1 — the degraded configuration, because a ceiling must not fail open — but FR-042
+	requires the report to say which happened: "the dev instance (T1) must be runnable, and
+	must report its degraded ceiling rather than silently behaving as if it were T2". A
+	factory that never said where it runs is not a factory running on a dev machine; it is
+	a missing setting, and the report says so.
+
+	A malformed value is refused rather than defaulted. Defaulting on a typo would put a
+	deployment that meant T3 on T1's ceilings with no error, and the operator would have
+	no way to tell the typo from a deliberate T1.
+	"""
+	configured = os.environ.get("SOFACT_TOPOLOGY")
+	if not configured:
+		return None
+	try:
+		return DeploymentTopology(configured.strip().upper())
+	except ValueError as exc:
+		known = ", ".join(t.value for t in DeploymentTopology)
+		typer.secho(
+			f"cannot read SOFACT_TOPOLOGY: {configured!r} is not one of {known} (§5.4)",
+			fg="red",
+		)
 		raise typer.Exit(code=1) from exc
 
 
@@ -2334,6 +2374,7 @@ def deliver_command(
 	root: Path | None = _DELIVERY_ROOT_OPTION,
 	system: str | None = _SYSTEM_OPTION,
 	entry_point: str | None = _ENTRY_POINT_OPTION,
+	override_topology: str | None = _TOPOLOGY_OVERRIDE_OPTION,
 ) -> None:
 	"""Render P8's delivery report (FR-117, FR-118)."""
 	asyncio.run(
@@ -2342,6 +2383,7 @@ def deliver_command(
 			root=root,
 			system=system,
 			entry_point=entry_point,
+			override_topology=override_topology,
 		)
 	)
 
@@ -2352,6 +2394,7 @@ async def _deliver(
 	root: Path | None,
 	system: str | None,
 	entry_point: str | None,
+	override_topology: str | None,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -2382,6 +2425,7 @@ async def _deliver(
 		root=root,
 		system=system,
 		entry_point=entry_point,
+		topology_override=override_topology,
 	)
 
 	typer.secho(f"\ndelivery report {report.id}", fg="cyan", bold=True)
@@ -2396,6 +2440,18 @@ async def _deliver(
 		"human-validated architecture.",
 		fg="bright_black",
 	)
+	typer.secho(
+		f"  topology: {report.topology.value} — {TOPOLOGY_ISOLATION[report.topology]}; "
+		f"ceiling modifier {TOPOLOGY_MODIFIER[report.topology]:+d} (FR-019, FR-030, FR-124)",
+		fg="bright_black" if report.topology_configured else "yellow",
+	)
+	if not report.topology_configured:
+		typer.secho(
+			"    no topology was declared, so the degraded T1 ceiling is in use rather "
+			"than silently behaving as if it were T2 (FR-042). Set SOFACT_TOPOLOGY to "
+			"T2/T3/T4, or accept the lower number deliberately.",
+			fg="yellow",
+		)
 	typer.secho("\n  artefacts (FR-117)", fg="cyan")
 	for artifact in report.artifacts:
 		if artifact.present:

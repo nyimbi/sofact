@@ -29,8 +29,11 @@ from typing import Final
 
 from sofact.views import (
 	DELIVERY_REQUIREMENTS,
+	TOPOLOGY_ISOLATION,
+	TOPOLOGY_MODIFIER,
 	DeliveryArtifactKind,
 	DeliveryReport,
+	DeploymentTopology,
 	EnvelopeMeasurement,
 )
 
@@ -201,6 +204,15 @@ def render_delivery_document(report: DeliveryReport) -> str:
 		"because P2, P3 and P8 are human gates)",
 		f"- Modules: **{report.module_autonomy.name}** (FR-122) — autonomous module "
 		"construction inside a human-validated architecture",
+		f"- Deployment: **{report.topology.value}**, "
+		f"{TOPOLOGY_ISOLATION[report.topology]} — ceiling modifier "
+		f"{TOPOLOGY_MODIFIER[report.topology]:+d} (FR-019, FR-030, FR-124)"
+		+ (
+			""
+			if report.topology_configured
+			else ". **No topology was declared**, so the degraded default is in use and the "
+			"numbers above are T1's (FR-042)"
+		),
 	]
 
 	lines += [
@@ -264,8 +276,20 @@ def render_runbook(report: DeliveryReport) -> str:
 		"## How to run it",
 		"",
 		"This factory does not run the delivered system and does not choose how it is "
-		"packaged (ADR-0005) or deployed (FR-124). The deploy gate is where a human names "
-		"the target environment; this section records what SoFact knows and no more.",
+		"packaged (ADR-0005). The deploy gate is where a human names the target "
+		"environment; this section records what SoFact knows and no more.",
+		"",
+		f"**Where this was built**: {report.topology.value}, "
+		f"{TOPOLOGY_ISOLATION[report.topology]} — ceiling modifier "
+		f"{TOPOLOGY_MODIFIER[report.topology]:+d} (FR-019, FR-030). "
+		+ (
+			"This is §5.4's product target, so the ceilings reported above are the ones "
+			"the delivered system may claim where it is deployed."
+			if report.topology is DeploymentTopology.T2
+			else "The delivered system inherits no claim about its own deployment from "
+			"this: the topology is where the *factory* ran, and a system built on a dev "
+			"machine can be deployed to T2 or T3."
+		),
 		"",
 	]
 	for artifact in report.artifacts:

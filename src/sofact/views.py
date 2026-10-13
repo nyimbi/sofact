@@ -28,10 +28,13 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, model_validator
 from sofact._uuid7 import uuid7str
 
 __all__ = [
+	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
 	"MODE_G_CEILING",
 	"MODULE_CLASS_CEILING",
 	"ORACLE_RANK",
+	"TOPOLOGY_ISOLATION",
+	"TOPOLOGY_MODIFIER",
 	"Assumption",
 	"AutonomyLevel",
 	"CapabilityFinding",
@@ -55,6 +58,7 @@ __all__ = [
 	"DeliveryGate",
 	"DeliveryReport",
 	"DeployRecord",
+	"DeploymentTopology",
 	"DimensionBound",
 	"DimensionStatus",
 	"DispatchMode",
@@ -137,6 +141,8 @@ __all__ = [
 	"ceiling_for_rank",
 	"content_hash",
 	"now",
+	"topology_ceiling",
+	"topology_refusal",
 ]
 
 GENESIS_HASH = "0" * 64
@@ -286,6 +292,166 @@ A constant rather than a lookup, because the pipeline this build implements is M
 report. A mode-keyed table with a default would be a cap that fails open on a mode nobody
 has written yet, which is the one failure a cap may not have; when a Mode M pipeline
 exists this becomes a lookup and the type will force the change.
+"""
+
+
+# --------------------------------------------------------------------------- #
+# §5.4 — deployment topology, and the ceiling it modifies (FR-019, FR-030, FR-031, FR-042)
+# --------------------------------------------------------------------------- #
+
+
+class DeploymentTopology(StrEnum):
+	"""Where the factory is running, as §5.4's four deployments (FR-124).
+
+	§5.4's principle is that *the same lane has different admissible ceilings on
+	different hardware*, because what bounds blast radius is the isolation the environment
+	actually provides. So the topology is not an operational detail; it is an input to the
+	autonomy computation, which is why FR-030 requires it reported in every oracle report
+	and attached to every change.
+
+	The four are named rather than numbered because ``T1`` in a report is a name a reader
+	has to look up. ``value`` is still §5.4's identifier, so a report and the spec agree
+	on what to call it.
+
+	``T1`` is the *default* rather than ``T2``, and that direction is deliberate: T1 is
+	the degraded configuration (no isolation boundary at all), so a factory that has not
+	been told where it is running claims the *lower* ceiling. Defaulting to the product
+	target would be a ceiling that fails open on an unconfigured deployment, which is the
+	one failure a ceiling may not have — the same argument ADR-0041 makes about FR-123's
+	cap being a constant rather than a mode-keyed lookup.
+	"""
+
+	T1 = "T1"
+	T2 = "T2"
+	T3 = "T3"
+	T4 = "T4"
+
+
+TOPOLOGY_ISOLATION: dict[DeploymentTopology, str] = {
+	DeploymentTopology.T1: (
+		"none: shared filesystem, no container boundary, producer and evaluator on one host"
+	),
+	DeploymentTopology.T2: (
+		"container per lane, VM boundary, egress denied by default, git-backed"
+	),
+	DeploymentTopology.T3: "T2's boundary with no egress at all; customer-hosted, local models",
+	DeploymentTopology.T4: "T2's boundary, with the producer and the evaluator on separate hosts",
+}
+"""§5.4's isolation column, so a report can state what it is *relying* on (FR-030).
+
+FR-030 requires the isolation guarantees reported beside the modifier, and the pairing is
+the requirement's substance: a reader who is told "T2, baseline" and not told what T2
+guarantees has been given a number to trust rather than a fact to check. R2 in the old
+spec's risk table is exactly this failure — "autonomy depends on isolation (FR-019) that
+is asserted but never verified".
+"""
+
+TOPOLOGY_MODIFIER: dict[DeploymentTopology, int] = {
+	DeploymentTopology.T1: -1,
+	DeploymentTopology.T2: 0,
+	DeploymentTopology.T3: 0,
+	DeploymentTopology.T4: 0,
+}
+"""§5.4's ceiling modifier, in autonomy levels, applied to the modules' number.
+
+An integer rather than a table of resulting levels, because the modifier is what §5.4
+states and a pre-applied table would have to be rewritten every time
+:data:`MODULE_CLASS_CEILING` or :func:`ceiling_for_rank` moved. It is applied to
+:func:`sofact.delivery.module_autonomy` — the modules' number — and *not* to the
+delivery's, because the delivery is already capped at L2 by FR-123 and lowering a cap
+changes nothing about it.
+
+T4 is ``0`` and is not therefore a no-op. §5.4's "+0, but unlocks L4 for lanes whose blast
+bound previously failed" is a change to *admissibility*, not to the level, and the blast
+bound it unlocks is not a fact this factory holds: §5.2's FR-027 requires a lane's file
+scope be declared and enforced by permission, and nothing in the log declares one. So T4
+is reported as baseline with its isolation stated, and the unlock is named as the thing
+it is rather than applied as a level this code cannot justify. Claiming a *higher* number
+for T4 would be the direction a ceiling must never move on an unmeasured premise.
+"""
+
+
+def topology_ceiling(
+	level: AutonomyLevel,
+	topology: DeploymentTopology,
+) -> AutonomyLevel:
+	"""``level`` lowered by the topology's modifier, never below L0 (FR-019, FR-124).
+
+	The modifier is applied to the *modules'* number and the delivery's cap is applied
+	after, so T1 lowers what the modules sustain (L4 becomes L3, which is §5.4's own
+	worked example) and FR-123's L2 cap is untouched by it.
+
+	The clamp at L0 is not decoration: §5.4's T1 modifier is one level and the ladder's
+	floor is L0, so a module class already at L1 would otherwise compute L0-1 = -1, which
+	:class:`AutonomyLevel` cannot represent. A clamp is the right shape here rather than a
+	refusal, because the *refusal* FR-031 asks for is about a specific case — a lane that
+	would be L4 in T2 — and it is raised by :func:`topology_refusal`, which knows the
+	level the lane would have had.
+
+	The assertion is the guard :data:`HIGHEST_GRANTABLE` exists for: a modifier that
+	*raised* a level would be a deployment claiming autonomy its isolation does not
+	support, which is the failure R2 names. It is an assertion rather than a min() because
+	a silent cap on a raising modifier would leave the table saying one thing and the
+	computation another.
+	"""
+	modified = int(level) + TOPOLOGY_MODIFIER[topology]
+	assert modified <= int(HIGHEST_GRANTABLE), (
+		f"{topology.value}'s modifier of {TOPOLOGY_MODIFIER[topology]:+d} would raise "
+		f"{level.name} to {modified}, above the {HIGHEST_GRANTABLE.name} the ladder "
+		"offers at all (FR-019, §1.5)"
+	)
+	return AutonomyLevel(max(int(AutonomyLevel.L0), modified))
+
+
+def topology_refusal(
+	level: AutonomyLevel,
+	topology: DeploymentTopology,
+) -> str | None:
+	"""Why a level is refused outright at this topology, or ``None`` (FR-031).
+
+	FR-031 is precise and it is a *refusal*, not a downgrade: "a lane that would be L4 in
+	T2 must be **refused** at L1 in T1 rather than silently downgraded, unless an explicit
+	operator override is recorded."
+
+	The distinction matters because a silent downgrade is indistinguishable, in the log,
+	from work that was never L4-eligible. A lane that runs at L3 in T1 either because T1
+	lowered it or because its oracles are weak is two different facts about the world, and
+	only the first is a deployment limitation an operator could lift by moving to T2. So
+	the refusal is a sentence naming both numbers and the topology that separates them.
+
+	It states the *refusal* and not the remedy. The remedy — record an override, or move
+	the deployment — depends on state this function cannot see: whether an override was
+	already recorded. A sentence that told an operator to record one, printed over a
+	refusal that was already accepted, is an instruction to redo something done, and a
+	check that reads that way is one a reader learns to skim. The gate in
+	:mod:`sofact.delivery` holds the remedy because it holds the override.
+
+	T1 is the only topology whose modifier is negative and therefore the only one that can
+	refuse: at T2/T3/T4 the modifier is zero, so the level T2 admits is the level
+	admitted, and returning a refusal there would refuse the baseline case.
+	"""
+	if TOPOLOGY_MODIFIER[topology] >= 0:
+		return None
+	if level < AutonomyLevel.L4:
+		return None
+	lowered = topology_ceiling(level, topology)
+	return (
+		f"{level.name} is not admissible at {topology.value}: §5.4's modifier is "
+		f"{TOPOLOGY_MODIFIER[topology]:+d} level, which would run this at {lowered.name}, "
+		"and FR-031 refuses a silent downgrade — a lane lowered by its deployment and a "
+		"lane whose oracles never supported the level are two different facts, and only "
+		"the first is lifted by moving to T2"
+	)
+
+
+HIGHEST_GRANTABLE: Final[AutonomyLevel] = AutonomyLevel.L4
+"""The highest level any topology may grant, and it is not L5 (§1.5, FR-157).
+
+L5 is representable in :class:`AutonomyLevel` and unreachable through
+:func:`ceiling_for_rank`, which is the same guard one level up: the spec declines to
+offer a dark factory. Named here so :func:`topology_ceiling` can assert that no modifier
+raises a number past what the ladder offers at all, rather than only that it does not
+raise it past L5 — a modifier is data, and data can be edited.
 """
 
 
@@ -1745,6 +1911,21 @@ class VerificationReport(View):
 	contract_hash: str
 	weakest_oracle_rank: int
 	ceiling: AutonomyLevel
+	topology: DeploymentTopology = DeploymentTopology.T1
+	"""The deployment this verdict was rendered under (FR-030).
+
+	FR-030 requires the active topology reported in "every oracle report", not only in
+	the delivery, and the reason is §5.4's: an oracle report is where an autonomy claim
+	is made, so it is where the claim's premise has to appear. A verdict rendered under
+	T1 and one rendered under T2 can support different levels for the same clause, and a
+	report that carried only the level could not be told from the other.
+
+	The default is the degraded topology, like :attr:`DeliveryReport.topology`.
+	"""
+
+	topology_configured: bool = False
+	"""Whether the deployment declared its topology or fell back to T1 (FR-042)."""
+
 	verdicts: tuple[ClauseVerdict, ...]
 	at: datetime
 	run_id: str = ""
@@ -2705,6 +2886,36 @@ class DeliveryReport(View):
 	explicit — "individual modules may run at L4 internally; the delivery is L2" — and a
 	report carrying only the capped number would read as a pipeline that cannot build
 	above L2, which is a different and false claim.
+
+	The number carries §5.4's topology modifier (FR-019, FR-124), so a T1 deployment
+	reports the lowered value rather than the one its hardware cannot support.
+	"""
+
+	topology: DeploymentTopology = DeploymentTopology.T1
+	"""The deployment this delivery was rendered under (FR-030, FR-124).
+
+	A field with a default, and the default is the *degraded* topology. §5.4's whole
+	point is that the same work has different admissible ceilings on different hardware,
+	so a report that did not say where it ran would be a ceiling claim with its premise
+	missing. T1 is the default for the same reason :data:`MODE_G_CEILING` is a constant
+	rather than a lookup: a ceiling that fails open on unconfigured input is the one
+	failure a ceiling may not have (FR-042).
+
+	It is a field rather than a property of the service so that a report stays readable
+	from the log alone — the topology a delivery was rendered under is part of what the
+	report *says*, not something a later reader has to reconstruct from the deployment's
+	current configuration, which may since have changed.
+	"""
+
+	topology_configured: bool = False
+	"""Whether the deployment *declared* its topology, or fell back to T1 (FR-042).
+
+	Separated from :attr:`topology` because the two facts differ and only one of them is
+	a defect: a factory deliberately running on a dev machine and one that never said
+	where it runs both report T1, and an operator who cannot tell them apart cannot tell
+	whether the low number is a choice or a missing setting. FR-042 asks for exactly this
+	— the dev instance "must report its degraded ceiling rather than silently behaving as
+	if it were T2".
 	"""
 
 	handover: Handover

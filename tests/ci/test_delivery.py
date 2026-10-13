@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 from synthetic import (
+	base_spec,
 	decompose_and_approve,
 	elicitation_to_contract,
 	specify_and_approve,
@@ -38,14 +39,20 @@ from sofact.delivery import (
 	chain,
 	handover,
 	module_autonomy,
+	refused_by_topology,
+	report,
+	topology_statement,
 	verified_and_unverified,
 )
+from sofact.planner import compile_plan
 from sofact.service import FactoryService
 from sofact.views import (
 	DELIVERY_ARTIFACTS,
 	DELIVERY_REQUIREMENTS,
 	MODE_G_CEILING,
 	MODULE_CLASS_CEILING,
+	TOPOLOGY_ISOLATION,
+	TOPOLOGY_MODIFIER,
 	Assumption,
 	AutonomyLevel,
 	ClauseKind,
@@ -56,6 +63,7 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeliveryGate,
 	DeliveryReport,
+	DeploymentTopology,
 	DeployRecord,
 	ElicitationDimension,
 	EnvelopeDimension,
@@ -78,6 +86,16 @@ from sofact.views import (
 	now,
 )
 
+BASELINE = DeploymentTopology.T2
+"""§5.4's product target, whose ceiling modifier is zero.
+
+FR-122's tests below are about the *lower bound* over the contract's ceiling and the
+module classes' — not about the deployment — so they name the baseline topology
+explicitly. Leaving the argument off would exercise T1's -1 modifier as well, and a
+failure there would be a statement about §5.4 rather than about the minimum this class
+tests. The modifier has its own tests, below.
+"""
+
 
 def oracle(
 	kind: OracleClass = OracleClass.CONTRACT,
@@ -92,8 +110,18 @@ def oracle(
 	)
 
 
-def one_clause_contract(*statements: str, command: str | None = None) -> Contract:
-	"""A contract built directly, so no elicitation has to run to reach P8."""
+def one_clause_contract(
+	*statements: str,
+	command: str | None = None,
+	oracle_class: OracleClass = OracleClass.CONTRACT,
+) -> Contract:
+	"""A contract built directly, so no elicitation has to run to reach P8.
+
+	``oracle_class`` defaults to ``CONTRACT`` (rank 3, ceiling L3) because that is what
+	most of this suite wants: a contract strong enough to be interesting and weak enough
+	that a module class can still lower it. A test that needs the *strongest* ceiling —
+	L4, which §5.4's worked example is about — passes ``OracleClass.PROPERTY`` (rank 1).
+	"""
 	text = statements or ("the ledger records entries",)
 	stems = tuple(
 		ClauseStem(
@@ -105,7 +133,10 @@ def one_clause_contract(*statements: str, command: str | None = None) -> Contrac
 		for statement in text
 	)
 	draft = SpecificationDraft(id=uuid7str(), goal_id=uuid7str(), created_at=now(), stems=stems)
-	return Contract.from_draft(draft, {stem.id: oracle(command=command) for stem in stems})
+	return Contract.from_draft(
+		draft,
+		{stem.id: oracle(oracle_class, command=command) for stem in stems},
+	)
 
 
 def a_check(passed: bool = True) -> GateCheck:
@@ -133,7 +164,7 @@ def an_oracle(clause_id: str | None = None, *, command: str | None = "true") -> 
 	)
 
 
-def _a_delivery_root(tmp_path: Path) -> Path:
+def _a_delivery_root(tmp_path: Path, name: str = "delivery") -> Path:
 	"""An empty delivery root to hand :meth:`render_delivery`.
 
 	Empty on purpose. The factory writes the two artefacts FR-117 names that it owes
@@ -141,8 +172,13 @@ def _a_delivery_root(tmp_path: Path) -> Path:
 	factory produced them — and producing them is the thing under test. The name is the
 	CLI suite's for the same helper, so the two suites cannot drift into asserting
 	different behaviour about the same directory.
+
+	``name`` exists so a test that renders twice — two topologies over one state
+	directory — gives each render its own root. One root would mean the second render
+	overwrites the first, and a test comparing the two reports would be comparing a
+	report against a document that had already been rewritten under it.
 	"""
-	root = tmp_path / "delivery"
+	root = tmp_path / name
 	root.mkdir()
 	return root
 
@@ -175,6 +211,8 @@ def a_report(**overrides: object) -> DeliveryReport:
 		"envelope_actuals": None,
 		"autonomy": AutonomyLevel.L2,
 		"module_autonomy": AutonomyLevel.L2,
+		"topology": DeploymentTopology.T1,
+		"topology_configured": False,
 		"handover": Handover(
 			system="the ledger service",
 			entry_point="/srv/ledger",
@@ -568,7 +606,7 @@ class TestTheModulesCeiling:
 	def test_a_contract_alone_gives_its_own_ceiling(self) -> None:
 		contract = one_clause_contract("one", command="true")
 
-		assert module_autonomy(contract, None) == contract.ceiling
+		assert module_autonomy(contract, None, topology=BASELINE) == contract.ceiling
 
 	def test_a_module_class_can_lower_the_delivery_below_the_contract(self) -> None:
 		"""FR-126 makes a G7 module — auth, secrets, payments, PII — human-authored
@@ -587,7 +625,10 @@ class TestTheModulesCeiling:
 		decomposition = propose(contract)
 
 		assert {module.module_class for module in decomposition.modules} == {ModuleClass.G7}
-		assert module_autonomy(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
+		assert (
+			module_autonomy(contract, decomposition, topology=BASELINE)
+			== MODULE_CLASS_CEILING[ModuleClass.G7]
+		)
 
 	def test_no_module_can_raise_the_ceiling_above_the_contract(self) -> None:
 		"""The other direction, which is why the rule is a minimum rather than a lookup:
@@ -597,7 +638,7 @@ class TestTheModulesCeiling:
 
 		decomposition = propose(weak)
 
-		assert module_autonomy(weak, decomposition) == weak.ceiling
+		assert module_autonomy(weak, decomposition, topology=BASELINE) == weak.ceiling
 
 	def test_the_lowest_module_class_governs_when_several_disagree(self) -> None:
 		"""Three clauses, three classes, and the delivery claims the lowest — the whole
@@ -613,10 +654,13 @@ class TestTheModulesCeiling:
 		classes = {module.module_class for module in decomposition.modules}
 
 		assert len(classes) > 1, "the fixture must exercise a disagreement"
-		assert module_autonomy(contract, decomposition) == min(
+		assert module_autonomy(contract, decomposition, topology=BASELINE) == min(
 			MODULE_CLASS_CEILING[module_class] for module_class in classes
 		)
-		assert module_autonomy(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
+		assert (
+			module_autonomy(contract, decomposition, topology=BASELINE)
+			== MODULE_CLASS_CEILING[ModuleClass.G7]
+		)
 
 
 class TestTheModeGCap:
@@ -629,8 +673,8 @@ class TestTheModeGCap:
 		strong = one_clause_contract("the ledger records entries", command="true")
 		assert strong.ceiling > MODE_G_CEILING, "the fixture must reach above the cap"
 
-		assert ceiling(strong, None) == MODE_G_CEILING
-		assert module_autonomy(strong, None) == strong.ceiling
+		assert ceiling(strong, None, topology=BASELINE) == MODE_G_CEILING
+		assert module_autonomy(strong, None, topology=BASELINE) == strong.ceiling
 
 	def test_the_cap_applies_with_no_decomposition(self) -> None:
 		"""A cap that failed open on missing input would be no cap: the decomposition is
@@ -638,8 +682,10 @@ class TestTheModeGCap:
 		so the second has to hold when the first has nothing to say."""
 		strong = one_clause_contract("the ledger records entries", command="true")
 
-		assert ceiling(strong, None) == MODE_G_CEILING
-		assert ceiling(strong, None) <= module_autonomy(strong, None)
+		assert ceiling(strong, None, topology=BASELINE) == MODE_G_CEILING
+		assert ceiling(strong, None, topology=BASELINE) <= module_autonomy(
+			strong, None, topology=BASELINE
+		)
 
 	def test_a_g7_module_does_not_raise_the_delivery_to_the_cap(self) -> None:
 		"""The cap is a ceiling, not a floor. A G7 module caps at L1 (FR-126), so a
@@ -650,8 +696,11 @@ class TestTheModeGCap:
 		)
 		decomposition = propose(contract)
 
-		assert ceiling(contract, decomposition) == MODULE_CLASS_CEILING[ModuleClass.G7]
-		assert ceiling(contract, decomposition) < MODE_G_CEILING
+		assert (
+			ceiling(contract, decomposition, topology=BASELINE)
+			== MODULE_CLASS_CEILING[ModuleClass.G7]
+		)
+		assert ceiling(contract, decomposition, topology=BASELINE) < MODE_G_CEILING
 
 	async def test_the_report_states_both_numbers(self, home: Path, tmp_path: Path) -> None:
 		"""FR-123 asks for the *distinction*, not the lower number: "individual modules
@@ -685,6 +734,345 @@ async def _walk_to_the_specification_gate(service: FactoryService) -> None:
 	await service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE)
 	await service.advance_phase(Phase.SPECIFY, PhaseStatus.AWAITING_GATE)
 	await service.approve_gate(Phase.SPECIFY, by="operator")
+
+
+# --------------------------------------------------------------------------- #
+# FR-124/FR-030/FR-031/FR-042 — the deployment modifies the ceiling, and says so
+# --------------------------------------------------------------------------- #
+
+
+class TestTheTopologyIsATypeNotAComment:
+	"""FR-124: §5.4's four deployments, as data rather than prose in a spec.
+
+	§5.4's principle is that the same lane has different admissible ceilings on different
+	hardware, so the topology is an input to the autonomy computation and not an
+	operational note. Before this, "T1" existed only in ``product-spec-old.md`` §5.4 and
+	no code could name it.
+	"""
+
+	def test_every_topology_has_an_isolation_and_a_modifier(self) -> None:
+		"""FR-030 asks for the isolation and the modifier *reported*, so a table missing
+		either would make the requirement unstatable for that topology. The two tables
+		are keyed by the same enum, and this asserts neither has a hole."""
+		assert set(TOPOLOGY_MODIFIER) == set(DeploymentTopology)
+		assert set(TOPOLOGY_ISOLATION) == set(DeploymentTopology)
+
+	def test_only_the_degraded_topology_lowers_the_ceiling(self) -> None:
+		"""§5.4's table read back: T1 is -1, T2 and T3 are baseline, T4 is +0. A modifier
+		that *raised* a level would be a deployment claiming autonomy its isolation does
+		not support, which is R2's silent unsafety."""
+		assert TOPOLOGY_MODIFIER[DeploymentTopology.T1] == -1
+		assert TOPOLOGY_MODIFIER[DeploymentTopology.T2] == 0
+		assert TOPOLOGY_MODIFIER[DeploymentTopology.T3] == 0
+		assert TOPOLOGY_MODIFIER[DeploymentTopology.T4] == 0
+		assert all(modifier <= 0 for modifier in TOPOLOGY_MODIFIER.values())
+
+	def test_t1_lowers_a_strong_contract_by_exactly_one_level(self) -> None:
+		"""§5.4's own worked example: "L4 lanes run at L3". A contract of rank-1 oracles
+		reaches L4 through ``ceiling_for_rank``; at T1 the *modules'* number is L3."""
+		strong = one_clause_contract(
+			"the ledger records entries", command="true", oracle_class=OracleClass.PROPERTY
+		)
+		assert strong.ceiling is AutonomyLevel.L4, "the fixture must reach L4"
+
+		assert module_autonomy(strong, None, topology=DeploymentTopology.T1) is AutonomyLevel.L3
+		assert module_autonomy(strong, None, topology=DeploymentTopology.T2) is AutonomyLevel.L4
+
+	def test_the_modifier_does_not_push_a_level_below_l0(self) -> None:
+		"""A G7 module caps at L1 (FR-126), and §5.4's modifier is -1, so the arithmetic
+		reaches L0 rather than -1. The clamp is asserted here because the alternative is
+		an ``IntEnum`` value that does not exist, which would raise at the point a report
+		is rendered rather than at the point a table is edited."""
+		g7 = one_clause_contract("the password reset flow authenticates a user", command="true")
+		decomposition = propose(g7)
+		assert MODULE_CLASS_CEILING[ModuleClass.G7] is AutonomyLevel.L1
+
+		assert (
+			module_autonomy(g7, decomposition, topology=DeploymentTopology.T1) is AutonomyLevel.L0
+		)
+
+	def test_the_delivery_cap_is_not_lowered_a_second_time(self) -> None:
+		"""FR-123's L2 is at or below every topology's number, so applying §5.4's modifier
+		to the *delivery* would report T1 as L1 for a reason §5.4 does not state. The
+		modifier reaches the delivery only through the modules' number."""
+		strong = one_clause_contract("the ledger records entries", command="true")
+
+		for topology in DeploymentTopology:
+			assert ceiling(strong, None, topology=topology) is MODE_G_CEILING
+
+	def test_the_default_topology_is_the_degraded_one(self) -> None:
+		"""A ceiling that failed open on an unconfigured deployment is the one failure a
+		ceiling may not have, so the default is T1 rather than the product target. This
+		is the same argument ADR-0041 makes about FR-123's cap being a constant."""
+		strong = one_clause_contract("the ledger records entries", command="true")
+
+		assert module_autonomy(strong, None) is module_autonomy(
+			strong, None, topology=DeploymentTopology.T1
+		)
+
+
+class TestTheTopologyRefusesRatherThanDowngrades:
+	"""FR-031: a lane that would be L4 in T2 is **refused** at T1, not silently lowered.
+
+	The distinction is the whole requirement: a lane running at L3 in T1 because the
+	deployment lowered it and one whose oracles never supported L4 are two different facts
+	about the world, and only the first is lifted by moving to T2. A silent downgrade
+	collapses them into one number.
+	"""
+
+	def test_a_class_that_would_be_l4_in_t2_is_refused_at_t1(self) -> None:
+		"""G1 is L4 through ``MODULE_CLASS_CEILING``, so T1 refuses it. The refusal names
+		the module and the class, because a refusal an operator cannot locate is a refusal
+		they will route around."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		decomposition = propose(contract)
+		assert MODULE_CLASS_CEILING[ModuleClass.G1] is AutonomyLevel.L4
+
+		refused = refused_by_topology(contract, decomposition, topology=DeploymentTopology.T1)
+
+		assert len(refused) == 1, "the fixture must propose exactly one L4 class"
+		assert decomposition.modules[0].name in refused[0]
+		assert "L4" in refused[0]
+
+	def test_the_same_classes_are_admitted_at_t2(self) -> None:
+		"""The other half, and it is what makes the first a *deployment* refusal rather
+		than a general one: at the baseline topology nothing is refused."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		decomposition = propose(contract)
+
+		for topology in (
+			DeploymentTopology.T2,
+			DeploymentTopology.T3,
+			DeploymentTopology.T4,
+		):
+			assert refused_by_topology(contract, decomposition, topology=topology) == ()
+
+	def test_a_class_that_never_reached_l4_is_not_refused(self) -> None:
+		"""FR-031 refuses L4-at-T2, not "anything T1 lowers". A G5 module caps at L2
+		(FR-126), so T1's modifier lowers it to L1 without a refusal — and refusing it
+		would make the requirement fire on the ordinary case."""
+		contract = one_clause_contract("the dashboard renders a chart", command="true")
+		decomposition = propose(contract)
+		assert MODULE_CLASS_CEILING[decomposition.modules[0].module_class] < AutonomyLevel.L4
+
+		assert refused_by_topology(contract, decomposition, topology=DeploymentTopology.T1) == ()
+
+	def test_an_undecomposed_contract_refuses_nothing_and_still_loses_a_level(self) -> None:
+		"""A contract with no decomposition has no class to refuse, so the refusal list is
+		empty — but the *modifier* still applies through the contract's own ceiling.
+		Without this, "not yet decomposed" would be a way to escape §5.4 entirely."""
+		strong = one_clause_contract("the ledger records entries", command="true")
+
+		assert refused_by_topology(strong, None, topology=DeploymentTopology.T1) == ()
+		assert module_autonomy(strong, None, topology=DeploymentTopology.T1) < strong.ceiling
+
+
+class TestTheRefusalReachesTheGate:
+	"""FR-031's refusal is a *gate check*, not only a function.
+
+	A control that exists is not a control that is applied. ``refused_by_topology``
+	being correct says nothing about whether a delivery that a topology refuses can be
+	approved — so what is asserted here is the path from the refusal to the gate. No
+	separate enforcement was written: the check is a machine check and ``approve_deploy``
+	already raises on any failed machine check, which is exactly the property worth
+	confirming rather than assuming.
+	"""
+
+	def _a_delivery(
+		self,
+		*,
+		topology: DeploymentTopology,
+		override: str | None = None,
+	) -> DeliveryReport:
+		"""A whole report for a contract whose only module class is L4 (G1)."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		decomposition = propose(contract)
+		assert MODULE_CLASS_CEILING[decomposition.modules[0].module_class] is AutonomyLevel.L4, (
+			"the fixture must propose the class FR-031 is about"
+		)
+		return report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=decomposition,
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			topology=topology,
+			topology_configured=True,
+			topology_override=override,
+		)
+
+	def _refusal_check(self, rendered: DeliveryReport) -> GateCheck:
+		return next(
+			check
+			for check in rendered.checks
+			if check.name == "topology_refuses_l4_at_a_degraded_deployment"
+		)
+
+	def test_an_l4_class_fails_the_check_at_t1(self) -> None:
+		"""The refusal is a failed machine check, so it is not waivable by approving: a
+		deploy over this report is refused, and refused by the check rather than by a
+		sentence in a document."""
+		rendered = self._a_delivery(topology=DeploymentTopology.T1)
+
+		assert self._refusal_check(rendered).passed is False
+		assert rendered.passed is False
+		assert "topology_refuses_l4_at_a_degraded_deployment" in {
+			check.name for check in rendered.failed
+		}
+
+	def test_the_same_contract_passes_the_check_at_the_baseline(self) -> None:
+		"""The other direction, and it is what makes the first a deployment refusal
+		rather than a general one: at T2 the identical contract and decomposition pass.
+
+		Only the refusal check is asserted green. The report as a whole also carries the
+		artefact check, and no root is named here, so the two owed artefacts are absent
+		by design — a test that asserted ``report.passed`` would be asserting the
+		fixture wrote files it deliberately did not write.
+		"""
+		rendered = self._a_delivery(topology=DeploymentTopology.T2)
+
+		assert self._refusal_check(rendered).passed is True
+		assert "topology_refuses_l4_at_a_degraded_deployment" not in {
+			check.name for check in rendered.failed
+		}
+
+	def test_a_recorded_override_is_what_fr_031_asks_for_instead(self) -> None:
+		"""FR-031's alternative is an *explicit operator override*, and the override has
+		to name who accepted it: an unnamed override is indistinguishable from the silent
+		downgrade the requirement forbids. The name reaches the check's own detail, which
+		is what makes the log's record of it checkable rather than a flag that was set.
+
+		The refusal's *own words* stay in the detail, and they should: what was refused is
+		part of the record of what was accepted. What must not stay is the instruction to
+		do the thing the operator has already done — a check that still says "record an
+		override" over a recorded override is one a reader learns to skim.
+		"""
+		rendered = self._a_delivery(topology=DeploymentTopology.T1, override="ada")
+
+		check = self._refusal_check(rendered)
+		assert check.passed is True
+		assert "ada" in check.detail
+		assert "Record an explicit operator override" not in check.detail
+		assert "L4" in check.detail, "what was refused is still named"
+
+
+class TestTheReportStatesWhereItRan:
+	"""FR-030/FR-042: the topology, its isolation and its modifier, on the report."""
+
+	def test_the_statement_names_all_three_things_fr_030_asks_for(self) -> None:
+		"""A modifier reported without its isolation is a number to trust rather than a
+		fact to check, which is R2's failure mode. The three are joined in one function
+		so a report, a gate check and a rendered document cannot disagree."""
+		stated = topology_statement(DeploymentTopology.T2, configured=True)
+
+		assert "T2" in stated
+		assert TOPOLOGY_ISOLATION[DeploymentTopology.T2] in stated
+		assert "-1" not in stated, "T2 is baseline, and the statement must not read as lowered"
+
+	def test_an_undeclared_topology_says_so_rather_than_reading_as_a_choice(self) -> None:
+		"""FR-042's requirement in one assertion: the dev instance "must report its
+		degraded ceiling rather than silently behaving as if it were T2". A factory that
+		never declared a topology and one that chose T1 both report T1, and only the
+		report can tell an operator which they have."""
+		declared = topology_statement(DeploymentTopology.T1, configured=True)
+		undeclared = topology_statement(DeploymentTopology.T1, configured=False)
+
+		assert declared != undeclared
+		assert "not declared" in undeclared
+		assert "not declared" not in declared
+
+	async def test_a_rendered_report_carries_the_topology_and_its_checks(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""End to end: the field, the modifier applied to the modules' number, and both
+		topology checks present. The checks are asserted by name because a report that
+		carried the field but no check would state a premise nothing acted on.
+
+		The level is asserted as an *equality with the pure function* rather than against
+		a constant: what class the synthetic clauses land in is the classifier's business
+		and not this test's, and pinning it here would make a classification change look
+		like a topology regression. What is under test is the seam — that the number on
+		the report is the number for the topology the report names. §5.4's arithmetic
+		itself is tested directly above, on contracts chosen to reach L4.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(service, commands="true")
+		await specify_and_approve(service, contract_id)
+		await decompose_and_approve(service, contract_id)
+		plan = await service.compile_plan(contract_id)
+
+		report = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
+
+		names = {check.name for check in report.checks}
+		assert "topology_ceiling_applied" in names
+		assert "topology_refuses_l4_at_a_degraded_deployment" in names
+		assert report.topology is DeploymentTopology.T1
+		assert report.topology_configured is False, (
+			"the synthetic service declares no topology, so the report must say the "
+			"degraded default is in use (FR-042)"
+		)
+
+		contract = await service.contract_by_id(contract_id)
+		decomposition = await service.require_approved_decomposition(contract_id)
+		assert report.module_autonomy == module_autonomy(
+			contract, decomposition, topology=report.topology
+		), "the modules' number on the report must be the one this topology gives (FR-030)"
+		assert report.module_autonomy <= module_autonomy(
+			contract, decomposition, topology=BASELINE
+		), "§5.4's T1 modifier is -1, so T1 can never report a higher number than T2"
+
+	async def test_a_declared_topology_reaches_the_report(self, home: Path, tmp_path: Path) -> None:
+		"""The configuration seam, from the service rather than the CLI: a deployment
+		that declares T2 reports T2, an unmodified ceiling, and says it declared one.
+
+		The service that declared T2 and the one that declared nothing run the *same*
+		pipeline over the same state directory, so the two reports differ in the
+		topology fields and nothing else — which is what makes the comparison evidence
+		about the seam rather than about two fixtures.
+		"""
+		undeclared = synthetic_service(home, tmp_path, "complete")
+		await undeclared.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(undeclared, commands="true")
+		await specify_and_approve(undeclared, contract_id)
+		await decompose_and_approve(undeclared, contract_id)
+		plan = await undeclared.compile_plan(contract_id)
+
+		service = FactoryService(
+			home=home,
+			specs={"synthetic": base_spec(tmp_path, "complete")},
+			topology=DeploymentTopology.T2,
+		)
+		report = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
+		at_t1 = await undeclared.render_delivery(
+			plan.id, root=_a_delivery_root(tmp_path, "delivery-at-t1")
+		)
+
+		assert report.topology is DeploymentTopology.T2
+		assert report.topology_configured is True
+		assert report.module_autonomy > at_t1.module_autonomy, (
+			"the whole point of declaring T2 is that the ceiling is not T1's: §5.4's "
+			"modifier is -1 at T1 and 0 at T2"
+		)
+
+	async def test_the_topology_reaches_the_oracle_report_too(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-030 says "every oracle report", not only the delivery. A verdict rendered
+		under T1 and one rendered under T2 can support different levels for the same
+		clause, so a verdict carrying only the level could not be told from the other."""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		_, contract_id = await elicitation_to_contract(service, commands="true")
+
+		report = await service.verify_contract(contract_id)
+
+		assert report.topology is DeploymentTopology.T1
+		assert report.topology_configured is False
 
 
 # --------------------------------------------------------------------------- #

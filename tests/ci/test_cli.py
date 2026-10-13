@@ -1948,6 +1948,96 @@ class TestTheDeliverVerb:
 		assert "no verdict was ever rendered" in result.output
 
 
+class TestTheTopologySeam:
+	"""§5.4's topology through the configuration seam (FR-124, FR-042, FR-031).
+
+	The seam is the part a deployment actually sets, and its two failure modes are the
+	ones this class covers: a topology nobody declared must report the *degraded* default
+	and say that is what happened, and a malformed value must be refused rather than
+	silently defaulted — a typo that quietly picks T1 would lower every ceiling in the
+	deployment and look exactly like a deployment that never configured anything.
+	"""
+
+	def test_an_undeclared_topology_reports_t1_and_says_it_was_not_declared(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-042's own words: the dev instance "must report its degraded ceiling rather
+		than silently behaving as if it were T2". Silence is the failure — a deployment
+		reporting T1 with no note reads as a choice someone made."""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "topology: T1" in result.output
+		assert "no topology was declared" in result.output
+		assert "SOFACT_TOPOLOGY" in result.output, "the message must name the knob"
+
+	def test_a_declared_topology_is_reported_without_the_warning(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The other arm, and it is what makes the first a statement about *this*
+		deployment rather than a line the CLI always prints."""
+		monkeypatch.setenv("SOFACT_TOPOLOGY", "T2")
+
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "topology: T2" in result.output
+		assert "no topology was declared" not in result.output
+		assert "ceiling modifier 0" in result.output
+
+	def test_a_malformed_topology_is_refused_rather_than_defaulted(
+		self, home: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A typo that changes nothing and reports success is the failure mode a config
+		seam has, and here it would be worse than usual: T1 is the *degraded* default, so
+		an unrecognised value would silently lower every ceiling in the deployment while
+		the operator believed they had set the product target.
+
+		The refusal is not scoped to ``deliver``: the topology is read when a service is
+		built, so a bad value refuses the *first* verb that builds one. That is the
+		stronger behaviour — the deployment is misconfigured, and finding out at the
+		delivery rather than at the start would be finding out after the work.
+		"""
+		monkeypatch.setenv("SOFACT_TOPOLOGY", "T5")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot read SOFACT_TOPOLOGY" in result.output
+		assert "T4" in result.output, "the refusal must list what is accepted"
+		assert "Traceback" not in result.output
+
+	def test_the_topology_is_case_insensitive_but_not_fuzzy(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``t2`` is accepted because a shell variable's case is not a decision, and
+		``T2 `` is accepted because a trailing newline from a file is not one either."""
+		monkeypatch.setenv("SOFACT_TOPOLOGY", " t2 ")
+
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "topology: T2" in result.output
+
+	def test_the_override_flag_is_wired_to_the_gate(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""FR-031's override has to name who accepted it, so the flag takes a value
+		rather than being a switch.
+
+		What this asserts is that the flag *reaches* the report — the check is printed
+		and the run succeeds. It cannot assert the override's effect, because the
+		synthetic contract proposes no L4 module class and so nothing is refused for it
+		to override; the semantics are tested against a real L4 fixture in
+		``test_delivery.TestTheRefusalReachesTheGate``, and duplicating that here with a
+		fixture that cannot reach the case would be a test of the fixture.
+		"""
+		result = _delivered(home, tmp_path, monkeypatch, "--override-topology", "ada")
+
+		assert result.exit_code == 0, result.output
+		assert "topology_refuses_l4_at_a_degraded_deployment" in result.output
+
+
 class TestTheDeployVerb:
 	def test_no_report_yet_is_a_message_not_a_traceback(self, home: Path) -> None:
 		result = RUNNER.invoke(app, ["--home", str(home), "deploy"])

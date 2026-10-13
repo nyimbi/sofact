@@ -25,6 +25,7 @@ from sofact.views import (
 	Clause,
 	ClauseVerdict,
 	Contract,
+	DeploymentTopology,
 	Evidence,
 	EvidenceKind,
 	OracleDeclaration,
@@ -235,6 +236,8 @@ def verify(
 	*,
 	run_id: str | None = None,
 	cache_key: str = "",
+	topology: DeploymentTopology = DeploymentTopology.T1,
+	topology_configured: bool = False,
 ) -> VerificationReport:
 	"""Render a verdict for every clause of ``contract``.
 
@@ -280,6 +283,8 @@ def verify(
 		contract_hash=contract.content_hash,
 		weakest_oracle_rank=contract.weakest_oracle_rank,
 		ceiling=contract.ceiling,
+		topology=topology,
+		topology_configured=topology_configured,
 		verdicts=verdicts,
 		at=now(),
 		run_id=run_id or "",
