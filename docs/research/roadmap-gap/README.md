@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1150 passed, 0 failed** (2026-10-13, after ADR-0050).
+`tests/ci` at the last refresh: **1162 passed, 0 failed** (2026-10-13, after ADR-0051).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -42,7 +42,7 @@ closed since carry their date.
 | FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
 | FR-062 every phase emits a durable artifact | **Implemented** (2026-10-13, ADR-0037) | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), P2 emits `SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`, P1 emits `SOURCE_LEDGER_RECORDED` (FR-070/ADR-0035) **and now `RESEARCH_CLASSIFIED`** (FR-068/ADR-0037), so every phase P0–P3 has an artefact a resume lands on. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
-| FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:231`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
+| FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:763`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
 | FR-066 elicitation proposes no implementation | **Implemented** | `_SHARED_CONSTRAINTS` (`planner.py:110`) + `draft_stems` polarity (`elicitation.py:254`); `test_polarity_follows_the_dimension` (`test_elicitation.py:281`). |
 | FR-067 each clause carries `confidence` and `verification_method` | **Partly** | `Clause` (`views.py:351`) carries **neither**; ambiguity is not quantified per clause. `test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite* rule. |
@@ -83,15 +83,15 @@ closed since carry their date.
 | FR-102 attempt telemetry | **Partly** | Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`); `test_a_step_runs_and_is_recorded` (`test_service.py:525`). **No attempt-level aggregation.** |
 | FR-103 oracle manufacturing from contract structure | **Partly** | `suggest_oracle` (`contract.py:46`) proposes a class and a command from clause polarity; `test_negative_clauses_suggest_a_property_and_positive_ones_a_contract` (`test_contract.py:64`). No test *generation*, no rank ordering, no mutation. |
 | FR-104 ranks 1–2 mandatory above L2 | **Partly, and it conflicts with §14** | `STRONG_ORACLE_MAX_RANK` (`views.py:269`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. **The code is right and the requirement is the outlier:** FR-104 says ranks 1–2 are mandatory above L2, but §14's own module-class table puts **G3 (API/service) and G4 (persistence) at L3 with rank-3 contract tests** — the same L3 `ceiling_for_rank(3)` grants. Read literally, FR-104 would make §14's G3 and G4 unreachable. Resolving it needs a spec decision (narrow FR-104 to G7-class modules, or lower §14's G3/G4), not a code change; recorded here so the conflict is not mistaken for a missing cap. |
-| FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:407`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
+| FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:957`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
 | FR-106 operator examples held out | **Not built** | No holdout mechanism. |
 | FR-107 adversarial audit of oracles | **Not built** | No code. |
 | FR-108 per-module ground-truth debt | **Implemented** | One measure, `Contract.uncovered_clauses` (`views.py:962`), read by `Contract.ground_truth_debt` and by the cap; `contract.ground_truth_debt` delegates to it. The set is FR-108's own: **executable *and* rank ≤ 5** (`COVERING_ORACLE_MAX_RANK`), because FR-103's table calls rank 6–7 "sample, not coverage". `test_debt_counts_a_weak_oracle_even_when_it_runs` (`test_contract.py`). |
-| FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:986`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
+| FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:982`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
 | FR-110 O8 Integration oracle class | **Implemented (2026-10-13, ADR-0051) — as a P7 check, not an enum member** | `check_boundary_contracts` (`integration.py`), reported as the `boundary_contracts` row; `IntegrationFindingKind.UNSATISFIED_BOUNDARY_CONTRACT`; FR-110 in `INTEGRATION_REQUIREMENTS`. `OracleClass` keeps its **7** members deliberately: every member is a *per-clause* shape (a `Clause` field, ranked, mapped by `_STEP_FOR_ORACLE` to the P5 session that discharges that one clause), and FR-110's own premise is that per-module verification "structurally cannot detect cross-module incoherence" — so O8 cannot be one of them. The gap was real and it was at P7: a consumer could import a **declared** dependency and call a name the producer never declared, and FR-113 (edge declared) and FR-112 (producer matches *its own* declaration) both passed. `test_the_neighbours_pass_while_the_boundary_fails` (`test_integration.py`). |
-| FR-111 P7 build order | **Implemented** | `check_build_order` (`integration.py:286`); `test_a_module_built_before_its_dependency_is_a_finding` (`test_integration.py:331`). |
-| FR-112 empty public-API diff | **Implemented** (2026-10-12, ADR-0027) | `check_interface_conformance` (`integration.py:390`), `public_surface` (`:336`), `Module.surface` (`views.py:510`); `test_a_declared_name_the_build_does_not_expose_is_a_finding` (`test_integration.py:422`), `test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it` (`:513`). Discharged **only when a module declares a surface** — a proposal derives none, so the default report still names FR-112. |
-| FR-113 no module reaches another's internals | **Implemented** | `check_imports` (`integration.py:183`); `test_a_module_reaching_another_without_declaring_it_is_a_finding` (`test_integration.py:157`). |
+| FR-111 P7 build order | **Implemented** | `check_build_order` (`integration.py:650`); `test_a_module_built_before_its_dependency_is_a_finding` (`test_integration.py:331`). |
+| FR-112 empty public-API diff | **Implemented** (2026-10-12, ADR-0027) | `check_interface_conformance` (`integration.py:754`), `public_surface` (`:700`), `Module.surface` (`views.py:510`); `test_a_declared_name_the_build_does_not_expose_is_a_finding` (`test_integration.py:422`), `test_a_declared_surface_discharges_fr_112_and_the_report_stops_naming_it` (`:513`). Discharged **only when a module declares a surface** — a proposal derives none, so the default report still names FR-112. |
+| FR-113 no module reaches another's internals | **Implemented** | `check_imports` (`integration.py:216`); `test_a_module_reaching_another_without_declaring_it_is_a_finding` (`test_integration.py:157`). |
 | FR-114 minimum violating set | **Implemented** | `attribute_files` (`integration.py:87`), `IntegrationReport.violating_modules` (`views.py:1348`); `test_the_repair_scope_is_the_findings_union_and_never_the_plan` (`test_integration.py:571`). |
 | FR-115 system model conformance | **Implemented** (2026-10-13, ADR-0038) | `check_model_conformance` (`integration.py`), `SystemCriterion`/`SystemEntity.clause_ids` (`views.py`); `TestTheSystemModelConformance` (6 tests), `TestTheIntegrateVerb` (`test_cli.py`, 5 tests). Discharged when the approved specification declares a model whose entities a module owns — relationships and invariants are reported as **not** conformed. |
 | FR-116 system-level acceptance criteria | **Implemented** (2026-10-13, ADR-0038) | `check_system_criteria` (`integration.py`), `Specification.system_criteria` (`views.py`), `--criterion` (`cli.py`); `TestTheSystemCriteria` (8 tests). A criterion spans ≥2 clauses and is satisfied only when every one carries a `SATISFIED` verdict; the verdict per clause is the worst in the log. |
@@ -211,12 +211,12 @@ bound) is **partly** (per-step only).
    `sandboxable`, still absent for both harnesses — and it does not bound egress
    (FR-152). A store that is contained and a child that is not are both true at once.
 3. **No oracle manufacturing and no measured oracle strength (FR-103–107, FR-008–
-   011, FR-110).** `suggest_oracle` picks a class from clause polarity; nothing
+   011).** `suggest_oracle` picks a class from clause polarity; nothing
    generates a test, nothing measures whether an oracle measures anything, and the
-   rank that sets every ceiling is a declaration the operator made. O8 does not
-   exist as a class. This is the requirement the product's own thesis rests on
-   (§1.1 capability 3). **Blocker: manufacturing needs a target language, which
-   D5 leaves open and ADR-0025 records as out of scope.**
+   rank that sets every ceiling is a declaration the operator made. This is the
+   requirement the product's own thesis rests on (§1.1 capability 3). **Blocker:
+   manufacturing needs a target language, which D5 leaves open and ADR-0025 records
+   as out of scope.**
    **Narrowed 2026-10-13 (ADR-0050)**, and the narrowing is the half that needed no
    target language: *accounting* for coverage is now correct where it was not.
    FR-108 and FR-109 read one predicate — executable **and** rank ≤ 5 — so a rank-1
@@ -225,6 +225,16 @@ bound) is **partly** (per-step only).
    half: nothing **manufactures** an oracle, and FR-105's measured strength is still
    a declaration rather than a measurement. Manufacturing a rank-1 property test from
    an invariant is exactly the step that needs D5's target language.
+   **Narrowed again 2026-10-13 (ADR-0051).** FR-110 was listed here as "O8 does not
+   exist as a class", and the class was the wrong object to want. Every `OracleClass`
+   member is a per-clause shape — ranked, mapped to the P5 session that discharges
+   *one* clause, with `propose` giving each clause exactly one owning module — while
+   FR-110's own premise is that per-module verification cannot see across a boundary.
+   O8 is therefore a P7 check, and it now runs: `check_boundary_contracts` asks
+   whether a consumer that reached across a **declared** edge reached for a name the
+   producer ever declared. FR-113 and FR-112 each held half of that question and
+   neither asked it, so a system could pass both and not run. O8 needs no target
+   language, which is why it came out of the blocked set.
 4. ~~**No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).**~~
    **Closed 2026-10-13 (ADR-0040), except FR-120's delivered-system half.** The report, the deploy gate and the
    Mode M handover are built: `DeliveryReport`'s five FR-118 statements are five required
