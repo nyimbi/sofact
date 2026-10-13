@@ -3,7 +3,6 @@
 - **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** FR-120, FR-117, FR-119, FR-086, FR-142, FR-161, NFR-024, D18;
-  [ADR-0005](0005-the-factory-does-not-run-the-delivered-system.md),
   [ADR-0040](0040-a-delivery-report-states-five-things-and-its-gate-is-human.md)
 
 ## Context

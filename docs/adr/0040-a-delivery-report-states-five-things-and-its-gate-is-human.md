@@ -4,7 +4,7 @@
 - **Date:** 2026-10-13
 - **Related:** FR-117, FR-118, FR-119, FR-120, FR-121, FR-086, FR-108, FR-122,
   FR-123, FR-124, FR-126, FR-082, §1.5, §11, §13, §14;
-  [ADR-0004](0004-the-factory-does-not-write-code.md),
+  [ADR-0004](0004-delegate-the-coding-loop-to-an-external-harness.md),
   [ADR-0005](0005-no-container-runtime.md),
   [ADR-0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md)
 
@@ -211,8 +211,9 @@ factory owes.**
   would get a taxonomy for building rather than for maintaining.
 * **`DeliveryReport.plan_id: UUID7 | None`.** Refused: it forced a `""` into a UUID7
   field, a hole no caller can reach because a report is only ever rendered for a plan.
-* **Deploying.** Refused in decision 17, and by ADR-0004: SoFact produces specifications
-  and verifies systems; it does not run releases.
+* **Deploying.** Refused in decision 17 and by §1.5's "Autonomous production deploy"
+  non-goal: SoFact produces specifications and verifies systems; it does not run
+  releases.
 
 ## Consequences
 
@@ -286,5 +287,8 @@ factory owes.**
   fifth statement, and the envelope the report measures against.
 * [ADR-0005](0005-no-container-runtime.md) — why the deployable artifact is a decision
   rather than an omission.
-* [ADR-0004](0004-the-factory-does-not-write-code.md) — why `approve_deploy` records a
+* §1.5 ("Autonomous production deploy — blast radius is not machine-bounded for a
+  deploy. Gate P8 is permanent") and decision 17 above — why `approve_deploy` records a
   decision and performs no release.
+* [ADR-0004](0004-delegate-the-coding-loop-to-an-external-harness.md) — why the factory
+  holds no coding loop, and so has no mechanism by which to run one.

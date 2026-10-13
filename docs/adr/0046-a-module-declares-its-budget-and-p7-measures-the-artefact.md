@@ -3,7 +3,6 @@
 - **Status:** Accepted
 - **Date:** 2026-10-13
 - **Related:** FR-026, FR-097, FR-050, FR-093, FR-114, FR-113, FR-061, NFR-024, NFR-026;
-  [ADR-0019](0019-the-diff-is-the-artefact.md),
   [ADR-0042](0042-a-modules-definition-of-done-is-derived-from-its-oracles-shape.md)
 
 ## Context
