@@ -52,14 +52,17 @@ from sofact.views import (
 	IntegrityCheck,
 	IntegrityOutcome,
 	IntegritySubject,
+	ModuleBudget,
 	OracleClass,
 	PlanStepKind,
+	ReasoningClass,
 	StepBudget,
 	content_hash,
 	now,
 )
 
 __all__ = [
+	"DEFAULT_MODULE_BUDGET",
 	"DEFAULT_REPAIR_ATTEMPTS",
 	"DEFAULT_STEP_ATTEMPTS",
 	"DEFAULT_STEP_BUDGET",
@@ -92,6 +95,26 @@ DEFAULT_STEP_BUDGET = StepBudget(
 	max_continuations=DEFAULT_STEP_CONTINUATIONS,
 	max_attempts=DEFAULT_STEP_ATTEMPTS,
 )
+
+DEFAULT_MODULE_BUDGET = ModuleBudget(
+	max_files=30,
+	max_loc=2500,
+	reasoning_class=ReasoningClass.THROUGHPUT,
+)
+"""§7.3's module-contract YAML, read back as the default a proposal declares (FR-097).
+
+The numbers are the spec's own worked example — ``max_files: 30``, ``max_loc: 2500``,
+``reasoning_class: throughput`` — and taking them from there rather than inventing a
+tighter default is the same discipline :data:`~sofact.views.DeliveryEnvelope` states
+about §1.3: a factory whose default quietly differs from the spec's stated figure leaves
+an operator comparing a build against numbers the factory never used.
+
+They are a *default for a proposal*, not a licence to leave the bound undeclared. The
+field is required on :class:`~sofact.views.Module` and FR-097's word is "must declare",
+so a proposal states this budget in the decomposition an operator approves and can revise
+it at the gate; a module built by hand has to say what it may cost. The number is
+therefore always a *declared* one, and the only question is who declared it.
+"""
 
 DEFAULT_REPAIR_ATTEMPTS = 2
 """How many times one refuted clause may be handed back to a producer.

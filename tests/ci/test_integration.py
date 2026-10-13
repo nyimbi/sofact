@@ -29,6 +29,7 @@ from sofact.integration import (
 	check_imports,
 	check_interface_conformance,
 	check_model_conformance,
+	check_module_budget,
 	check_system_criteria,
 	integrate,
 	public_surface,
@@ -49,9 +50,11 @@ from sofact.views import (
 	IntegrationFindingKind,
 	InterfaceMember,
 	InterfaceMemberKind,
+	ModuleBudget,
 	ModuleCheckout,
 	OracleClass,
 	OracleDeclaration,
+	ReasoningClass,
 	SpecificationDraft,
 	StepOutcome,
 	SystemCriterion,
@@ -331,6 +334,177 @@ class TestAttribution:
 
 		assert owned == {}
 		assert orphans == ()
+
+
+# --------------------------------------------------------------------------- #
+# FR-026 / FR-097: the budget a module declared, measured against what it built
+# --------------------------------------------------------------------------- #
+
+
+def budget_of(max_files: int = 30, max_loc: int = 2500) -> ModuleBudget:
+	"""A declared bound a test can make deliberately too small."""
+	return ModuleBudget(
+		max_files=max_files, max_loc=max_loc, reasoning_class=ReasoningClass.THROUGHPUT
+	)
+
+
+class TestTheModuleBudget:
+	def test_a_module_inside_the_budget_it_declared_is_not_a_finding(self) -> None:
+		"""The base case, so a failing test below is a finding and not a broken fixture."""
+		ownership = {"a": ("a.py",)}
+
+		findings = check_module_budget(
+			ownership, {"a": budget_of()}, sources={"a.py": "VALUE = 1\n"}
+		)
+
+		assert findings == ()
+
+	def test_a_module_over_its_file_bound_is_a_finding_scoped_to_that_module(self) -> None:
+		"""FR-026's blast bound, and FR-114's repair scope being the one module."""
+		ownership = {"a": ("a.py", "b.py", "c.py"), "z": ("z.py",)}
+		budgets = {"a": budget_of(max_files=2), "z": budget_of()}
+		sources: dict[str, str] = dict.fromkeys(("a.py", "b.py", "c.py", "z.py"), "VALUE = 1\n")
+
+		findings = check_module_budget(ownership, budgets, sources=sources)
+
+		assert len(findings) == 1, "the module inside its bound must not be reported"
+		assert findings[0].kind is IntegrationFindingKind.MODULE_OVER_BUDGET
+		assert findings[0].modules == ("a",), "the repair scope is the module, never the plan"
+		assert "3 file(s) against a bound of 2 (+1)" in findings[0].detail
+		assert set(findings[0].evidence) == {
+			f"{path}: 1 line(s)" for path in ("a.py", "b.py", "c.py")
+		}, "the evidence is a's three files and not z's"
+
+	def test_a_module_over_its_line_bound_is_a_finding(self) -> None:
+		"""The other half of FR-097's budget: file count alone does not bound review cost."""
+		ownership = {"a": ("a.py",)}
+		sources = {"a.py": "".join(f"VALUE_{n} = {n}\n" for n in range(10))}
+
+		findings = check_module_budget(ownership, {"a": budget_of(max_loc=4)}, sources=sources)
+
+		assert len(findings) == 1
+		assert "10 line(s) against a bound of 4 (+6)" in findings[0].detail
+
+	def test_both_bounds_exceeded_names_both(self) -> None:
+		"""A report that named only the first breach would hide half the repair."""
+		ownership = {"a": ("a.py", "b.py")}
+		sources = {path: "".join(f"V = {n}\n" for n in range(5)) for path in ("a.py", "b.py")}
+
+		findings = check_module_budget(
+			ownership, {"a": budget_of(max_files=1, max_loc=4)}, sources=sources
+		)
+
+		assert len(findings) == 1
+		assert "2 file(s) against a bound of 1 (+1)" in findings[0].detail
+		assert "10 line(s) against a bound of 4 (+6)" in findings[0].detail
+
+	def test_a_blank_line_is_not_counted_and_a_comment_line_is(self) -> None:
+		"""The count is what the factory can take without knowing the language (ADR-0025)."""
+		ownership = {"a": ("a.py",)}
+		sources = {"a.py": "VALUE = 1\n\n\n# a comment\n"}
+
+		findings = check_module_budget(ownership, {"a": budget_of(max_loc=2)}, sources=sources)
+
+		assert findings == (), "two non-blank lines against a bound of two is inside it"
+
+		# And the comment is one of the two: with the bound at one, the same file is over.
+		findings = check_module_budget(ownership, {"a": budget_of(max_loc=1)}, sources=sources)
+
+		assert len(findings) == 1
+		assert "2 line(s) against a bound of 1 (+1)" in findings[0].detail
+
+	def test_a_module_whose_files_were_not_read_is_unmeasured_rather_than_inside(self) -> None:
+		"""NFR-024: a bound nobody could measure must not be reported as met."""
+		ownership = {"a": ("a.py", "gone.py")}
+
+		findings = check_module_budget(ownership, {"a": budget_of()}, sources={"a.py": "V = 1\n"})
+
+		assert len(findings) == 1
+		assert "unmeasured rather than met" in findings[0].detail
+		assert findings[0].evidence == ("gone.py",), "the finding names what it could not read"
+
+	def test_a_module_with_no_declared_budget_is_skipped_rather_than_failed(self) -> None:
+		"""A module absent from the map is not this check's jurisdiction."""
+		ownership = {"a": ("a.py",)}
+
+		findings = check_module_budget(ownership, {"other": budget_of()}, sources={"a.py": "V\n"})
+
+		assert findings == ()
+
+	def test_a_budget_with_no_files_to_measure_is_refused_by_the_assertion(self) -> None:
+		"""An empty map is a caller that measured nothing, which is not a pass."""
+		with pytest.raises(AssertionError):
+			check_module_budget({"a": ("a.py",)}, {}, sources={"a.py": "V\n"})
+
+	def test_the_check_reports_the_budget_it_measured_against(self) -> None:
+		"""The number is printed with the module, because a bound an operator cannot see
+		is a bound nobody can disagree with."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		name = proposal.modules[0].name
+		dispatches = [sealed(module=name, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
+
+		check = next(c for c in report.checks if c.name == "module_budget")
+		assert check.passed
+		assert "FR-026" in check.requirements and "FR-097" in check.requirements
+		assert any(name in line and "file(s) counted against" in line for line in check.covered)
+		assert check.discharged == ("FR-026", "FR-097"), "it measured a module, so it discharged"
+
+	def test_an_oversized_module_fails_the_report(self) -> None:
+		"""FR-061: a budget breach is a hard stop like every other integration finding."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		name = proposal.modules[0].name
+		tight = proposal.model_copy(
+			update={
+				"modules": tuple(
+					m.model_copy(update={"budget": budget_of(max_files=1)}) if m.name == name else m
+					for m in proposal.modules
+				)
+			}
+		)
+		dispatches = [sealed(module=name, files=("a.py", "b.py"), plan=plan)]
+
+		report = integrate(plan, tight, dispatches, sources={"a.py": "V = 1\n", "b.py": "W = 2\n"})
+
+		assert not report.passed
+		assert IntegrationFindingKind.MODULE_OVER_BUDGET in {f.kind for f in report.findings}
+		assert report.violating_modules == (name,), (
+			"FR-114's scope is the one module that overspent"
+		)
+
+	def test_a_module_that_sealed_nothing_has_its_bound_reported_as_unexercised(self) -> None:
+		"""A bound with no artefact is not a bound that was met, and not a failure either."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		built = proposal.modules[0].name
+		dispatches = [sealed(module=built, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
+
+		check = next(c for c in report.checks if c.name == "module_budget")
+		unbuilt = [m.name for m in proposal.modules if m.name != built]
+		assert all(
+			any(f"{name}: sealed nothing" in line for line in check.uncovered) for name in unbuilt
+		)
+
+	def test_the_bound_is_on_the_artefact_and_the_report_says_so(self) -> None:
+		"""FR-026 says "diff size"; this measures the artefact, and must not call it a diff."""
+		contract = two_clause_contract()
+		proposal = propose(contract)
+		plan = compile_plan(contract)
+		name = proposal.modules[0].name
+		dispatches = [sealed(module=name, files=("a.py",), plan=plan)]
+
+		report = integrate(plan, proposal, dispatches, sources={"a.py": "VALUE = 1\n"})
+
+		check = next(c for c in report.checks if c.name == "module_budget")
+		assert any("on the built artefact, not on the diff" in line for line in check.uncovered)
 
 
 # --------------------------------------------------------------------------- #

@@ -929,6 +929,75 @@ MODULE_CLASS_CEILING: dict[ModuleClass, AutonomyLevel] = {
 """Spec §14's table. G7 is L1 *by class* — FR-126 makes it human-authored."""
 
 
+class ReasoningClass(StrEnum):
+	"""The routing class a module's work needs (FR-050, FR-097).
+
+	§10.2's three classes, and the requirement's own point is that this is what a lane
+	declares — "the class they need (reasoning-depth or throughput), not a model name"
+	(FR-050). A model name in a contract would make the contract depend on a vendor, and
+	NFR-026 makes the factory model-agnostic for exactly that reason.
+
+	``EVALUATION`` is in §10.2's table and is marked there as "ideally deterministic
+	tooling, not a model". It is kept because a declared budget that cannot name the
+	class a lane needs is not the declaration FR-097 asks for, and the table's own
+	comment is a reason to prefer a tool, not a reason the class does not exist.
+	"""
+
+	THROUGHPUT = "throughput"
+	"""High-volume, low-depth: test generation, codemods, triage, classification."""
+
+	REASONING = "reasoning"
+	"""Low-volume, depth per token: planning, failure diagnosis, adversarial hacking."""
+
+	EVALUATION = "evaluation"
+	"""Oracle strength, differential analysis — deterministic tooling where possible."""
+
+
+class ModuleBudget(View):
+	"""What one module may cost, declared before it is built (FR-026, FR-097).
+
+	Two requirements wear this type. FR-097 says "every contract must declare an explicit
+	budget (files, LOC, reasoning class)", and FR-026 says a lane must declare a maximum
+	changed-file count and a maximum diff size — "a large diff is unverifiable
+	regardless of oracle results, because review bandwidth is the binding resource".
+	§14 makes a module the Mode G lane, so the two are one declaration over one object,
+	and FR-097's own words are that exceeding it "fails the module and escalates, on the
+	same logic as FR-026".
+
+	Every field is required. A budget with a missing dimension is not a partial budget,
+	it is an undeclared one: the absence of a file cap would read as an unlimited file
+	cap, which is the one default a bound may not have (the argument
+	:data:`MODE_G_CEILING` makes about a cap keyed to input nobody supplied).
+
+	**The bound is on the artefact and not on the diff**, and the difference is a
+	deliberate tightening rather than a substitution. For a module built from nothing —
+	which is what P5 builds, a module that did not exist — the added lines *are* the
+	artefact's lines. The two differ only after a repair, where the diff is smaller than
+	the module; and there a bound on the artefact is the stricter one, because a diff
+	bound would let a module grow without limit across repairs that each stayed inside
+	it. P7 measures the artefact because the attribution it already computes (FR-113's,
+	per module) is what makes the number attributable at all — a repository-wide diff
+	names no module, and FR-114's repair scope needs one.
+	"""
+
+	max_files: int
+	"""The most files this module's steps may seal between them."""
+
+	max_loc: int
+	"""The most lines those files may hold, counted over every one of them."""
+
+	reasoning_class: ReasoningClass
+	"""The class of work this module needs (FR-050). A class, never a model name."""
+
+	@model_validator(mode="after")
+	def _positive_bounds(self) -> Self:
+		if self.max_files < 1:
+			raise ValueError(f"file bound must be at least 1, got {self.max_files}")
+		if self.max_loc < 1:
+			raise ValueError(f"line bound must be at least 1, got {self.max_loc}")
+		return self
+
+
 class Module(View):
 	"""One unit of decomposition: what gets built, and what it may depend on (FR-090).
 
@@ -970,6 +1039,17 @@ class Module(View):
 
 	Empty is a real state and is refused at the gate, not by the type — see
 	:func:`sofact.decomposition.completion_criteria` for why the refusal lives there.
+	"""
+
+	budget: ModuleBudget
+	"""What this module may cost, declared before it is built (FR-026, FR-097).
+
+	Required, with no default, because FR-097's own word is "must declare" and a
+	defaulted budget is an undeclared one that reads as a declaration. A module whose
+	size nobody bounded is exactly the module §7.3's review-bandwidth argument is about,
+	and the type is the only place that refusal costs nothing to enforce: a default here
+	would have to be some number, and any number would be the factory inventing a
+	bound the operator never set.
 	"""
 
 	@model_validator(mode="after")
@@ -2275,6 +2355,15 @@ class IntegrationFindingKind(StrEnum):
 	UNSATISFIED_SYSTEM_CRITERION = "unsatisfied_system_criterion"
 	"""A system-level criterion has no satisfied verdict from any module (FR-116)."""
 
+	MODULE_OVER_BUDGET = "module_over_budget"
+	"""A module's built artefact exceeds the budget its contract declared (FR-026, FR-097).
+
+	The modules are the *minimum violating set* here in the strictest sense: the bound is
+	per module, so the repair scope is exactly the one module that overspent and never the
+	plan. That is what makes FR-026's "fails the module and escalates" a scoped escalation
+	rather than a halt.
+	"""
+
 
 class IntegrationFinding(View):
 	"""One violation, attributed to the modules it implicates (FR-114).
@@ -2300,6 +2389,8 @@ class IntegrationFinding(View):
 
 
 INTEGRATION_REQUIREMENTS: Final[tuple[str, ...]] = (
+	"FR-026",
+	"FR-097",
 	"FR-111",
 	"FR-112",
 	"FR-113",
@@ -2307,11 +2398,16 @@ INTEGRATION_REQUIREMENTS: Final[tuple[str, ...]] = (
 	"FR-115",
 	"FR-116",
 )
-"""Every requirement §10 states, so a check can claim one and a report can see the rest.
+"""Every requirement P7 can discharge, so a check can claim one and a report can see the rest.
 
 The list is the *whole* of P7 rather than the part that is implemented. A report that
 named only what it ran could not distinguish a system that integrates from a system
 nothing was checked on, and the difference is exactly what a green line hides.
+
+FR-026 and FR-097 are here rather than among §10's own numbers because both are bounds on
+a *built module*, and P7 is the only stage that knows which files a module produced
+(FR-113's attribution is the same fact). A bound checked anywhere else would be checked
+against a guess at what the module contains.
 """
 
 

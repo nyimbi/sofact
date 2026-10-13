@@ -32,7 +32,7 @@ from typing import Final
 
 from sofact._uuid7 import uuid7str
 from sofact.envelope import measure
-from sofact.planner import exit_evidence_for
+from sofact.planner import DEFAULT_MODULE_BUDGET, exit_evidence_for
 from sofact.views import (
 	Clause,
 	Contract,
@@ -335,6 +335,12 @@ def propose(contract: Contract) -> Decomposition:
 			interface=_interface(clause),
 			clause_ids=(clause.id,),
 			completion_criteria=completion_criteria(clause),
+			# FR-097's budget, declared here rather than defaulted on the type: a proposal
+			# is the one place the factory can put a number in front of the operator at P3,
+			# and the gate below reports it as a check so the approval covers it. The value
+			# is §7.3's own worked example, so the factory holds a build to the number the
+			# spec printed rather than to one it invented.
+			budget=DEFAULT_MODULE_BUDGET,
 		)
 
 	# A clause whose oracle is SCHEMA or PROPERTY declares a shape or an invariant, and a
@@ -410,6 +416,11 @@ def decomposition_hash(decomposition: Decomposition) -> str:
 				"completion_criteria": list(m.completion_criteria),
 				"clauses": list(m.clause_ids),
 				"depends_on": sorted(m.depends_on),
+				# FR-097's budget is what P7 holds the built module to, so an approval
+				# that did not cover it would approve a module and then measure it against
+				# a bound nobody signed off. A revision that raises a bound is a revision
+				# of the thing approved, which is the distinction FR-094 asks this to make.
+				"budget": m.budget.model_dump(mode="json"),
 			}
 			for m in decomposition.modules
 		]
@@ -560,6 +571,45 @@ def gate(
 				+ ", ".join(
 					f"{k.value}={v}" for k, v in sorted(decomposition.class_distribution.items())
 				)
+			),
+		)
+	)
+
+	# FR-097: every module declares what it may cost. The type makes the field required, so
+	# reaching here means a budget exists — asserted anyway, because a gate that reports a
+	# fact it did not check is the failure this whole module exists to avoid.
+	#
+	# The bound is *reported* rather than thresholded, for the reason FR-091's interface
+	# count is: the spec prints one worked example (§7.3) and no rule that would let a
+	# machine call a different number wrong. What the gate can refuse is a bound that is
+	# *impossible* — each declared surface member has to be defined by the artefact, and a
+	# definition occupies at least one non-blank line, so a module whose own surface needs
+	# more lines than its budget allows can never satisfy its interface. Dispatching P5
+	# against it would spend a session to discover a contradiction the proposal already
+	# contained. (A module that only re-exports could fit more names than lines; such a
+	# module defines nothing and has a different problem, and this floor is the conservative
+	# reading rather than the tight one.)
+	impossible = tuple(
+		f"{m.name}: {len(m.surface)} declared surface member(s) against a budget of "
+		f"{m.budget.max_loc} line(s)"
+		for m in decomposition.modules
+		if len(m.surface) > m.budget.max_loc
+	)
+	checks.append(
+		GateCheck(
+			name="every_module_declares_a_budget",
+			passed=not impossible,
+			detail=(
+				f"all {len(decomposition.modules)} module(s) declare a budget: "
+				+ ", ".join(
+					f"{m.name} {m.budget.max_files}f/{m.budget.max_loc}l/"
+					f"{m.budget.reasoning_class.value}"
+					for m in decomposition.modules
+				)
+				if not impossible
+				else f"{len(impossible)} module(s) declare a budget their own surface "
+				"cannot fit: " + "; ".join(impossible) + ". Such a module is not buildable, "
+				"and the contradiction is in the proposal rather than in the build (FR-097)"
 			),
 		)
 	)

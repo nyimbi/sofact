@@ -1100,6 +1100,14 @@ def _print_decomposition(proposal: Decomposition, result: DecompositionGate) -> 
 	for module in order:
 		typer.secho(f"    {module.name} [{module.module_class.value}]", fg="cyan")
 		typer.echo(f"        {module.interface}")
+		# FR-097: the bound is printed with the module it binds, because an operator
+		# approving at P3 is approving this number. Hiding it in the gate's detail line
+		# would put it where the review happens rather than where the decision is made.
+		typer.secho(
+			f"        budget {module.budget.max_files} file(s), "
+			f"{module.budget.max_loc} line(s), {module.budget.reasoning_class.value}",
+			fg="bright_black",
+		)
 		for criterion in module.completion_criteria:
 			typer.secho(f"        done when: {criterion}", fg="bright_black")
 		if module.depends_on:

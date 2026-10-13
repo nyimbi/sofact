@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from synthetic import (
 	elicitation_to_contract,
 	gated_contract,
@@ -28,17 +29,21 @@ from sofact.decomposition import (
 	gate,
 	propose,
 )
-from sofact.planner import compile_plan
+from sofact.planner import DEFAULT_MODULE_BUDGET, compile_plan
 from sofact.views import (
 	MODULE_CLASS_CEILING,
 	AutonomyLevel,
 	Contract,
 	Decomposition,
 	DecompositionGate,
+	InterfaceMember,
+	InterfaceMemberKind,
 	Module,
+	ModuleBudget,
 	ModuleClass,
 	OracleClass,
 	OracleDeclaration,
+	ReasoningClass,
 )
 
 MakeContract = Callable[..., Contract]
@@ -55,6 +60,7 @@ def module_of(
 	*,
 	depends_on: tuple[str, ...] = (),
 	module_class: ModuleClass = ModuleClass.G1,
+	budget: ModuleBudget = DEFAULT_MODULE_BUDGET,
 ) -> Module:
 	"""A module built directly, so a test can construct a graph the proposer never would."""
 	return Module(
@@ -64,6 +70,7 @@ def module_of(
 		interface=f"{name} interface",
 		clause_ids=clauses,
 		depends_on=depends_on,
+		budget=budget,
 	)
 
 
@@ -385,6 +392,7 @@ class TestTheGateRefuses:
 			"every_requirement_traces_to_a_module",
 			"every_module_cites_a_real_clause",
 			"every_module_has_completion_criteria",
+			"every_module_declares_a_budget",
 			"interface_count_reported",
 			"within_delivery_envelope",
 		}
@@ -509,6 +517,153 @@ class TestTheHashNamesTheArtefact:
 		)
 
 		assert decomposition_hash(revised) != decomposition_hash(proposal)
+
+	def test_the_hash_moves_when_a_modules_budget_changes(
+		self, make_contract: MakeContract
+	) -> None:
+		"""FR-097: the budget is what P7 holds the build to, so the approval must cover it.
+
+		A revision that raised a bound without touching the interface would otherwise hash
+		identically, and P7 would measure a module against a number the operator never saw.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+		proposal = propose(contract)
+		(module,) = proposal.modules
+		revised = proposal.model_copy(
+			update={
+				"modules": (
+					module.model_copy(
+						update={
+							"budget": ModuleBudget(
+								max_files=1,
+								max_loc=10,
+								reasoning_class=ReasoningClass.REASONING,
+							)
+						}
+					),
+				)
+			}
+		)
+
+		assert decomposition_hash(revised) != decomposition_hash(proposal)
+
+
+# --------------------------------------------------------------------------- #
+# FR-097: every module declares what it may cost
+# --------------------------------------------------------------------------- #
+
+
+class TestTheModuleBudget:
+	def test_a_proposal_declares_a_budget_for_every_module(
+		self, make_contract: MakeContract
+	) -> None:
+		"""FR-097's word is "must declare", so a proposal that omitted one is not a proposal."""
+		contract = make_contract(("the api returns 200", oracle()), ("the api logs", oracle()))
+
+		proposal = propose(contract)
+
+		assert all(m.budget == DEFAULT_MODULE_BUDGET for m in proposal.modules)
+		assert DEFAULT_MODULE_BUDGET.max_files == 30, "§7.3's own worked example"
+		assert DEFAULT_MODULE_BUDGET.max_loc == 2500
+		assert DEFAULT_MODULE_BUDGET.reasoning_class is ReasoningClass.THROUGHPUT
+
+	def test_a_module_with_no_budget_is_refused_by_the_type(
+		self, make_contract: MakeContract
+	) -> None:
+		"""No default: a defaulted budget is an undeclared one that reads as a declaration."""
+		contract = make_contract(("the api returns 200", oracle()))
+
+		# Validated from a payload rather than constructed, because the payload is how a
+		# module arrives from outside the factory — and because a missing keyword argument
+		# is a *static* error, which would prove the type checker refuses this rather than
+		# the validator an operator's hand-written module would actually meet.
+		payload = {
+			"id": uuid7str(),
+			"name": "m",
+			"module_class": ModuleClass.G1,
+			"interface": "m interface",
+			"clause_ids": (contract.clauses[0].id,),
+		}
+
+		with pytest.raises(ValidationError, match="budget"):
+			Module.model_validate(payload)
+
+	def test_a_budget_with_a_zero_bound_is_refused(self) -> None:
+		"""A bound of zero files is not a bound, it is a module that may not exist."""
+		with pytest.raises(ValidationError, match="file bound must be at least 1"):
+			ModuleBudget(max_files=0, max_loc=100, reasoning_class=ReasoningClass.THROUGHPUT)
+		with pytest.raises(ValidationError, match="line bound must be at least 1"):
+			ModuleBudget(max_files=10, max_loc=0, reasoning_class=ReasoningClass.THROUGHPUT)
+
+	def test_the_gate_reports_every_modules_declared_budget(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The bound is printed where the approval happens, not only where it is enforced."""
+		contract = make_contract(("the api returns 200", oracle()))
+		proposal = propose(contract)
+
+		check = next(
+			c for c in gate(proposal, contract).checks if c.name == "every_module_declares_a_budget"
+		)
+
+		assert check.passed
+		assert "30f/2500l/throughput" in check.detail
+
+	def test_the_gate_refuses_a_budget_the_modules_own_surface_cannot_fit(
+		self, make_contract: MakeContract
+	) -> None:
+		"""A surface member needs a line to be defined in, so the contradiction is at P3.
+
+		``propose`` cannot produce this — it declares §7.3's 2500 — so the gate is checked
+		against a module built by hand, which is the only way one arrives impossible.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+		module = module_of("m", (contract.clauses[0].id,)).model_copy(
+			update={
+				"surface": tuple(
+					InterfaceMember(name=f"f{n}", kind=InterfaceMemberKind.FUNCTION)
+					for n in range(3)
+				),
+				"budget": ModuleBudget(
+					max_files=1, max_loc=2, reasoning_class=ReasoningClass.THROUGHPUT
+				),
+			}
+		)
+		proposal = decomposition_of(module, contract=contract)
+
+		check = next(
+			c for c in gate(proposal, contract).checks if c.name == "every_module_declares_a_budget"
+		)
+
+		assert not check.passed
+		assert "3 declared surface member(s) against a budget of 2 line(s)" in check.detail
+
+	def test_a_budget_the_surface_fits_is_not_refused(self, make_contract: MakeContract) -> None:
+		"""The complement, so the check is a floor and not a blanket refusal."""
+		contract = make_contract(("the api returns 200", oracle()))
+		module = module_of("m", (contract.clauses[0].id,)).model_copy(
+			update={
+				"surface": tuple(
+					InterfaceMember(name=f"f{n}", kind=InterfaceMemberKind.FUNCTION)
+					for n in range(3)
+				),
+				"budget": ModuleBudget(
+					max_files=1, max_loc=3, reasoning_class=ReasoningClass.THROUGHPUT
+				),
+			}
+		)
+
+		check = next(
+			c
+			for c in gate(decomposition_of(module, contract=contract), contract).checks
+			if c.name == "every_module_declares_a_budget"
+		)
+
+		assert check.passed, "three names in three lines is tight but not impossible"
+
+	def test_a_reasoning_class_is_a_class_and_never_a_model_name(self) -> None:
+		"""NFR-026: a model name in a contract would make the contract depend on a vendor."""
+		assert {c.value for c in ReasoningClass} == {"throughput", "reasoning", "evaluation"}
 
 
 # --------------------------------------------------------------------------- #

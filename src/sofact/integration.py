@@ -66,6 +66,7 @@ from sofact.views import (
 	IntegrationReport,
 	InterfaceMember,
 	InterfaceMemberKind,
+	ModuleBudget,
 	SystemCriterion,
 	SystemModel,
 	VerdictOutcome,
@@ -79,6 +80,7 @@ __all__ = [
 	"check_imports",
 	"check_interface_conformance",
 	"check_model_conformance",
+	"check_module_budget",
 	"check_system_criteria",
 	"integrate",
 	"public_surface",
@@ -88,6 +90,7 @@ INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
 	"build_order",
 	"import_discipline",
 	"interface_conformance",
+	"module_budget",
 	"model_conformance",
 	"system_criteria",
 )
@@ -288,6 +291,102 @@ def check_imports(
 					)
 				)
 	return tuple(findings)
+
+
+def check_module_budget(
+	ownership: dict[str, tuple[str, ...]],
+	budgets: Mapping[str, ModuleBudget],
+	*,
+	sources: Mapping[str, str],
+) -> tuple[IntegrationFinding, ...]:
+	"""Report every module whose built artefact exceeds the budget it declared (FR-026).
+
+	The bound is checked over the files the module's *own steps sealed*, which is the
+	same attribution FR-113 is checked over and the only one the log holds: the branches
+	are cumulative, so a module's branch contains every earlier module's code and reading
+	the tree would charge one module for another's size. ``ownership`` is
+	:func:`attribute_files`' output, so a module that sealed nothing is absent from it
+	and is reported by the build-order check instead of here.
+
+	**The measured quantity is the artefact, not the diff**, and the two are worth telling
+	apart because FR-026's words are "maximum changed-file count and a maximum diff size".
+	For a module P5 built from nothing the added lines *are* the artefact's lines, and the
+	two diverge only after a repair — where the artefact is the larger and therefore the
+	stricter bound, so a module cannot grow without limit across repairs that each stayed
+	inside a diff bound. What the factory cannot do is measure a diff *per module*: a
+	repository-wide diff names no module, and FR-114's repair scope needs a name. So the
+	bound is on the artefact and the report says so rather than calling the number a diff.
+
+	The line count is every non-blank line, comments included. Which lines a comment
+	occupies is a property of the language, and ADR-0025 leaves the language open — a
+	comment-aware count would be a number about a language the factory did not choose.
+
+	A module whose files were not all read is reported as *unmeasured* rather than as
+	within bounds: ``sources`` missing a sealed path means the artefact was not there to
+	measure, and a missing file is not a small one (NFR-024).
+	"""
+	assert budgets, "cannot check budgets without a declared budget per module"
+	findings: list[IntegrationFinding] = []
+	for module in sorted(ownership):
+		budget = budgets.get(module)
+		if budget is None:
+			continue
+		paths = ownership[module]
+		unread = tuple(path for path in paths if path not in sources)
+		if unread:
+			findings.append(
+				IntegrationFinding(
+					kind=IntegrationFindingKind.MODULE_OVER_BUDGET,
+					detail=(
+						f"{module} declared a budget of {budget.max_files} file(s) and "
+						f"{budget.max_loc} line(s) and {len(unread)} of its "
+						f"{len(paths)} sealed file(s) could not be read, so the bound is "
+						"unmeasured rather than met (FR-026, NFR-024)"
+					),
+					modules=(module,),
+					evidence=unread,
+				)
+			)
+			continue
+		lines = sum(_count_lines(sources[path]) for path in paths)
+		over_files = len(paths) - budget.max_files
+		over_lines = lines - budget.max_loc
+		if over_files <= 0 and over_lines <= 0:
+			continue
+		exceeded: list[str] = []
+		if over_files > 0:
+			exceeded.append(
+				f"{len(paths)} file(s) against a bound of {budget.max_files} (+{over_files})"
+			)
+		if over_lines > 0:
+			exceeded.append(f"{lines} line(s) against a bound of {budget.max_loc} (+{over_lines})")
+		findings.append(
+			IntegrationFinding(
+				kind=IntegrationFindingKind.MODULE_OVER_BUDGET,
+				detail=(
+					f"{module} is over the budget its contract declared: "
+					+ "; ".join(exceeded)
+					+ ". A build this size is unverifiable regardless of its oracle results, "
+					"because review bandwidth is the binding resource (§7.3), and the repair "
+					"scope is this module and not the plan (FR-026, FR-114)"
+				),
+				modules=(module,),
+				evidence=tuple(
+					f"{path}: {_count_lines(sources[path])} line(s)" for path in sorted(paths)
+				),
+			)
+		)
+	return tuple(findings)
+
+
+def _count_lines(text: str) -> int:
+	"""Non-blank lines in ``text``, which is what the factory can count without a language."""
+	return sum(1 for line in text.splitlines() if line.strip())
+
+
+def _count_lines_all(sources: Mapping[str, str], paths: tuple[str, ...]) -> int:
+	"""Non-blank lines over several files, for a check's ``covered`` line."""
+	return sum(_count_lines(sources[path]) for path in paths)
 
 
 def _read(root: Path, ownership: dict[str, tuple[str, ...]]) -> dict[str, str]:
@@ -639,8 +738,18 @@ def integrate(
 	of a project whose specification declared neither, and FR-115/FR-116 are then reported
 	as unimplemented rather than as passing — the same distinction FR-112 already draws
 	between an empty diff and no diff.
+
+	The per-module budget FR-026 and FR-097 ask for is read from the **decomposition**
+	rather than taken as a parameter, for the reason :meth:`FactoryService.check_integration`
+	gives about the module graph: a caller that could supply the budget map could supply one
+	that makes an oversized module look within bounds, and the budget is exactly the number
+	the check is supposed to hold the build to. ``Module.budget`` is required, so every
+	module the decomposition names carries one and no module is silently unchecked.
 	"""
 	assert plan.steps, "cannot integrate a plan with no steps"
+	budgets: dict[str, ModuleBudget] = {
+		module.name: module.budget for module in decomposition.modules
+	}
 	ownership, orphans = attribute_files(dispatches)
 	declared = {
 		module.name: {d.name for d in (decomposition.module(i) for i in module.depends_on) if d}
@@ -664,6 +773,15 @@ def integrate(
 	# import check reuses what it read -- two passes over the same files would be two
 	# chances for them to disagree about what a file says.
 	text = sources if sources is not None else (_read(root, ownership) if root else {})
+	# FR-026's bound is checked over the same attribution FR-113 uses, and it needs the
+	# text for the same reason the surface diff does: a line count is a property of bytes.
+	# A caller that supplied neither a root nor sources has not asked for the artefact to
+	# be read, which is a different state from an artefact that is missing -- the first
+	# reports the bound as unexercised, and only the second is a finding.
+	readable = sources is not None or root is not None
+	budget_findings = (
+		check_module_budget(ownership, budgets, sources=text) if ownership and readable else ()
+	)
 	declared_surfaces = {name: surface for name, surface in surfaces.items() if surface}
 	conformance_findings = (
 		check_interface_conformance(ownership, declared=declared_surfaces, sources=text)
@@ -683,6 +801,7 @@ def integrate(
 	findings = (
 		*build_findings,
 		*import_findings,
+		*budget_findings,
 		*conformance_findings,
 		*model_findings,
 		*criterion_findings,
@@ -703,6 +822,19 @@ def integrate(
 	unattributed = tuple(f"{path}" for path in orphans)
 	diffed = tuple(name for name in built if declared_surfaces.get(name))
 	undiffed = tuple(name for name in built if not declared_surfaces.get(name))
+	# A module is *measured* only when it sealed at least one file and every one of them
+	# could be read. A module that sealed nothing has no artefact for a bound to be about,
+	# and one whose files were not read has a bound that is unmeasured rather than met —
+	# both are named in `uncovered` rather than counted as inside the budget (NFR-024).
+	budgeted = tuple(
+		name for name in built if name in budgets and all(path in text for path in ownership[name])
+	)
+	unbuilt = tuple(name for name in sorted(budgets) if name not in built)
+	unread = tuple(
+		name
+		for name in built
+		if name in budgets and not all(path in text for path in ownership[name])
+	)
 
 	checks = (
 		IntegrationCheck(
@@ -733,6 +865,36 @@ def integrate(
 				"relative imports are not resolved, so a reach written as `from . import x` "
 				"is not seen",
 				"a dynamic import (`importlib.import_module`) is not seen",
+			),
+		),
+		IntegrationCheck(
+			name="module_budget",
+			passed=not budget_findings,
+			detail=(
+				f"{len(budgeted)} module(s) measured against the budget their contract "
+				"declared, and every one is inside it (FR-026, FR-097)"
+				if budgeted and not budget_findings
+				else f"{len(budget_findings)} module(s) over the budget their contract declared"
+				if budget_findings
+				else "no module sealed a file, so no budget had an artefact to measure"
+			),
+			requirements=("FR-026", "FR-097"),
+			covered=tuple(
+				f"{name}: {len(ownership[name])} file(s) counted against "
+				f"{budgets[name].max_files}, {_count_lines_all(text, ownership[name])} "
+				f"line(s) against {budgets[name].max_loc}"
+				for name in budgeted
+			),
+			uncovered=(
+				*(f"{name}: sealed nothing, so its bound was not exercised" for name in unbuilt),
+				*(
+					f"{name}: its files were not read, so its bound is unmeasured"
+					for name in unread
+				),
+				"the bound is on the built artefact, not on the diff: a repository-wide "
+				"diff names no module, and FR-114's repair scope needs one",
+				"a blank line is not counted and a comment line is; which lines a comment "
+				"occupies is a property of a language ADR-0025 leaves open",
 			),
 		),
 		IntegrationCheck(

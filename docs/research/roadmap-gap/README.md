@@ -13,9 +13,9 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1020 passed, 0 failed**. The table below was written
-at 725; the verdicts are the part that matters and the ones closed since carry their
-date.
+`tests/ci` at the last refresh: **1063 passed, 0 failed** (2026-10-13, after ADR-0046).
+The table below was written at 725; the verdicts are the part that matters and the ones
+closed since carry their date.
 
 ---
 
@@ -30,7 +30,7 @@ date.
 | FR-012–015 adversarial audit, sampling, exploit metric | **Not built** | No code. |
 | FR-016–020 isolation | **Partly** | No enforced boundary: producer isolation is **asserted in goal text only** (`planner.py:127`, FR-059), and ADR-0005 refuses the container layer FR-019 names. What *is* measured now is the narrower claim a spec makes about its own environment: the `store_isolated` probe row (`harness.py`, `_probe_store_isolated`) runs the same goal twice with `HOME` relocated and the spec's containment variables applied in one arm and withheld in the other, so "an isolation variable is not a boundary" is decided rather than assumed. Measured 2026-10-12 for `claude`: zero files under the isolated arm's `HOME`, three under the control's. |
 | FR-021–023 escape oracle, automatic downgrade | **Not built** | No code. |
-| FR-024–035 routing function, blast bounds, ladder, per-deployment ceilings | **Not built** | No code. |
+| FR-024–035 routing function, blast bounds, ladder, per-deployment ceilings | **Partly** (2026-10-13, ADR-0045, ADR-0046) | The **ceilings** half is built: `DeploymentTopology` with its isolation and signed modifier (`views.py`), the per-module-class refusal (FR-031), and the T1 default (FR-042) — ADR-0045. The **blast bound** half is now declared: `ModuleBudget` (`max_files`, `max_loc`, `reasoning_class`) on every `Module`, checked at P7 as `module_budget` (FR-026, FR-097) — ADR-0046. Still absent: the **routing function** that reads a declared `ReasoningClass` to pick a lane (the class is declared and nothing routes on it), the autonomy **ladder** (FR-024's θ function), and FR-027's T4 blast radius, which ADR-0045 named as the thing T4 unlocks and which this bound does not supply — the budget is declared by the proposer, not derived from a measured radius. |
 | FR-036 per-language mutation/property tooling | **Not built** | Cited once in a spec open-decision; no code. |
 | FR-038 verifier/executor import direction | **Implemented** | `test_verifier_cannot_reach_the_executor` (`test_verification.py:72`) scans this file's imports. |
 | FR-049 model-agnostic | **Implemented** | `SOFACT_MODEL` / `--model` resolved by the harness registry; `test_the_probe_reports_the_model_it_measured` (`test_cli.py:406`). |
@@ -75,7 +75,7 @@ date.
 | FR-094 revisable without invalidating the whole | **Implemented** | Revisions + `decomposition_hash`; `test_approving_a_superseded_revision_is_refused` (`test_decomposition.py:467`). The **rollback verb** the capability map recorded as missing now exists (2026-10-12): `FactoryService.cut` / `sofact rollback --to N` records a `cut.recorded` row and the fold reads through the target (ADR-0034); `TestRollback` (`test_service.py`), `test_a_cut_hides_the_entries_after_its_target` (`test_state.py`). |
 | FR-095 P5 given the contract and only the contract | **Partly** | Goals are compiled from the contract (`compile_plan`, `planner.py:576`) and pinned by hash; the *envelope* the producer may see is not otherwise constrained or checked. |
 | FR-096 contracts frozen before P5, immutable during | **Implemented** | `compile_plan` pins `contract_hash`; `check_integrity` (`planner.py:712`); `test_an_undisturbed_plan_reports_intact` (`test_service.py:1192`). |
-| FR-097 explicit budget (files, LOC, reasoning class) | **Partly** | `StepBudget` (`views.py:1060`) has wall clock, continuations, attempts, tokens. **No** `max_files`, `max_loc`, or reasoning class. |
+| FR-097 explicit budget (files, LOC, reasoning class) | **Implemented** (2026-10-13, ADR-0046) | `ModuleBudget` and `ReasoningClass` (`views.py`), required on `Module.budget` with no default, declared by `propose` from `DEFAULT_MODULE_BUDGET` (§7.3's own worked example: 30 files, 2500 lines, throughput), covered by `decomposition_hash`, reported by the P3 gate check `every_module_declares_a_budget` (`decomposition.py`), measured at P7 by `check_module_budget` (`integration.py`) as a `MODULE_OVER_BUDGET` finding scoped to the one module, and printed by `sofact decompose` (`cli.py`). `StepBudget` keeps the per-session fields it had; the two are different scopes and neither substitutes for the other. `TestTheModuleBudget` (`test_decomposition.py`, `test_integration.py`). |
 | FR-098 three modes incl. bootstrap empty repo | **Partly** | Bootstrap is a plan tier (`planner.py:231`), not an adapter mode; diagnostic mode exists via `repair_plan` (`service.py:1081`). Probe row `bootstrap_empty_repo` (`views.py:1416`) is measured, not exercised. |
 | FR-099 idempotent per task | **Partly** | Stated in the goal text (`planner.py:114`); `test_re_running_the_same_step_is_idempotent` (`test_git.py:158`) covers the git half only. |
 | FR-100 branch per module, never in place | **Implemented** | `ensure_module_branch` (`git.py:139`), `seal_branch` (`:258`); `test_the_branch_is_not_in_place` (`test_git.py:91`), `test_two_steps_of_one_module_share_its_branch` (`:115`). |
