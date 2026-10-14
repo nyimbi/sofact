@@ -29,12 +29,12 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-001–005 declared oracles, read-only corpus, canaries, audit trail, invalidation | **Partly** | `Clause.oracle` required (`views.py:351`), `require_executable` (`contract.py:110`). **FR-004's must-fail canary is now built for the oracle set** (2026-10-13, ADR-0053): `audit_oracles` runs every probeable oracle against an empty workspace and reports one that is satisfied there, which is the canary that cannot move. What remains unbuilt: the **known-good** arm of the canary (a corpus the oracle must pass, which needs FR-002's read-only corpus), oracle-corpus read-only enforcement, and cache invalidation. FR-006's second half is FR-166 (below). |
 | FR-006 no stale result decides a later state | **Implemented** | `verdict_cache_key` (`verification.py:71`); `test_a_different_change_keys_differently` (`test_verification.py:477`), `test_a_completed_dispatch_is_checked_without_a_declaration` (`test_service.py:1127`). |
 | FR-007 O1 alone caps at L2 | **Implemented** | `ceiling_for_rank` (`views.py:209`); `test_rank_maps_to_ceiling` (`test_views.py:97`). |
-| FR-008–011 mutation score per module, thresholds, trend | **Not built** | No mutation-scoring code. Oracle *rank* is a declaration, not a measurement. |
+| FR-008–011 mutation score per module, thresholds, trend | **Partly** (2026-10-14, ADR-0061) | The **score** half is built: `measure_strength` (`mutation.py`) runs a closed, named operator set of `ast.NodeTransformer`s over the module a clause traces to and reports a kill rate, and `VerifiedClause.measured_strength` renders it in the delivery report — the field FR-118 asked for and no code path had ever set. **Not built:** the **thresholds** (θ_lo comparison and the escalation FR-105 names), and the **trend** across history, which is FR-159's instrument. The number is a lower bound and is withheld below `MINIMUM_MUTANTS_FOR_A_NUMBER = 5`, so it is a measurement rather than a gate input; `THETA_GATE_BUILT` is still `False`. |
 | FR-012–015 adversarial audit, sampling, exploit metric | **Not built** | No code. The **oracle-side instrument** FR-107 asks for and FR-012's loop would point at is built (ADR-0053); the loop itself — hacker/fixer roles, 1-in-N sampling at or below L3, 100% above, the exploit-discovery-rate metric trending to zero — is not. |
 | FR-016–020 isolation | **Partly** (2026-10-14, ADR-0060) | The boundary is now **measured and applied**, which is the half that did not exist. `DeploymentBoundary` (`views.py`) carries `mechanism`, `enforced`, `attempted`, `observed`, `probed_at`, `writes_confined` and `deny_read`; `detect_boundary`/`seatbelt_profile`/`wrap_argv`/`boundary_env` (`boundary.py`) run **one real child** that writes inside its directory, tries to write one level above, and tries to open a planted canary in each subtree it must not read. Both process-launch points route through `wrap_argv` — the dispatch (`harness.py`) and the oracle command (`execution.py`) — so the control is applied at every launch rather than at the one that was convenient. **Measured on this host, not assumed:** `sandbox-exec` confines a sibling write; Seatbelt's rules are last-match-wins, so `(allow file-read*)` → `(deny file-read* (subpath "<home>"))` → `(allow file-read* (subpath "<workspace>"))` yields `workspace: READ, ledger: DENIED, holdout: DENIED`; the profile denies egress (`EGRESS_DENIED_OR_DOWN`, `Errno 1`); and a profile naming an *unresolved* path denies nothing, which is why every path is resolved and why that trap has its own test. The ceiling follows the measurement (FR-019's "where one exists"): a measured boundary restores the baseline a degraded declaration gave up, and §5.4's table topping out at 0 is what keeps the modifier space from growing. **Still not built:** FR-016's "no read access to holdouts" is measured only where a subtree is named to deny — the factory passes its own home, and nothing yet enumerates a *per-lane* holdout set; FR-020's blast bound is not read from the topology to change packaging or egress; and a host with no mechanism still runs fully degraded, which is now *reported* rather than silently assumed. `TestTheBoundaryIsMeasured`, `TestTheReadHalfIsMeasuredToo`, `TestTheCeilingFollowsTheMeasurement`, `TestTheBoundaryWrapsEveryLaunch` (`test_boundary.py`, 19 tests), `TestTheTopologySeam` (`test_cli.py`, +2). |
 | FR-021–023 escape oracle, automatic downgrade | **Implemented** (2026-10-13, ADR-0054) | `escape.py` — `measure_escapes`, `lanes_of`, `load_escape_budget`, `ceilings_from` — plus `EscapeEvent`/`EscapeBudget`/`EscapeOverride`/`LaneEscape`/`EscapeReport` (`views.py`), `record_escape`/`record_escape_override`/`escape_report` (`service.py`), `sofact escape` and `sofact escapes` (`cli.py`), the `escapes` machine operation (`api.py`), and an `## Escapes` section in `DELIVERY.md`. **The denominator** is distinct deployed report ids and the **numerator** distinct `defect` values; `deployed_reports` is a field, not a sum of the per-lane rows (one report spanning four lanes is one change). FR-021's band is **derived** from `contract.weakest_oracle_rank`, never stored. FR-023's reduction is one level, non-cumulative, clamped at L0, and **unset is not zero** (no declared budget ⇒ `unbudgeted`, `over_budget=None`). The over-budget check **reports** (`escape_ceiling_applied`, `passed=True`) rather than failing, because a failing check would refuse the very deploy that dilutes the rate back to budget and make FR-023's automatic recovery unreachable — the reduction still binds through `lane_ceilings` into `module_autonomy`. 42 + 14 + 14 tests. |
 | FR-024–035 routing function, blast bounds, ladder, per-deployment ceilings | **Partly** (2026-10-13, ADR-0045, ADR-0046) | The **ceilings** half is built: `DeploymentTopology` with its isolation and signed modifier (`views.py`), the per-module-class refusal (FR-031), and the T1 default (FR-042) — ADR-0045. The **blast bound** half is now declared: `ModuleBudget` (`max_files`, `max_loc`, `reasoning_class`) on every `Module`, checked at P7 as `module_budget` (FR-026, FR-097) — ADR-0046. Still absent: the **routing function** that reads a declared `ReasoningClass` to pick a lane (the class is declared and nothing routes on it), the autonomy **ladder** (FR-024's θ function), and FR-027's T4 blast radius, which ADR-0045 named as the thing T4 unlocks and which this bound does not supply — the budget is declared by the proposer, not derived from a measured radius. |
-| FR-036 per-language mutation/property tooling | **Not built** | Cited once in a spec open-decision; no code. |
+| FR-036 per-language mutation/property tooling | **Partly** (2026-10-14, ADR-0061) | The **per-language manufacturing** half is built and D5 is resolved: `MANUFACTURE_SPECS` names `python`, `typescript` and `rust` as `ManufactureSpec` data, `SOFACT_MANUFACTURE` replaces the table wholesale, and an unknown backend is refused by name rather than falling back to Python. Each backend declares which ranks it builds — Python 1/3/5, TypeScript 3/5, Rust 3 — and refuses the rest by name. **Not built:** no per-language *mutation* engine. The strength instrument is Python-only (`ast`), so `_measured_strengths` filters a module's sealed files to `.py` and a TypeScript or Rust module renders "not measured" rather than a rate over a file the engine did not read. |
 | FR-038 verifier/executor import direction | **Implemented** | `test_verifier_cannot_reach_the_executor` (`test_verification.py:72`) scans this file's imports. |
 | FR-049 model-agnostic | **Implemented** | `SOFACT_MODEL` / `--model` resolved by the harness registry; `test_the_probe_reports_the_model_it_measured` (`test_cli.py:406`). |
 | FR-052–056 fine-tuning, monetization | **Not built** | Prose only (§18.3, §18.5). |
@@ -84,10 +84,10 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-100 branch per module, never in place | **Implemented** | `ensure_module_branch` (`git.py:139`), `seal_branch` (`:258`); `test_the_branch_is_not_in_place` (`test_git.py:91`), `test_two_steps_of_one_module_share_its_branch` (`:115`). |
 | FR-101 escalate with diagnosis, not retry forever | **Implemented** | `repair_plan` bounded per clause; `test_the_loop_is_bounded_and_says_so_when_it_gives_up` (`test_service.py:961`). |
 | FR-102 attempt telemetry | **Implemented (2026-10-14, ADR-0055)** | `measure_attempts` (`telemetry.py`) folds a plan's `RepairAttempt` rows against the `DispatchRecord` each produced, giving the requirement's three nouns at attempt level: attempts, tokens, wall clock. Per-dispatch `tokens_observed`/`wall_clock_seconds`/`continuations_observed` (`views.py:1672`) were already recorded; the gap was the **join**, and it is where the module spends its care — `tokens_observed` is `int \| None` and `None` is *unmeasured*, never zero (NFR-024), so `AttemptTelemetryReport` sums what reported and carries `unmeasured_tokens` with `tokens_complete` saying whether the sum is exact. An attempt whose dispatch is absent (a torn read on an append-only log) is a floor, not a free session; an attempt that never ran is zero spend *and* nothing hidden — different facts, different rows. `discharged` returns `()` when no attempt was made, so a run that repaired nothing lands FR-102 in `not_implemented` rather than printing three green zeros. `sofact attempts` exits non-zero on that empty run. **The defect the suite caught:** the verb asked `latest_plan`, which returns the *revision* a repair authored, while every `RepairAttempt.plan_id` is the **origin** the loop was entered with — so the total was honestly and uselessly empty. `ProjectState.origin_plan` and `FactoryService.origin_plan` resolve it, and `TestTheAttemptsAreFiledUnderTheOriginPlan` asserts the two ids differ rather than merely that a number is non-zero. `TestTheFoldCountsWhatWasMeasured` (3), `TestTheTotalSaysWhatItLeftOut` (4), `TestTheRowTypeRefusesImpossibleSpend` (2), `TestTheVacuousPassIsRefused` (2), `TestTheAttemptsAreFiledUnderTheOriginPlan` (3), `TestTheScopeIsThePlan` (2), `TestTheReportIsAPureFold` (1), `TestPerClauseCounts` (1), `TestTheCliReportsIt` (2) in `test_telemetry.py`. |
-| FR-103 oracle manufacturing from contract structure | **Partly** | `suggest_oracle` (`contract.py:46`) proposes a class and a command from clause polarity; `test_negative_clauses_suggest_a_property_and_positive_ones_a_contract` (`test_contract.py:64`). No test *generation*, no rank ordering, no mutation. |
+| FR-103 oracle manufacturing from contract structure | **Partly** (2026-10-14, ADR-0061) | `manufacture.py` is the seam: a `ManufactureBackend` protocol of three members, a spec table read the way a harness spec is read, and one `ConfiguredManufactureAdapter` parameterised by spec so the gate does not vary by language. The hint is **earned** rather than fabricated — the artefact must resolve inside the module workspace, the argv's artefact element must *be* that path, the file must exist, the command must run, and FR-107's audit re-runs the same argv against a tree holding nothing but the artefact. `manufacture_python.py` builds rank 3 (every declared member present with its declared arity), rank 1 (nothing public is undeclared) and rank 5 (the same check against the model's declared interface, which is FR-083's integration defect seen before P7); TypeScript builds 3 and 5, Rust builds 3. `suggest_oracle` (`contract.py:46`) still proposes the class and abstains on the command; manufacturing adds executability to what it left alone, and a refusal leaves the clause exactly as it was. **Still not built:** ranks 2 and 4 need a declared transition relation and a declared metamorphic relation, which the contract does not carry — deriving a predicate from English prose would be fabrication, so both are refused by name rather than approximated. |
 | FR-104 ranks 1–2 mandatory above L2 | **Partly, and it conflicts with §14** | `STRONG_ORACLE_MAX_RANK` (`views.py:269`) + `ceiling_for_rank` cap the ceiling; nothing *manufactures* a rank-1/2 oracle. **The code is right and the requirement is the outlier:** FR-104 says ranks 1–2 are mandatory above L2, but §14's own module-class table puts **G3 (API/service) and G4 (persistence) at L3 with rank-3 contract tests** — the same L3 `ceiling_for_rank(3)` grants. Read literally, FR-104 would make §14's G3 and G4 unreachable. Resolving it needs a spec decision (narrow FR-104 to G7-class modules, or lower §14's G3/G4), not a code change; recorded here so the conflict is not mistaken for a missing cap. |
-| FR-105 measured strength before P5 | **Partly** | `Contract.weakest_oracle_rank` (`views.py:994`) is a declaration. `test_ceiling_follows_the_weakest_clause` (`test_views.py:166`). Nothing measures. |
-| FR-106 operator examples held out | **Implemented for the context-assembly half (2026-10-13, ADR-0052); the holdout-existence half is not built** | `OracleDeclaration.held_out` (`views.py:905`) derives the holdout from the oracle class, because FR-103's rank-6 source column reads "operator-supplied cases" — so the class *is* the provenance and no `supplied_by` field was added. The factory had the defect FR-106 exists to prevent, reachable twice: `_oracle_lines` (`planner.py:248`) rendered the operator's `description`, `command_hint` and `expect_stdout_contains` into the producer's `verification_surface`, so the goal text printed the answer the *same goal's* boundaries forbade reading (FR-059); and `_command_output` (`verification.py:130`) built the violated reason as `f"stdout did not contain {required!r}"`, which `refutation_diagnosis` joins into the repair goal — so closing the planning door alone left the value arriving one phase later. Both doors are closed and tested independently: `TestAHeldOutOracleIsNamedAndNotDescribed` (6) and `TestTheHoldoutSurvivesTheRepairDoor` (2) in `test_planner.py`, `TestAnOracleIsHeldOutOrNot` (7) in `test_views.py`, 2 in `test_verification.py`. **Still not built:** holdouts *existing* for every lane above L2 and being versioned — nothing manufactures an oracle yet (FR-103, blocked on D5's target language). FR-016 (no read access to holdouts) and FR-019 (isolation by deployment boundary) are **no longer blocked**: the boundary is measured and applied as of 2026-10-14 (ADR-0060), so FR-019's read half is enforced where a mechanism confines reads, and FR-106's own remaining half is the holdout *set* rather than the boundary that protects it. |
+| FR-105 measured strength before P5 | **Partly** (2026-10-14, ADR-0061) | The **measurement** is built: `MutationReport.measured_strength` is `killed / (total - discarded)` over a named closed operator set, `StrengthRefusal` names the five ways it is withheld (`NO_SUITE`, `NO_MODULE`, `MODULE_DID_NOT_IMPORT`, `NO_MUTANTS`, `BELOW_THE_FLOOR`), and `render_delivery(measured_strength=True)` threads it into `VerifiedClause.measured_strength` so FR-118's "by which oracle at which measured strength" is now two facts rather than one plus a disclaimer. **Not built, and the reason the row is Partly:** the **θ_lo comparison and the escalation**. FR-105 says a module below θ_lo "must be reported as unbuildable-at-autonomy and escalated, not built anyway", and θ is D3's calibration on a real repository — so nothing compares the number against a threshold, `THETA_GATE_BUILT` stays `False`, and the number is recorded and rendered rather than gating. The measurement runs at the render and is off by default, because it is the only input to a render that launches processes. |
+| FR-106 operator examples held out | **Implemented for the context-assembly half (2026-10-13, ADR-0052); the holdout-existence half is not built** | `OracleDeclaration.held_out` (`views.py:905`) derives the holdout from the oracle class, because FR-103's rank-6 source column reads "operator-supplied cases" — so the class *is* the provenance and no `supplied_by` field was added. The factory had the defect FR-106 exists to prevent, reachable twice: `_oracle_lines` (`planner.py:248`) rendered the operator's `description`, `command_hint` and `expect_stdout_contains` into the producer's `verification_surface`, so the goal text printed the answer the *same goal's* boundaries forbade reading (FR-059); and `_command_output` (`verification.py:130`) built the violated reason as `f"stdout did not contain {required!r}"`, which `refutation_diagnosis` joins into the repair goal — so closing the planning door alone left the value arriving one phase later. Both doors are closed and tested independently: `TestAHeldOutOracleIsNamedAndNotDescribed` (6) and `TestTheHoldoutSurvivesTheRepairDoor` (2) in `test_planner.py`, `TestAnOracleIsHeldOutOrNot` (7) in `test_views.py`, 2 in `test_verification.py`. **The manufacturing door is now closed too** (2026-10-14, ADR-0061): `ConfiguredManufactureAdapter.manufacture` refuses `OracleClass.EXAMPLE` as its first statement, above the `supports` call and above the backend, because a backend is the part a deployment replaces — so no third-party backend can return a held-out oracle and re-open FR-106 by the manufacturing route. **Still not built:** holdouts *existing* for every lane above L2 and being versioned. FR-016 (no read access to holdouts) and FR-019 (isolation by deployment boundary) are **no longer blocked**: the boundary is measured and applied as of 2026-10-14 (ADR-0060), so FR-019's read half is enforced where a mechanism confines reads, and FR-106's own remaining half is the holdout *set* rather than the boundary that protects it. |
 | FR-107 adversarial audit of oracles | **Implemented (2026-10-13, ADR-0053)** | `audit_oracles` (`audit.py`) runs every probeable oracle in an **empty workspace** via `OracleRunner` and judges it with `verification.verify` — the real runner and the real verifier, so the audit cannot report agreement with itself. An oracle that reports `SATISFIED` there was satisfied without implementing anything; that is the defect and a probe demonstrated it live (rank-1 `PROPERTY` with `command_hint="true"`: 0.0 debt, L4, `covers=True`, satisfied). `sofact audit` exits non-zero on a finding. Two skips are **reported, not passed**: negative clauses (an empty tree satisfies an absence by containing nothing — a true statement about an empty tree, not a weak oracle) and oracles naming no command (FR-108's debt, different remedy). `OracleAuditReport.discharged` returns `()` when nothing was probed, so a contract of intentions lands FR-107 in `not_implemented` rather than printing a green line. `ProjectState.oracle_audits` appended, never keyed. `TestAnOracleThatCannotFailIsAFinding` (6), `TestTheAuditSaysWhatItCouldNotAsk` (7), `TestTheServiceRecordsTheAudit` (5) in `test_audit.py`; `TestTheAuditVerb` (5) in `test_cli.py`. **Not built, and not this row:** FR-012–015's hacker/fixer loop, sampling and exploit metric — this is the oracle-side instrument that loop would point at, not the loop. |
 | FR-108 per-module ground-truth debt | **Implemented** | One measure, `Contract.uncovered_clauses` (`views.py:999`), read by `Contract.ground_truth_debt` and by the cap; `contract.ground_truth_debt` delegates to it. The set is FR-108's own: **executable *and* rank ≤ 5** (`COVERING_ORACLE_MAX_RANK`), because FR-103's table calls rank 6–7 "sample, not coverage". `test_debt_counts_a_weak_oracle_even_when_it_runs` (`test_contract.py`). |
 | FR-109 uncovered clauses cap at L2 | **Implemented (2026-10-13, ADR-0050)** | `Contract.ceiling` (`views.py:1019`) caps at `UNCOVERED_CLAUSE_CEILING` when `uncovered_clauses` is non-empty, so a rank-1 property *intention* no longer grants L4. `sofact contract` names the reason on the line that prints the number. `TestAnUncoveredClauseCapsTheCeiling` (6 tests). |
@@ -181,6 +181,25 @@ the container boundary`). Two rows, not one, which is exactly the 2-row gap betw
 line and the table. Both are Partly now, the line and the table are one number, and that
 number is asserted against the 119 row count rather than trusted.
 
+**The 2026-10-14 B2 unit (ADR-0061) moved two rows, and the arithmetic is stated
+because it is the only way to check it.** FR-008–011 and FR-036 leave **Not built** for
+Partly; FR-103 and FR-105 were already Partly and stay there while their cells change
+from "nothing manufactures" and "nothing measures" to a built seam and a measurement
+with the θ comparison still absent. So Partly rises by two and Not built falls by two:
+`91/22/0/6` becomes **`91/24/0/4`**, re-derived by re-running the classifier over all
+119 rows rather than adjusted by hand. The remaining four Not built rows are FR-012–015,
+FR-052–056, FR-134 and FR-159.
+
+**The FR-103 cell is deliberately left as Partly rather than promoted.** Its first draft
+led with "Implemented for ranks 1, 3 and 5", and the classifier caught it on the run
+that checked the count: this document's counting rule reads the **leading word**, so a
+cell that leads with "Implemented" and names the missing half inside the verdict's own
+qualification is exactly the shape the rule was written to stop — FR-106 and FR-124 are
+the two rows it was written for, and a third would have re-opened the hole from the
+other side. Rank 6 is not "a half still missing": it is a class the factory refuses by
+design (ADR-0061), and ranks 2 and 4 are unbuildable from what a contract carries. That
+is a real limitation and the verdict says so.
+
 The `Implemented` count includes FR-152's row, whose cell reads
 `**Implemented (as a documented refusal)**` — the one verdict spelled with a
 qualification rather than as the bare word, and so the one a prefix match would silently
@@ -190,9 +209,9 @@ trusted.
 | Verdict | n |
 | --- | --- |
 | Implemented | 91 |
-| Partly | 22 |
+| Partly | 24 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 6 |
+| Not built | 4 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
@@ -214,8 +233,8 @@ Closed since the 2026-10-13 refresh: **FR-154** (Partly → Implemented) and **F
 the 2026-10-12 audit called the most valuable learning signal the product produces and
 could not connect to anything; **FR-091** (Partly → Implemented), 2026-10-14, ADR-0059 —
 the row the audit **downgraded on inspection** for want of a test, restored now that the
-minimisation, its rule and its tests exist. The six Not built rows are
-FR-008–011, FR-012–015, FR-036, FR-052–056, FR-134 and FR-159.
+minimisation, its rule and its tests exist. The four Not built rows are
+FR-012–015, FR-052–056, FR-134 and FR-159.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
 restated, so there is nothing to check them against. Of the new ones, **NFR-025
@@ -268,21 +287,25 @@ bound) is **partly** (per-step only).
    is not read from the topology to change packaging. And on a host offering no
    mechanism the factory runs fully degraded — which is now *reported* rather than
    silently assumed, but is still the case this build cannot fix.
-3. **No oracle manufacturing and no measured oracle strength (FR-103–107, FR-008–
-   011).** `suggest_oracle` picks a class from clause polarity; nothing
-   generates a test, nothing measures whether an oracle measures anything, and the
-   rank that sets every ceiling is a declaration the operator made. This is the
-   requirement the product's own thesis rests on (§1.1 capability 3). **Blocker:
-   manufacturing needs a target language, which D5 leaves open and ADR-0025 records
-   as out of scope.**
+3. ~~**No oracle manufacturing and no measured oracle strength (FR-103–107, FR-008–
+   011).**~~ **Closed 2026-10-14 (ADR-0061), except the θ comparison.** The blocker
+   named below — *manufacturing needs a target language, which D5 leaves open* — was
+   the right diagnosis and is now answered: D5 is resolved as Python-first behind a
+   pluggable backend, `manufacture.py` is the seam, and the Python backend builds
+   ranks 1, 3 and 5 while refusing 2, 4, 6 and 7 by name. The hint is **earned** rather
+   than fabricated (the artefact must exist at the path the command names, must run,
+   and must fail against a tree holding nothing but itself), and FR-118's measured
+   strength is now a number on the report rather than a field nothing set. What is
+   still not built is the **θ_lo comparison and the escalation** FR-105 names, which
+   needs D3's calibration on a real repository — so `THETA_GATE_BUILT` stays `False`
+   and the number is recorded rather than gating. `suggest_oracle` picks a class from
+   clause polarity; manufacturing *adds executability* to what it left alone, and a
+   refusal leaves the clause exactly as it was.
    **Narrowed 2026-10-13 (ADR-0050)**, and the narrowing is the half that needed no
    target language: *accounting* for coverage is now correct where it was not.
    FR-108 and FR-109 read one predicate — executable **and** rank ≤ 5 — so a rank-1
    property intention no longer grants L4 and a rank-6 example with a command no
-   longer reports zero debt. What remains blocked is unchanged and is the harder
-   half: nothing **manufactures** an oracle, and FR-105's measured strength is still
-   a declaration rather than a measurement. Manufacturing a rank-1 property test from
-   an invariant is exactly the step that needs D5's target language.
+   longer reports zero debt.
    **Narrowed again 2026-10-13 (ADR-0051).** FR-110 was listed here as "O8 does not
    exist as a class", and the class was the wrong object to want. Every `OracleClass`
    member is a per-clause shape — ranked, mapped to the P5 session that discharges
@@ -305,8 +328,12 @@ bound) is **partly** (per-step only).
    are closed by one derived predicate, `OracleDeclaration.held_out`, applied at both
    renderers. This is the context-assembly half of R8 — "a permission boundary, not a
    prompt instruction" — and it needed no target language, which is why it too came out
-   of the blocked set. FR-106's other half, holdouts *existing* and versioned, is still
-   blocked on the same thing as FR-103: nothing manufactures an oracle to hold out.
+   of the blocked set. **The manufacturing door is closed too (ADR-0061):** the
+   `EXAMPLE` refusal is the seam's first statement, above the backend, so no
+   third-party backend can re-open FR-106 by that route. FR-106's other half, holdouts
+   *existing* for every lane above L2 and being versioned, is still open — the factory
+   now manufactures oracles, and none of them is held out, because rank 6 is exactly
+   the class the factory refuses to build.
 4. ~~**No P8 delivery and no deploy gate (FR-117–121, FR-086, FR-118).**~~
    **Closed 2026-10-13 (ADR-0040), except FR-120's delivered-system half.** The report, the deploy gate and the
    Mode M handover are built: `DeliveryReport`'s five FR-118 statements are five required
@@ -359,8 +386,9 @@ built for.
    total", which read as done. The debt is now a number on the report
    (`EVOLVABILITY_DEBT`, surfaced as `DeliveryReport.evolvability_debt`), the Mode M
    ceiling is a separate constant that no lane may exceed, and the delivery report
-   states the refusal. FR-159's instrument remains unbuilt and D18 remains open — that
-   is the decision the row is *about*, and it is not what was missing.
+   states the refusal. FR-159's instrument remains unbuilt and D18's ceiling question
+   remains open — that is the decision the row is *about*, and it is not what was
+   missing.
 2. **Spec §8.6 vs the code default.** §8.6 resolves D11 as "v1 drives `dsh` as the
    primary harness and `pi` as the second adapter", and ADR-0004's Decision says
    "the first adapter targets `dsh`". `service.py:108` sets

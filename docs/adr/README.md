@@ -73,6 +73,7 @@ than argued. Numbering is sequential and never reused.
 | [0058](0058-the-intent-graph-is-what-the-chain-is-projected-from.md) | The intent graph is what the chain is projected from, and an attribution says which kind it is | Accepted |
 | [0059](0059-the-declared-interface-is-the-surface-grouping-and-the-count-is-checked-against-it.md) | The declared interface is the surface grouping, and the count is checked against it | Accepted |
 | [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md) | The boundary is measured, and the ceiling follows the measurement | Accepted |
+| [0061](0061-manufacturing-earns-the-hint-and-withholds-the-number.md) | Manufacturing earns the hint, and the strength number is withheld below its floor | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -81,6 +82,8 @@ The product specification uses `D<n>` identifiers for open questions. Where a
 
 | Spec id | Resolution | ADR |
 | --------- | ----------- | ----- |
+| D2 — runtime for the build | **Python, and the runtime is the interpreter the factory already runs on.** The factory's dependency set is exactly httpx, pydantic, typer and uuid6, so the runtime is not a choice the factory makes for its own code; D5 is where the *target* language is answered, and this record answers both together because a manufacturing backend and its runtime are one configuration | [0061](0061-manufacturing-earns-the-hint-and-withholds-the-number.md) |
+| D5 — target language for manufactured oracles | **Python first, behind a pluggable backend.** `MANUFACTURE_SPECS` names `python`, `typescript` and `rust`, each read the way a harness spec is read and replaceable wholesale by `SOFACT_MANUFACTURE`; an unknown backend is refused by name rather than falling back to Python. The Python backend builds ranks 1, 3 and 5 and refuses 2, 4, 6 and 7 by name, because the factory's only machine-readable signature source is `Module.surface` and a predicate derived from English prose is fabrication | [0061](0061-manufacturing-earns-the-hint-and-withholds-the-number.md) |
 | D9 — container runtime for isolation | **No runtime is required; the boundary is measured where one exists, and the ceiling follows the measurement.** The mechanism is a table with an honest detector (Seatbelt, a container where one is operational *and* an image is configured, and §5.4's degraded modifier everywhere else), and a measured boundary may only *restore* the baseline a degraded declaration gave up — §5.4's table tops out at 0, so the modifier space does not grow. Supersedes [0005](0005-no-container-runtime.md)'s refusal of the confinement layer; the T1 lowering, the trusted-input consequence and the no-*required*-runtime ruling all stand | [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md) |
 | D11 — which goal-mode harness to target | Delegate to an external harness, `dsh` first | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |
 | D15 — how much plugin surface to write in v1 | Withdrawn from v1 scope | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |

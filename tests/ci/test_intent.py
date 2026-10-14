@@ -414,7 +414,12 @@ class TestAnEscapeIsAttributedToTheClauseItImplicates:
 		# A *proper* subset where the lane holds more than one module, so the assertion
 		# cannot be satisfied by equality — `<=` alone passes against a filter that stopped
 		# filtering, which is how this test first read green against that canary.
-		module = decomposition.module_by_name(link.module)
+		# Bound to a local first: the generator's filter is not a narrowing a checker can
+		# carry through to `link.module` at each use, so the assertion has to be on its own
+		# statement or every later read is `str | None` again.
+		named = link.module
+		assert named is not None, "the link was selected for naming a module"
+		module = decomposition.module_by_name(named)
 		assert module is not None
 		assert {a.clause_id for a in narrow} == {
 			node.id for node in graph.clauses_of_module(module.id)

@@ -180,6 +180,8 @@ def chain(
 def verified_and_unverified(
 	contract: Contract,
 	verdicts: Mapping[str, VerdictOutcome],
+	*,
+	strengths: Mapping[str, float] | None = None,
 ) -> tuple[tuple[VerifiedClause, ...], tuple[UnverifiedClause, ...]]:
 	"""FR-118's first two statements, split by the verdict each clause carries.
 
@@ -187,7 +189,18 @@ def verified_and_unverified(
 	both unverified — the second is worse, not better — and the reason says which, because
 	"the oracle ran and could not decide" and "the oracle was never run" need different
 	repairs and FR-118 asks for one list.
+
+	``strengths`` is FR-118's second half — "at which **measured** strength" — keyed by
+	clause id. It is a parameter rather than something this function computes because
+	measuring is an *act*: it launches processes and takes time, while this function is a
+	reading of a log. A render that mutated modules would make two renders of one log
+	disagree, which is the property FR-117's report exists to have.
+
+	A clause absent from the mapping renders as *declared rank, not measured*, which is
+	the honest sentence for a clause nobody measured and the state every clause is in
+	until a measurement is taken.
 	"""
+	measured = strengths or {}
 	verified: list[VerifiedClause] = []
 	unverified: list[UnverifiedClause] = []
 	for clause in contract.clauses:
@@ -199,6 +212,7 @@ def verified_and_unverified(
 					statement=clause.statement,
 					oracle_class=clause.oracle.oracle_class,
 					rank=clause.oracle.rank,
+					measured_strength=measured.get(clause.id),
 				)
 			)
 			continue
@@ -277,12 +291,14 @@ def topology_statement(
 		)
 	modifier = TOPOLOGY_MODIFIER[topology]
 	sign = f"{modifier:+d}" if modifier else "0"
-	return f"{topology.value} ({TOPOLOGY_ISOLATION[topology]}), ceiling modifier {sign}" + (
-		"" if configured else " — **not declared**, so the degraded default is in use"
-	) + (
-		""
-		if boundary is None
-		else f" — a probe measured **no** boundary that held: {boundary.observed}"
+	return (
+		f"{topology.value} ({TOPOLOGY_ISOLATION[topology]}), ceiling modifier {sign}"
+		+ ("" if configured else " — **not declared**, so the degraded default is in use")
+		+ (
+			""
+			if boundary is None
+			else f" — a probe measured **no** boundary that held: {boundary.observed}"
+		)
 	)
 
 
@@ -540,6 +556,7 @@ def report(
 	boundary: DeploymentBoundary | None = None,
 	escapes: EscapeReport | None = None,
 	escapes_recorded: tuple[EscapeEvent, ...] = (),
+	strengths: Mapping[str, float] | None = None,
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -581,7 +598,7 @@ def report(
 	# FR-117 names one; this is the graph it now reads from, so the two cannot drift.
 	intent = build_graph(contract, decomposition, plan, specification)
 	links = intent.project()
-	verified, unverified = verified_and_unverified(contract, verdicts)
+	verified, unverified = verified_and_unverified(contract, verdicts, strengths=strengths)
 	handed = handover(contract, system=system, entry_point=entry_point)
 	# FR-023's reduction reaches the autonomy computation as a pre-computed mapping, so
 	# `module_autonomy` stays pure and the escape arithmetic lives in `sofact.escape` alone.

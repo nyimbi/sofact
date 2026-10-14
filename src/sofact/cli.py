@@ -33,6 +33,11 @@ from sofact.escape import load_deployment_scope, load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.harness import SPECS, HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
+from sofact.manufacture import (
+	ManufactureSpec,
+	load_manufacture_specs,
+	manufacture_spec_for,
+)
 from sofact.service import (
 	FactoryService,
 	refuted_steps,
@@ -218,6 +223,14 @@ _TOPOLOGY_OVERRIDE_OPTION = typer.Option(
 	),
 )
 _REPORT_ID_ARGUMENT = typer.Argument(None, help="The delivery report to gate.")
+_MEASURED_STRENGTH_OPTION = typer.Option(
+	False,
+	"--measured-strength",
+	help=(
+		"Measure each verified clause's oracle strength by mutation (FR-105, FR-118). Off "
+		"by default: it runs the oracle once per mutant, so it is the operator's call."
+	),
+)
 _APPROVE_OPTION = typer.Option(None, "--approve", help="Pass the gate for this report, naming it.")
 _GATE_BY_OPTION = typer.Option("operator", "--by", help="Who is passing the gate (FR-119).")
 _GATE_NOTE_OPTION = typer.Option(None, "--note", help="Why, recorded with the decision.")
@@ -250,6 +263,7 @@ def _service(home: Path | None) -> FactoryService:
 		scope=_configured_scope(),
 		compositions=_configured_compositions(),
 		boundary=_configured_boundary(),
+		manufacture=_configured_manufacture(),
 	)
 
 
@@ -339,6 +353,55 @@ def _configured_boundary() -> tuple[BoundaryMechanism, ...] | None:
 			f"one of {', '.join(sorted(known))} (FR-019)",
 			fg="red",
 		)
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_manufacture() -> ManufactureSpec | None:
+	"""The language this deployment manufactures oracles in, if it declared one (FR-156, D5).
+
+	``None`` means *this deployment manufactures nothing*, which is not the same as
+	"manufacture in Python". The distinction is the one every other reader here makes: a
+	factory that silently adopted a language would write a Python check against a
+	TypeScript module, run it, get a non-zero exit, and report a genuine failure of the
+	module rather than a misconfiguration — which is exactly the failure
+	:func:`~sofact.manufacture.backends_for` refuses by name one layer down.
+
+	The value is a **language name**, not a file path: the built-in table already names
+	`python`, `typescript` and `rust`, and a deployment that wants a fourth language
+	points at its own table with ``SOFACT_MANUFACTURE_SPECS``. Two variables rather than
+	one because they answer two questions — *which language* and *what does that language
+	mean on this host* — and collapsing them would make "use TypeScript" and "here is the
+	`tsc` on this box" the same setting.
+
+	A malformed value is refused rather than defaulted, the same discipline
+	:func:`_configured_topology` uses: a typo that fell back to Python would put a
+	deployment that meant Rust on Python's artefacts with no error, and the operator would
+	have no way to tell the typo from a deliberate Python.
+	"""
+	configured = os.environ.get("SOFACT_MANUFACTURE")
+	if not configured:
+		return None
+	try:
+		return manufacture_spec_for(configured.strip().lower(), _configured_manufacture_specs())
+	except KeyError as exc:
+		typer.secho(f"cannot read SOFACT_MANUFACTURE: {exc.args[0]} (D5)", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_manufacture_specs() -> Mapping[str, ManufactureSpec] | None:
+	"""The manufacturing table this deployment configured, if it configured one (FR-156).
+
+	``None`` means "use the built-in table", which is not the same as an empty one: an
+	empty table names no language to manufacture in, so a misspelled path would otherwise
+	surface as "no such language" rather than "no such file".
+	"""
+	configured = os.environ.get("SOFACT_MANUFACTURE_SPECS")
+	if not configured:
+		return None
+	try:
+		return load_manufacture_specs(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_MANUFACTURE_SPECS: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -3387,6 +3450,7 @@ def deliver_command(
 	system: str | None = _SYSTEM_OPTION,
 	entry_point: str | None = _ENTRY_POINT_OPTION,
 	override_topology: str | None = _TOPOLOGY_OVERRIDE_OPTION,
+	measured_strength: bool = _MEASURED_STRENGTH_OPTION,
 ) -> None:
 	"""Render P8's delivery report (FR-117, FR-118)."""
 	asyncio.run(
@@ -3396,6 +3460,7 @@ def deliver_command(
 			system=system,
 			entry_point=entry_point,
 			override_topology=override_topology,
+			measured_strength=measured_strength,
 		)
 	)
 
@@ -3407,6 +3472,7 @@ async def _deliver(
 	system: str | None,
 	entry_point: str | None,
 	override_topology: str | None,
+	measured_strength: bool,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -3438,6 +3504,7 @@ async def _deliver(
 		system=system,
 		entry_point=entry_point,
 		topology_override=override_topology,
+		measured_strength=measured_strength,
 	)
 
 	typer.secho(f"\ndelivery report {report.id}", fg="cyan", bold=True)
@@ -3499,6 +3566,17 @@ async def _deliver(
 	typer.secho(f"\n  verified (FR-118): {len(report.verified)} clause(s)", fg="cyan")
 	for clause in report.verified:
 		typer.secho(f"    {clause.rendered}", fg="green")
+	if report.verified and not any(c.measured for c in report.verified):
+		# The absence stated once rather than per clause: FR-118 asks for the measured
+		# strength, and a report that printed "declared rank N" beside every clause without
+		# saying why would read as a measurement that happened to be weak.
+		typer.secho(
+			"    none of these was measured. `sofact deliver --measured-strength` scores "
+			"each clause's oracle by mutation (FR-105), which is a lower bound over a "
+			"closed operator set and is withheld below its mutant floor — so a clause "
+			"without a number is one nothing measured, not one that scored zero.",
+			fg="bright_black",
+		)
 	typer.secho(f"\n  unverified (FR-118): {len(report.unverified)} clause(s)", fg="cyan")
 	for clause in report.unverified:
 		typer.secho(f"    {clause.rendered}", fg="yellow")

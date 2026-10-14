@@ -187,6 +187,65 @@ if "writes-work" in mode:
 	# the session left, and a mode that writes nothing cannot tell sealing from no-op.
 	pathlib.Path("produced.py").write_text("VALUE = 1\\n", encoding="utf-8")
 
+if "writes-module" in mode:
+	# A producer that writes the file its *own module* is named after, and it reads that
+	# name off the branch SoFact put it on rather than parsing it out of the goal text.
+	#
+	# FR-118's strength measurement needs a file a module **owns**, and ownership is read
+	# from the seal (`integration.attribute_files`): a producer writing one fixed name
+	# would make every step own the same file, which is a fixture that cannot tell one
+	# module's measurement from another's -- and the delivery would then score a clause
+	# against a file its module did not write. The branch is the honest source because it
+	# is the name the factory itself committed to, one line before the session started.
+	# `.git/HEAD` read directly rather than through `git symbolic-ref`, and both halves of
+	# that are measured. `git` under the dispatch's own boundary fails outright -- "fatal:
+	# Invalid path '<home>': Operation not permitted", because the profile denies reads
+	# above the workspace and git canonicalises its repository root by walking up. And
+	# `branch --show-current` answers the *empty string* on the first step, whose branch is
+	# unborn, so every module wrote the same fallback file and only the bootstrap step
+	# owned anything. HEAD names the ref whether or not it has a commit yet.
+	head = pathlib.Path(".git", "HEAD")
+	branch = (
+		head.read_text(encoding="utf-8").strip().removeprefix("ref: refs/heads/")
+		if head.is_file()
+		else ""
+	)
+	# The branch *tail*, so the file is named after the module rather than after the
+	# factory's own prefix. `sofact/scheduled-reminder-appears` becomes
+	# `scheduled_reminder_appears.py`, which is what `sofact.manufacture.slug` would derive.
+	tail = branch.split("/", 1)[-1].lower()
+	# A branch named from the *step* rather than from a module is the fallback
+	# `git._branch_name` uses for a step no module owns (bootstrap; one spanning two).
+	# Writing a module file there would put it in `orphans`, and a fixture whose only
+	# owned file belonged to nobody would make the measurement return `{}` for a reason
+	# that is about the fixture rather than about the code under test.
+	stem = "" if re.match(r"^\\d{3}-", tail) else re.sub(r"[^a-z0-9_]", "_", tail).strip("_")
+	if stem[:1].isdigit():
+		# The same rule `sofact.manufacture.slug` applies, so a name this fixture writes
+		# is one the factory's own artefact search would find rather than a near miss.
+		stem = f"m_{stem}"
+	# Every mutation operator has to find work here or the measurement is withheld below
+	# its mutant floor: an integer literal, a comparison, a branch, a computed return and
+	# an expression statement. And the first integer is the one the module's own value is
+	# built from, so an off-by-one lands on the number a suite would check.
+	pathlib.Path(f"{stem or 'module'}.py").write_text(
+		'"""A module the synthetic producer writes for the module it was given."""\\n'
+		"\\n"
+		"VALUE = 1\\n"
+		"\\n"
+		"\\n"
+		"def classify(value, limit):\\n"
+		"\\tif value < limit:\\n"
+		'\\t\\treturn "under"\\n'
+		'\\treturn "over"\\n'
+		"\\n"
+		"\\n"
+		"def announce(name):\\n"
+		"\\tprint(name)\\n"
+		'\\treturn "announced"\\n',
+		encoding="utf-8",
+	)
+
 if "inside-marker.txt" in goal:
 	# The sandbox goal: work inside the directory, then *attempt* an escape. Whether the
 	# escape happens is decided by the tool set this child was handed, which is exactly how

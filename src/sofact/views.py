@@ -297,9 +297,144 @@ ORACLE_RANK: dict[OracleClass, int] = {
 	OracleClass.EXAMPLE: 6,
 	OracleClass.GOLDEN: 7,
 }
-"""Rank 1 is strongest. Ranks 1-2 are mandatory above autonomy L2."""
+
+
+class ManufactureRefusalReason(StrEnum):
+	"""Why the factory built no oracle of a requested rank (FR-103, FR-105).
+
+	A named reason rather than a message, because the *reason* is what decides the
+	remedy: ``NO_STRUCTURED_SOURCE`` is retired by declaring the invariant,
+	``NEEDS_A_REFERENCE_RUN`` by building first, and ``UNSUPPORTED_RANK`` by writing a
+	backend. A caller given only prose has to re-derive which of those it is holding.
+
+	Here rather than in :mod:`sofact.manufacture` because a refusal is *recorded*, and
+	what the ledger folds has to be a :class:`View` — while ``manufacture`` imports
+	``views`` and not the other way round. The enum lives beside :data:`ORACLE_RANK`,
+	which is the table it is a statement about.
+	"""
+
+	HELD_OUT = "held_out"
+	"""Rank 6. FR-106's holdout is the operator's example, so the factory manufactures none."""
+
+	UNSUPPORTED_RANK = "unsupported_rank"
+	"""This backend does not build this rank, and does not claim to."""
+
+	NO_STRUCTURED_SOURCE = "no_structured_source"
+	"""The rank needs a declaration the contract does not carry: an invariant, a transition
+	relation, a field set. The clause is prose, and a predicate read out of prose is invented."""
+
+	NO_DECLARED_SURFACE = "no_declared_surface"
+	"""The module declares no public surface, so the check would quantify over nothing.
+
+	FR-090 makes the surface the permitted set, and an empty one is a real state — a
+	proposal derives nothing when the model declares no interfaces. Manufacturing against it
+	would produce a check with an empty domain, which is satisfied by every tree including an
+	empty one. Refusing is what keeps the empty domain from reading as a pass.
+	"""
+
+	NEEDS_A_REFERENCE_RUN = "needs_a_reference_run"
+	"""Rank 7 records a reference run's output, and before P5 there is nothing to run.
+
+	A golden captured now would be the digest of an empty tree, blessed as the expected
+	value — FR-108's ground-truth debt, recorded as though it were coverage.
+	"""
+
+	ARTEFACT_OUTSIDE_WORKSPACE = "artefact_outside_workspace"
+	"""The backend named a path the producer could reach and the factory did not write."""
+
+	ARTEFACT_MISSING = "artefact_missing"
+	"""The backend named a path it did not write."""
+
+	COMMAND_NAMES_ANOTHER_FILE = "command_names_another_file"
+	"""The command's artefact argument is not the path the backend wrote.
+
+	Separate from :attr:`ARTEFACT_MISSING` because the remedy is different and the evidence
+	is different. There the write is missing; here the write happened and the *command* points
+	somewhere else, so the check that would run is not the check that was built — and a spec
+	whose ``run_argv`` is wrong would produce this for every module while every artefact on
+	disk looked correct.
+	"""
+
+	COMMAND_DID_NOT_RUN = "command_did_not_run"
+	"""The command could not be launched, or did not terminate inside the timeout.
+
+	Distinct from a command that ran and failed. "There is no interpreter here" and "the
+	check ran and disagreed" need different repairs, and only the second is a verdict.
+	"""
+
+	VACUOUS = "vacuous"
+	"""The check passed against a tree holding nothing but itself (FR-107).
+
+	This is the refusal that matters. Every other one says the factory could not build a
+	check; this one says it built a check that establishes nothing, which is the defect
+	FR-107 calls "worse than a missing test".
+	"""
+
+
+class ManufactureRefusal(View):
+	"""One clause the factory could not build a check for, and why (FR-105).
+
+	Recorded rather than returned and dropped, because it is the fact that *explains* a
+	clause's remaining ground-truth debt (FR-108): a reader holding only the debt knows
+	that something could not be built and not what, and re-running manufacturing to find
+	out would rewrite files to answer a question about a past state.
+
+	``clause_id`` is what makes it actionable — the remedy is per clause, and a refusal
+	that named only a reason would leave the operator to guess which clause to declare an
+	invariant for.
+	"""
+
+	clause_id: UUID7
+	oracle_class: OracleClass
+	reason: ManufactureRefusalReason
+	detail: NonEmptyStr
+
+	contract_id: UUID7 | None = None
+	"""The contract this refusal is filed against, once there is one.
+
+	``None`` is the state a refusal is *born* in and it is not an oversight: manufacturing
+	runs inside P4, before the contract exists, so the seam cannot know the id of the
+	contract its refusal will end up explaining. The service fills it in when it files the
+	refusal, and a refusal read with ``None`` is one that was never filed — the distinction
+	FR-042 draws between "declared T1" and "nobody said", one phase along.
+	"""
+
+	@property
+	def remedy(self) -> str:
+		"""What would retire this refusal, in one sentence.
+
+		Derived from the reason rather than stored, so a new reason is a type error here
+		rather than a refusal the report renders with a blank line beside it.
+		"""
+		match self.reason:
+			case ManufactureRefusalReason.HELD_OUT:
+				return "supply the case yourself; FR-106's holdout is the operator's example"
+			case ManufactureRefusalReason.UNSUPPORTED_RANK:
+				return f"write a backend for {self.oracle_class.value}, or accept the debt"
+			case ManufactureRefusalReason.NO_STRUCTURED_SOURCE:
+				return (
+					"declare the invariant, transition relation or field set it would quantify over"
+				)
+			case ManufactureRefusalReason.NO_DECLARED_SURFACE:
+				return "declare an interface for this clause in the system model (FR-083)"
+			case ManufactureRefusalReason.NEEDS_A_REFERENCE_RUN:
+				return "build once, then record the reference run's output as the golden"
+			case ManufactureRefusalReason.ARTEFACT_OUTSIDE_WORKSPACE:
+				return "fix the backend: an artefact the producer can rewrite is not a check"
+			case ManufactureRefusalReason.ARTEFACT_MISSING:
+				return "fix the backend: it named a path and did not write it"
+			case ManufactureRefusalReason.COMMAND_NAMES_ANOTHER_FILE:
+				return "fix the spec's run argv: it names an artefact the backend did not write"
+			case ManufactureRefusalReason.COMMAND_DID_NOT_RUN:
+				return "fix the run argv or the host: the check could not be launched or hung"
+			case ManufactureRefusalReason.VACUOUS:
+				return (
+					"strengthen the check: it passes on a tree holding nothing but itself (FR-107)"
+				)
+
 
 STRONG_ORACLE_MAX_RANK = 2
+"""Rank 1 is strongest. Ranks 1-2 are mandatory above autonomy L2."""
 
 COVERING_ORACLE_MAX_RANK = 5
 """The weakest oracle class that still *covers* a clause (FR-108).
@@ -4227,12 +4362,17 @@ class IntentGraph(View):
 class VerifiedClause(View):
 	"""A clause that is verified, and by which oracle at which measured strength (FR-118).
 
-	FR-118's first bullet asks for the oracle **and its measured strength**. SoFact
-	measures neither today: ``OracleDeclaration.rank`` is a declaration the operator made
-	(FR-105 records the same gap one phase earlier), and nothing runs a mutation score. So
-	this type carries ``rank`` as declared and ``measured_strength`` as ``None``, and
-	:attr:`measured` says which it is — a report that printed the declared rank under the
-	word "measured" would be the exact euphemism FR-118 forbids.
+	FR-118's first bullet asks for the oracle **and its measured strength**, and the two
+	are different kinds of statement: ``rank`` is what the operator declared, and
+	``measured_strength`` is what a suite was *observed* to notice. A report that printed
+	the declared rank under the word "measured" would be the exact euphemism FR-118
+	forbids, so :attr:`measured` says which of the two the number above it is.
+
+	``measured_strength`` is ``None`` by default and stays ``None`` unless a caller hands
+	a measurement in. That is not a gap being papered over: FR-105's instrument
+	(:mod:`sofact.mutation`) is a kill rate over a closed operator set, it is a **lower
+	bound**, and it is *withheld* below a mutant floor — so "no number" is the honest
+	state of most clauses and the rendering says so in words.
 	"""
 
 	clause_id: UUID7
@@ -4242,7 +4382,12 @@ class VerifiedClause(View):
 	"""The declared rank, 1 (strongest) to 7. Read from the clause's own oracle."""
 
 	measured_strength: float | None = None
-	"""A measured mutation score, when one exists. Nothing produces one yet."""
+	"""A kill rate measured over a named operator set (FR-105, FR-118).
+
+	``None`` means *no measurement was taken or none survived the floor*, which is not
+	zero and must not render as one — :mod:`sofact.mutation` states the refusal by name
+	and this type reports the absence rather than a number nobody should act on.
+	"""
 
 	@property
 	def measured(self) -> bool:
@@ -7059,8 +7204,18 @@ class ProjectState(View):
 		return matching[-1] if matching else None
 
 	def contract(self, contract_id: str) -> Contract | None:
-		"""Look up a contract by id."""
-		return next((c for c in self.contracts if c.id == contract_id), None)
+		"""Look up a contract by id, returning its **latest revision**.
+
+		The latest rather than the first, because a contract id is stable across
+		revisions: FR-096 makes a contract change a return to P4, and a return that
+		issued a new id would orphan the specification and the decomposition that bind
+		to it — so a revision keeps the id and raises ``version``. A lookup that
+		returned the first row would then hand every caller the superseded oracles while
+		:meth:`latest_contract` handed them the current ones, and the two disagreeing is
+		exactly the drift FR-139 exists to catch.
+		"""
+		matching = [c for c in self.contracts if c.id == contract_id]
+		return matching[-1] if matching else None
 
 	def evidence_for(self, clause_id: str) -> tuple[Evidence, ...]:
 		"""Every observation recorded against a clause, in log order."""

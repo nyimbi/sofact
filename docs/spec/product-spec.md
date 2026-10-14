@@ -2249,15 +2249,15 @@ v0.1's R1–R12 retained. New risks from the 0.2 scope:
 
 ## 22. Open decisions
 
-v0.1's D1–D10 retained; **D1 is superseded**, **D9, D14 and D16 are resolved**, and D3/D8 are revised. New: D11–D18, of which **D11, D16 and D17 are resolved** (§8.6, §8.7, §1.4, ADR-0060).
+v0.1's D1–D10 retained; **D1 is superseded**, **D9, D14 and D16 are resolved**, and D3/D8 are revised. New: D11–D18, of which **D11, D16 and D17 are resolved** (§8.6, §8.7, §1.4, ADR-0060) and **D2 and D5 are resolved** (ADR-0061).
 
 | # | Decision | Why it blocks | Recommendation |
 | --- | --- | --- | --- |
 | ~~**D1**~~ | ~~First target repository~~ | **Superseded by D11.** Mode M still needs one; Mode G needs a first *goal*. | Both: one repo for Mode M calibration, one goal for Mode G. |
-| **D2** | Implementation language and stack | Determines mutation tooling, property-testing framework, packaging | Python + `uv` (parent convention). Confirm. |
+| ~~**D2**~~ | ~~Implementation language and stack~~ | ~~Determines mutation tooling, property-testing framework, packaging~~ | **Resolved: Python + `uv`**, and the runtime is the interpreter the factory already runs on. The dependency set is exactly httpx, pydantic, typer and uuid6, so there is no mutation framework to choose — FR-118's strength instrument is stdlib `ast` (ADR-0061). |
 | **D3** | First Mode M repository | Calibration source for θ | Your own repository, ideally one with an existing suite |
 | **D4** | Human review budget | Sets VUHM and prices everything | Real number needed: hours/week |
-| **D5** | Language scope for v1 | Mutation *and* property-based tooling are per-language (FR-036, FR-103) | One language end-to-end |
+| ~~**D5**~~ | ~~Language scope for v1~~ | ~~Mutation *and* property-based tooling are per-language (FR-036, FR-103)~~ | **Resolved: Python first, behind a pluggable backend.** `MANUFACTURE_SPECS` names `python`, `typescript` and `rust` and is replaceable wholesale by `SOFACT_MANUFACTURE`; an unknown backend is refused by name rather than falling back to Python. The Python backend builds ranks 1, 3 and 5 and refuses 2, 4, 6 and 7 by name, because the factory's only machine-readable signature source is `Module.surface` (ADR-0061). |
 | **D6** | x402/metering in v1 | Scope | No |
 | **D7** | L12 self-modification in v1 | Unbounded blast radius | No — M6 |
 | **D8** | Fine-tuning target | Complexity budget | **Revised:** oracle manufacturing (§18.3), not lane routing |

@@ -24,6 +24,7 @@ from synthetic import (
 	base_spec,
 	decompose_and_approve,
 	elicitation_to_contract,
+	plan_and_service,
 	specify_and_approve,
 	synthetic_service,
 )
@@ -779,9 +780,9 @@ class TestVerifiedAndUnverified:
 		assert "would decide it" in executable_unverified[0].because
 
 	def test_a_verified_clause_reports_its_declared_rank_as_declared(self) -> None:
-		"""FR-118 asks for the oracle *at which measured strength*. Nothing measures one,
-		so printing the declared rank under the word "measured" would be the exact
-		euphemism FR-118 forbids."""
+		"""FR-118 asks for the oracle *at which measured strength*. A clause nobody
+		measured must say so, because printing the declared rank under the word
+		"measured" would be the exact euphemism FR-118 forbids."""
 		contract = one_clause_contract("one", command="true")
 		clause = contract.clauses[0]
 
@@ -790,6 +791,41 @@ class TestVerifiedAndUnverified:
 		assert verified[0].measured is False
 		assert "not measured" in verified[0].rendered
 		assert "measured 1" not in verified[0].rendered
+
+	def test_a_supplied_strength_reaches_the_verified_clause(self) -> None:
+		"""The other arm, and the whole of FR-118's plumbing: a measurement taken
+		elsewhere arrives at the report rather than being computed here. This function
+		reads a log, so a render that mutated a module would make two renders of one log
+		disagree."""
+		contract = one_clause_contract("one", command="true")
+		clause = contract.clauses[0]
+
+		verified, _ = verified_and_unverified(
+			contract,
+			{clause.id: VerdictOutcome.SATISFIED},
+			strengths={clause.id: 0.75},
+		)
+
+		assert verified[0].measured is True
+		assert "measured 0.75" in verified[0].rendered
+		assert "not measured" not in verified[0].rendered
+
+	def test_a_strength_for_another_clause_does_not_leak_onto_this_one(self) -> None:
+		"""Keyed by clause id rather than positional, so a mapping built for a different
+		contract cannot score a clause it says nothing about — the failure a list would
+		have by construction."""
+		contract = one_clause_contract("one", "two")
+		first, second = (clause.id for clause in contract.clauses)
+
+		verified, _ = verified_and_unverified(
+			contract,
+			{first: VerdictOutcome.SATISFIED, second: VerdictOutcome.SATISFIED},
+			strengths={second: 0.9},
+		)
+
+		by_clause = {v.clause_id: v for v in verified}
+		assert by_clause[first].measured is False
+		assert by_clause[second].measured is True
 
 	def test_an_unverified_clause_renders_its_own_words_and_its_verdict(self) -> None:
 		"""FR-118 asks the report to state *which* clauses are unverified. A list of
@@ -1738,6 +1774,164 @@ class TestRenderingFromTheLog:
 		service = synthetic_service(home, tmp_path, "complete")
 
 		assert await service.current_delivery() is None
+
+
+# --------------------------------------------------------------------------- #
+# FR-118's second half, measured end to end
+# --------------------------------------------------------------------------- #
+
+_DISCRIMINATING_CHECK = '''\
+"""An oracle that pins the module's boundary, its branches, and its own constant.
+
+A rank-3 surface check *passes* a mutant, because a mutation moves a body and the surface
+is the same either way -- which is FR-103's own table rather than a defect in the
+instrument. This one is written to notice, so the measurement has a discriminating arm to
+compare the vacuous one against.
+"""
+
+import importlib.util
+import pathlib
+import sys
+
+for path in sorted(pathlib.Path(".").glob("*.py")):
+	if path.name == pathlib.Path(__file__).name:
+		continue
+	spec = importlib.util.spec_from_file_location(path.stem, path)
+	module = importlib.util.module_from_spec(spec)
+	spec.loader.exec_module(module)
+	if not hasattr(module, "classify"):
+		continue
+	assert module.VALUE == 1, path.name
+	assert module.classify(1, 10) == "under", path.name
+	assert module.classify(10, 10) == "over", path.name
+sys.exit(0)
+'''
+
+
+class TestTheMeasuredStrengthReachesTheReport:
+	"""FR-118 asks for the oracle **at which measured strength**, and until now the
+	second half of that sentence was a field no code path ever set.
+
+	The three tests below are the three arms the seam can take: a clause whose module owns
+	a file and whose oracle discriminates scores a number; the same clause under an oracle
+	that cannot discriminate scores **zero**, which is the honest reading of a rank-3
+	surface check rather than a bug in the instrument; and a clause outside the covering
+	ranks renders as *declared rank, not measured*, which is a different statement from
+	zero and has to stay one.
+	"""
+
+	async def _dispatched(
+		self, home: Path, tmp_path: Path, command: str, *, max_steps: int = 4
+	) -> tuple[FactoryService, str]:
+		"""A plan dispatched, with the workspace holding the oracle it will be judged by.
+
+		``max_steps`` is a parameter because the synthetic contract's clauses arrive in
+		waves, and the four covering ones are steps 1-3 while the rank-1 property clauses
+		are steps 4-5. A test about a module that never ran has to *stop* before its wave
+		rather than reason about which wave it was in.
+		"""
+		workspace = home / "workspace"
+		workspace.mkdir(parents=True, exist_ok=True)
+		(workspace / "the_check.py").write_text(_DISCRIMINATING_CHECK, encoding="utf-8")
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands=command
+		)
+		await service.dispatch_plan(plan.id, max_steps=max_steps)
+		return service, plan.id
+
+	async def test_a_clause_whose_module_owns_a_file_scores_a_number(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The measurement the requirement names: the mutant target is the module the
+		clause traces to, and the suite is the clause's own oracle."""
+		service, plan_id = await self._dispatched(home, tmp_path, "python3 the_check.py")
+
+		report = await service.render_delivery(
+			plan_id, root=_a_delivery_root(tmp_path), measured_strength=True
+		)
+
+		measured = [clause for clause in report.verified if clause.measured]
+		assert measured, (
+			"no verified clause carried a measurement, so the seam produced nothing the "
+			f"delivery could render: {[c.rendered for c in report.verified]}"
+		)
+		# Bound once through a comprehension rather than read off the clause inside the
+		# assertion: `measured` is a property, so a checker cannot narrow through it, and
+		# the narrowing this needs is the one `measured` is *about*.
+		strengths = [clause.measured_strength for clause in measured]
+		assert all(strength is not None for strength in strengths), strengths
+		assert all(0.0 < strength < 1.0 for strength in strengths if strength is not None), (
+			"a discriminating oracle that killed every mutant or none of them would mean "
+			f"the fixture rather than the instrument: {[c.rendered for c in measured]}"
+		)
+
+	async def test_a_surface_check_that_cannot_discriminate_scores_zero(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The honest arm, and the one that shows the number is a measurement rather than
+		a constant: ``true`` exits 0 whatever the module says, so every mutant survives.
+
+		Zero is a *result* here and must not be confused with the ``None`` of a withheld
+		measurement — which is why this asserts on ``measured`` as well as on the value.
+		"""
+		service, plan_id = await self._dispatched(home, tmp_path, "true")
+
+		report = await service.render_delivery(
+			plan_id, root=_a_delivery_root(tmp_path), measured_strength=True
+		)
+
+		measured = [clause for clause in report.verified if clause.measured]
+		assert measured, [c.rendered for c in report.verified]
+		assert all(clause.measured_strength == 0.0 for clause in measured), (
+			f"an oracle that always exits 0 cannot notice a mutant: "
+			f"{[c.rendered for c in measured]}"
+		)
+
+	async def test_a_clause_whose_module_sealed_no_python_file_is_left_unmeasured(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The arm that keeps the number from being an analogy: FR-088's traceability is
+		read from the *seal*, so a clause whose module never sealed a Python file has no
+		target to mutate and is skipped rather than scored against a file it does not own.
+
+		Reached honestly by dispatching only the first wave: steps 4 and 5 — the rank-1
+		property clauses' modules — never run, so those clauses are still *verified* (their
+		oracle exits 0) while nothing measured them. That is the state the report has to
+		distinguish from a score of zero, and it is why ``measured`` and
+		``measured_strength`` are two fields rather than one number.
+		"""
+		service, plan_id = await self._dispatched(home, tmp_path, "python3 the_check.py")
+
+		report = await service.render_delivery(
+			plan_id, root=_a_delivery_root(tmp_path), measured_strength=True
+		)
+
+		unmeasured = [clause for clause in report.verified if not clause.measured]
+		assert unmeasured, (
+			"every verified clause scored, so this fixture cannot tell a measurement from "
+			f"an absence: {[c.rendered for c in report.verified]}"
+		)
+		assert all(clause.measured_strength is None for clause in unmeasured), (
+			"an unmeasured clause must carry no number, because zero is a *result* and "
+			"this is the absence of one"
+		)
+		assert all("not measured" in clause.rendered for clause in unmeasured)
+		assert any(clause.measured for clause in report.verified), (
+			"the measured arm must be present too, or this asserts on a report where "
+			"nothing was measured at all"
+		)
+
+	async def test_the_default_render_measures_nothing(self, home: Path, tmp_path: Path) -> None:
+		"""Off by default, because it is the only input to a render that launches
+		processes — and a caller that did not ask must not pay for one."""
+		service, plan_id = await self._dispatched(home, tmp_path, "python3 the_check.py")
+
+		report = await service.render_delivery(plan_id, root=_a_delivery_root(tmp_path))
+
+		assert report.verified, "the fixture must verify something for this to be a test"
+		assert not any(clause.measured for clause in report.verified), (
+			"a render nobody asked to measure reported a measurement"
+		)
 
 
 # --------------------------------------------------------------------------- #

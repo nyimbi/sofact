@@ -57,10 +57,20 @@ from sofact.harness import (
 from sofact.harness import (
 	spec_for as harness_spec_for,
 )
-from sofact.integration import integrate
+from sofact.integration import attribute_files, integrate
 from sofact.intent import attributions_for, build_graph
 from sofact.ledger import LEDGER_FILENAME, LOCK_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
+from sofact.manufacture import (
+	ConfiguredManufactureAdapter,
+	ManufactureRefusal,
+	ManufactureRequest,
+	ManufactureSpec,
+	copy_artefacts,
+	manufacture_declarations,
+	place_artefacts,
+)
+from sofact.mutation import measure_strength
 from sofact.planner import (
 	DEFAULT_REPAIR_ATTEMPTS,
 	check_integrity,
@@ -87,6 +97,7 @@ from sofact.views import (
 	PHASE_GATE,
 	PHASE_GATE_INVERSE,
 	PHASE_SEQUENCE,
+	COVERING_ORACLE_MAX_RANK,
 	Advice,
 	Assumption,
 	AttemptTelemetryReport,
@@ -383,6 +394,7 @@ class FactoryService:
 		scope: DeploymentScope | None = None,
 		compositions: Mapping[str, PluginComposition] | None = None,
 		boundary: Sequence[BoundaryMechanism] | None = None,
+		manufacture: ManufactureSpec | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -432,6 +444,16 @@ class FactoryService:
 		here can raise an autonomy ceiling without a measurement behind it — an empty
 		sequence measures nothing and reports §5.4's degraded configuration, which is how a
 		deployment opts out of probing without claiming anything it did not check.
+
+		``manufacture`` is the language this factory builds oracles in (FR-103, FR-156).
+		``None`` means *this deployment manufactures nothing* rather than "manufacture in
+		the default language", and the distinction is the same one the other six make:
+		a build that silently adopted Python would run a Python check against a
+		TypeScript module and report the resulting failure as a defect in the module.
+		The choice is a :class:`~sofact.manufacture.ManufactureSpec` rather than a
+		language name because the interpreter is part of it — ``python3`` and
+		``python3.12`` are one language on two hosts — and a name would leave the
+		deployment unable to say which one it has.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
@@ -446,6 +468,7 @@ class FactoryService:
 			None if boundary is None else tuple(boundary)
 		)
 		self._boundary: DeploymentBoundary | None = None
+		self._manufacture_spec = manufacture
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
@@ -501,11 +524,7 @@ class FactoryService:
 		never allowed to write one. A boundary that breaks the dispatch is not confinement.
 		"""
 		if self._boundary is None:
-			probe_root = (
-				Path(workspace)
-				if workspace is not None
-				else (self.home / "workspace")
-			)
+			probe_root = Path(workspace) if workspace is not None else (self.home / "workspace")
 			probe_root.mkdir(parents=True, exist_ok=True)
 			sessions = self.home / "sessions"
 			sessions.mkdir(parents=True, exist_ok=True)
@@ -909,6 +928,7 @@ class FactoryService:
 		*,
 		commands: str | None = None,
 		version: int = 1,
+		manufacture: bool = True,
 	) -> Contract:
 		"""Assign an oracle to every clause stem, or refuse.
 
@@ -922,6 +942,20 @@ class FactoryService:
 		meaningful for a contract expressing a single obligation; it exists so the
 		whole pipeline can be exercised end to end without pretending the assignment
 		is clever.
+
+		``manufacture`` is FR-103, and it is the difference between an oracle the
+		factory *suggests* and one it *builds*. A suggestion is prose with no command;
+		manufacturing writes a check into the workspace, runs it, and keeps the command
+		only if the artefact existed at the path the command names, ran, and failed
+		against a tree holding nothing but itself (FR-107). It is on by default because
+		a factory that built nothing would report the same 100% ground-truth debt
+		whether or not the capability existed, which is the measurement FR-108 needs to
+		move.
+
+		**A refusal leaves the suggestion in place.** Manufacturing adds
+		executability; it never removes a clause, because FR-108's debt is the measure
+		of how much of a contract could not be built, and a refusal that dropped its
+		clause would make the debt unmeasurable.
 		"""
 		draft = await self.latest_draft(goal_id)
 		if draft is None:
@@ -946,12 +980,89 @@ class FactoryService:
 				)
 			)
 
+		refusals: tuple[ManufactureRefusal, ...] = ()
+		if manufacture and commands is None:
+			# Only without ``commands``: that argument is the whole-pipeline escape hatch
+			# for a contract expressing one obligation, and a manufactured check that
+			# replaced the operator's own command would make the flag mean the opposite
+			# of what it says. The seam's earned hint is the *default* the suggestion
+			# could not carry, not an override of one the operator supplied.
+			oracles, refusals = await self._manufacture(draft, oracles)
+
 		built = Contract.from_draft(draft, oracles, version=version)
 		self._commit(
 			LedgerKind.CONTRACT_CREATED,
-			{"contract": built.model_dump(mode="json"), "debt": ground_truth_debt(built)},
+			{
+				"contract": built.model_dump(mode="json"),
+				"debt": ground_truth_debt(built),
+				# FR-105's refusal set, recorded with the contract rather than discarded:
+				# "the factory could not build a check here" is the fact that explains a
+				# clause's remaining debt, and a reader of the log with only the debt
+				# would have to re-run manufacturing to learn which clauses and why.
+				"manufacture_refusals": [r.model_dump(mode="json") for r in refusals],
+			},
 		)
 		return built
+
+	async def _manufacture(
+		self,
+		draft: SpecificationDraft,
+		suggested: dict[str, OracleDeclaration],
+	) -> tuple[dict[str, OracleDeclaration], tuple[ManufactureRefusal, ...]]:
+		"""Build what the factory can for this draft's clauses (FR-103, FR-105).
+
+		The surface a clause is manufactured against comes from the **approved
+		decomposition** when one exists, and from nothing otherwise. That is the honest
+		limit stated in :mod:`sofact.manufacture` rather than a shortcut: a clause's own
+		content is an English statement, and a *predicate* read out of English is
+		invented. The declared surface is the one machine-readable signature source the
+		factory holds, and at P4 it usually does not hold one yet — so manufacturing
+		refuses by name (``NO_DECLARED_SURFACE``) and the debt stays where it was.
+
+		The decomposition is looked up through the *contract that was already built* for
+		this draft, if there is one, so a re-contract after P3 can manufacture against
+		the surface the operator approved. A first contract at P4 finds nothing and says
+		so.
+
+		A refusal is a return value rather than an exception all the way up: the
+		contract is still built, and the caller gets both the declarations and the
+		reasons. FR-105's "escalate, do not build anyway" is a decision for the gate, and
+		a gate cannot weigh a refusal it never saw.
+		"""
+		spec = self._manufacture_spec
+		if spec is None:
+			return suggested, ()
+		state = await self.state()
+		known = next((c for c in reversed(state.contracts) if c.goal_id == draft.goal_id), None)
+		decomposition = state.latest_decomposition(known.id) if known is not None else None
+		workspace = self.home / "workspace"
+		workspace.mkdir(parents=True, exist_ok=True)
+		adapter = ConfiguredManufactureAdapter(
+			spec,
+			workspace=workspace,
+			boundary=await self.boundary(workspace),
+		)
+		requests: list[tuple[ManufactureRequest, OracleDeclaration]] = []
+		for stem in draft.stems:
+			declaration = suggested[stem.id]
+			module = (
+				decomposition.module_for_clauses((stem.id,)) if decomposition is not None else None
+			)
+			requests.append(
+				(
+					ManufactureRequest(
+						clause_id=stem.id,
+						statement=stem.statement,
+						kind=stem.kind,
+						oracle_class=declaration.oracle_class,
+						module_name=module.name if module is not None else stem.id,
+						surface=module.surface if module is not None else (),
+						workspace=workspace,
+					),
+					declaration,
+				)
+			)
+		return await manufacture_declarations(adapter, requests)
 
 	async def latest_contract(self, goal_id: str) -> Contract | None:
 		"""Most recent contract for a goal, if one exists."""
@@ -1619,6 +1730,36 @@ class FactoryService:
 		nested = (*unowned, LEDGER_FILENAME, LOCK_FILENAME, "sessions")
 		return tuple(name for name in nested if (resolved / name).exists())
 
+	async def _place_manufactured(self, plan: GoalPlan, workspace: Path) -> tuple[Path, ...]:
+		"""Copy this plan's manufactured checks into ``workspace`` (FR-103, FR-141).
+
+		Read out of each clause's command rather than from a recorded manifest, because the
+		command is what :class:`~sofact.execution.OracleRunner` will execute: a manifest that
+		drifted from the argv would copy a file the run never opens.
+
+		Silent when there is nothing to place — a contract whose clauses name no command, a
+		clause whose command is the operator's own (``contract(commands=...)``), or a check
+		the producer is expected to write. All three are real states and none is an error,
+		so this returns what it wrote rather than asserting it wrote something.
+
+		Only the *contract's* clauses are consulted. A dispatch whose plan belongs to a
+		different contract than the latest one is dispatching against an artefact the factory
+		has since revised, and copying the newer check would judge the older plan by it.
+		"""
+		if self._manufacture_spec is None:
+			return ()
+		contract = await self.contract_by_id(plan.contract_id)
+		source = self.home / "workspace"
+		if not source.is_dir() or source.resolve() == workspace.resolve():
+			# The same directory: manufacturing wrote the artefacts where the session will
+			# work, so copying them onto themselves is a no-op with a real cost in mtime.
+			return ()
+		placed: list[Path] = []
+		for clause in contract.clauses:
+			paths = place_artefacts(clause.oracle, workspace=source)
+			placed.extend(copy_artefacts(paths, source=source, target=workspace))
+		return tuple(placed)
+
 	async def _module_for(self, plan: GoalPlan, clause_ids: tuple[str, ...]) -> str | None:
 		"""The name of the module a step's clauses belong to, when exactly one owns them.
 
@@ -1707,6 +1848,15 @@ class FactoryService:
 		)
 		if checkout.worktree is not None:
 			adapter = adapter.variant(workspace=Path(checkout.worktree))
+		# FR-103: the checks the factory built at P4 are placed in the tree the session will
+		# work in *before* it starts, and this is load-bearing three ways. ``OracleRunner``
+		# runs ``cwd=self.workspace``, so an artefact left in the shared tree under FR-141's
+		# isolation is a command that finds nothing and reports a failure of the module. The
+		# seal commits whatever is in the tree, so an artefact placed here travels with the
+		# module's branch instead of being dropped at integration. And FR-006's cache key is
+		# a digest of the tree, so writing before the first dispatch keeps the key stable
+		# across a re-dispatch that changed nothing.
+		await self._place_manufactured(plan, adapter.workspace)
 		record = await adapter.dispatch(
 			step,
 			plan,
@@ -2673,6 +2823,73 @@ class FactoryService:
 					worst[verdict.clause_id] = verdict.outcome
 		return worst
 
+	async def _measured_strengths(
+		self,
+		contract: Contract,
+		decomposition: Decomposition | None,
+		plan: GoalPlan,
+		state: ProjectState,
+	) -> dict[str, float]:
+		"""FR-118's "at which measured strength", one number per scorable clause.
+
+		Returns only the clauses for which a number survived the refusals in
+		:mod:`sofact.mutation`; a clause absent from the map renders as *declared rank,
+		not measured*, which is the honest sentence rather than a zero.
+
+		**The suite is the clause's own oracle.** Mutation scoring asks whether *a check*
+		notices a change, and FR-118 asks for the strength of *this clause's* check — so
+		the check is the oracle's command and the mutant target is the module the clause
+		traces to. That is the measurement the requirement names rather than an analogy for
+		it: a rank-3 surface check that survives every mutation scores near zero, and that
+		is not a defect in the instrument, it is FR-103's own table ("generated, so complete
+		by construction" — of the *shape*, and a shape is all a mutation of a body moves).
+
+		**Only where the traceability is unambiguous.** FR-088's mapping is many-to-many in
+		both directions, and a clause two modules claim would be scored against whichever
+		came first — a number about an arbitrary one of them. So a clause whose ownership is
+		not exactly one module is skipped, and so is a clause whose oracle names no command
+		(nothing to run) and one outside the covering ranks (a sample, not a claim).
+
+		**Not free, and opt-in.** Each measurement copies the tree once per mutant and
+		launches the oracle that many times, so the caller asks for it explicitly rather
+		than every render paying for it.
+		"""
+		ownership, _ = attribute_files(state.dispatches_for(plan.id))
+		if not ownership:
+			return {}
+		workspaces = {r.workspace for r in state.dispatches_for(plan.id) if r.workspace}
+		root = Path(next(iter(workspaces))) if len(workspaces) == 1 else None
+		if root is None or not root.is_dir():
+			# Two workspaces: the dispatches did not all run in one tree, so there is no
+			# single place a module could be mutated in. Measured as nothing rather than
+			# measured in an arbitrary one.
+			return {}
+		boundary = await self.boundary(root)
+		measured: dict[str, float] = {}
+		for clause in contract.clauses:
+			command = clause.oracle.command_hint
+			if command is None or clause.oracle.rank > COVERING_ORACLE_MAX_RANK:
+				continue
+			owners = [
+				module.name
+				for module in (decomposition.modules if decomposition is not None else ())
+				if clause.id in module.clause_ids
+			]
+			if len(owners) != 1:
+				continue
+			targets = tuple(path for path in ownership.get(owners[0], ()) if path.endswith(".py"))
+			if not targets:
+				continue
+			report = await measure_strength(
+				root,
+				module=targets[0],
+				suite=("/bin/sh", "-c", command),
+				boundary=boundary,
+			)
+			if report.measured_strength is not None:
+				measured[clause.id] = report.measured_strength
+		return measured
+
 	# ------------------------------------------------- FR-117..121: P8 delivery
 
 	async def render_delivery(
@@ -2683,6 +2900,7 @@ class FactoryService:
 		system: str | None = None,
 		entry_point: str | None = None,
 		topology_override: str | None = None,
+		measured_strength: bool = False,
 	) -> DeliveryReport:
 		"""Render FR-118's delivery report for a plan's work, and record it (FR-117).
 
@@ -2701,6 +2919,14 @@ class FactoryService:
 
 		The envelope is the deployment's, and ``None`` means none was configured — which
 		the report states rather than reporting every dimension as within bounds.
+
+		``measured_strength`` is FR-118's second half, and it is **off by default** because
+		it is the one input here that launches processes: measuring a clause mutates the
+		module it traces to and re-runs the clause's own oracle once per mutant. A render
+		that did that silently would make the fixed-point loop below pay for a number most
+		renders do not read, and would make two renders of one log differ by timing. With
+		it off, every verified clause renders as *declared rank, not measured* — which is
+		the honest sentence, not a missing feature.
 
 		**The two artefacts SoFact owes are written here** (FR-117). ADR-0040 scoped the
 		artefact check to the two kinds the factory produces, and nothing produced them: a
@@ -2771,6 +2997,21 @@ class FactoryService:
 		# a fact neither of them changed.
 		measured_boundary = await self.boundary(root or (self.home / "workspace"))
 
+		# FR-118's "at which measured strength", measured once outside the render loop for
+		# the reason the boundary is: `render` is synchronous and a fixed point needs the
+		# same number on every round. A mutation run inside the loop would also mutate
+		# nothing the render reads, so the second round could only differ by a timing
+		# artefact — which is exactly what the loop's own comment forbids.
+		#
+		# Opt-in, because it is the only step here that launches processes: a caller that
+		# did not ask for a measured delivery gets the honest "declared rank, not measured"
+		# rendering at no cost.
+		strengths = (
+			await self._measured_strengths(contract, decomposition, plan, state)
+			if measured_strength
+			else {}
+		)
+
 		def render() -> DeliveryReport:
 			"""One render of the report, reading nothing the caller has not already read."""
 			return delivery_report(
@@ -2793,6 +3034,7 @@ class FactoryService:
 				boundary=measured_boundary,
 				escapes=escapes,
 				escapes_recorded=state.escapes,
+				strengths=strengths,
 			)
 
 		# The documents and the report describe each other: the report's artefact check
