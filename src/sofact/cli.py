@@ -29,7 +29,7 @@ from sofact.composition import load_composition, verify_composition
 from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
-from sofact.escape import load_escape_budget
+from sofact.escape import load_deployment_scope, load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
 from sofact.harness import SPECS, HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
@@ -39,6 +39,7 @@ from sofact.service import (
 	resolve_tools,
 )
 from sofact.views import (
+	L4_GATE_THETA,
 	PHASE_GATE,
 	PHASE_SEQUENCE,
 	TOPOLOGY_ISOLATION,
@@ -47,10 +48,12 @@ from sofact.views import (
 	Assumption,
 	ClaimKind,
 	ClauseKind,
+	Consumer,
 	Contract,
 	Decomposition,
 	DecompositionGate,
 	DeliveryEnvelope,
+	DeploymentScope,
 	DeploymentTopology,
 	DispatchRecord,
 	EnvelopeDimension,
@@ -243,6 +246,7 @@ def _service(home: Path | None) -> FactoryService:
 		envelope=_configured_envelope(),
 		topology=_configured_topology(),
 		escape_budgets=_configured_escape_budgets(),
+		scope=_configured_scope(),
 		compositions=_configured_compositions(),
 	)
 
@@ -357,6 +361,25 @@ def _configured_escape_budgets() -> tuple[EscapeBudget, ...]:
 		return load_escape_budget(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_ESCAPE_BUDGET: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_scope() -> DeploymentScope | None:
+	"""The autonomy target this deployment declared, if it declared one (FR-157).
+
+	``None`` means *no target was declared*, which is not the same as "the personal
+	default". FR-157's requirement is that the target be "deployment-scoped, not
+	product-scoped", so a factory that supplied a default would be imposing the θ gate as
+	the very default D17 removed — and a report would show a target nobody chose as though
+	someone had. The report says which happened.
+	"""
+	configured = os.environ.get("SOFACT_SCOPE")
+	if not configured:
+		return None
+	try:
+		return load_deployment_scope(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_SCOPE: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -1904,6 +1927,58 @@ def _print_audit(report: OracleAuditReport) -> None:
 		)
 
 
+def _print_target(report: EscapeReport) -> None:
+	"""FR-157's declared target, and whether the last delivery reached it.
+
+	Three states rather than two, and the middle one is why this is not a boolean. A
+	deployment that declared no target has one fewer thing to be measured against, and a
+	project that has not delivered has nothing to compare — printing either as "not met"
+	would report a shortfall where no comparison was made, which is the vacuous-pass
+	failure the escape report itself refuses one level down.
+	"""
+	typer.secho("\n  autonomy target (FR-157)", fg="cyan")
+	if report.scope is None:
+		typer.secho(
+			"    this deployment declared no target, so no comparison is made. FR-157 makes "
+			"the target deployment-scoped rather than product-scoped, so there is no default "
+			"to fall back on — set SOFACT_SCOPE to declare one.",
+			fg="bright_black",
+		)
+		return
+	scope = report.scope
+	floor, ceiling = scope.band
+	typer.secho(
+		f"    {scope.consumer.value}: targets {scope.target.name} "
+		f"(band {floor.name}-{ceiling.name}), declared by {scope.declared_by}",
+		fg="bright_black",
+	)
+	met = report.meets_target
+	if met is None:
+		typer.secho(
+			"    no delivery has been rendered, so there is nothing to compare the target "
+			"against yet. The target is an ambition and not a measurement.",
+			fg="bright_black",
+		)
+	elif met:
+		shortfall = report.target_shortfall
+		assert shortfall is not None, "meets_target implies a comparison was made"
+		headroom = "" if shortfall == 0 else f" (delivered {abs(shortfall)} level(s) above it)"
+		typer.secho(f"    the last delivery reaches it{headroom} (FR-157).", fg="green")
+	else:
+		shortfall = report.target_shortfall
+		assert shortfall is not None, "meets_target implies a comparison was made"
+		typer.secho(
+			f"    the last delivery is {shortfall} level(s) short of the target "
+			f"({report.delivered_ceiling.name if report.delivered_ceiling else '?'} < "
+			f"{scope.target.name}). The target raises no ceiling: what raises a ceiling is a "
+			f"stronger oracle, not a declared ambition (FR-157).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	for caveat in scope.caveats:
+		typer.secho(f"    note: {caveat}", fg="bright_black")
+
+
 def _print_escape_summary(report: EscapeReport) -> None:
 	"""FR-022's rate, per lane, and what FR-023 did to each ceiling."""
 	typer.secho("\n  escapes (FR-022)", fg="cyan")
@@ -2112,6 +2187,7 @@ async def _escapes(svc: FactoryService, *, override: str | None, reason: str) ->
 	typer.secho("\nFR-022 escape oracle", fg="cyan", bold=True)
 	typer.secho(f"  measurement {report.id}", fg="bright_black")
 	_print_escape_summary(report)
+	_print_target(report)
 	for caveat in report.caveats:
 		typer.secho(f"  note: {caveat}", fg="bright_black")
 	if report.not_implemented:
@@ -2131,6 +2207,58 @@ async def _escapes(svc: FactoryService, *, override: str | None, reason: str) ->
 			fg="red",
 		)
 		raise typer.Exit(code=1)
+
+
+@app.command(name="scope")
+def scope_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+) -> None:
+	"""Report the autonomy target this deployment declared, and what it admits (FR-157)."""
+	asyncio.run(_scope(_service(_home_of(ctx, home))))
+
+
+async def _scope(svc: FactoryService) -> None:
+	scope = svc.scope
+	typer.secho("\nFR-157 autonomy target", fg="cyan", bold=True)
+	if scope is None:
+		typer.secho(
+			"  this deployment declared none. FR-157 makes the target deployment-scoped "
+			"rather than product-scoped, so there is no default: a factory that supplied one "
+			"would be imposing the θ gate as the very default D17 removed. Set SOFACT_SCOPE "
+			"to a JSON object naming consumer, target and escape_tracking.",
+			fg="bright_black",
+		)
+		raise typer.Exit(code=1)
+	floor, ceiling = scope.band
+	typer.secho(f"  consumer {scope.consumer.value}", fg="bright_black")
+	typer.secho(
+		f"  target {scope.target.name}, band {floor.name}-{ceiling.name}",
+		fg="green",
+	)
+	typer.secho(
+		f"  declared by {scope.declared_by} at {scope.declared_at.isoformat()}", fg="bright_black"
+	)
+	typer.secho(
+		f"  escape-rate tracking {'on' if scope.escape_tracking else 'OFF'} (FR-022)",
+		fg="green" if scope.escape_tracking else "red",
+	)
+	if scope.note is not None:
+		typer.secho(f"  note: {scope.note}", fg="bright_black")
+	for caveat in scope.caveats:
+		typer.secho(f"  note: {caveat}", fg="bright_black")
+	if scope.consumer is Consumer.THIRD_PARTY and not scope.admits_l4:
+		# Conditional on `admits_l4` rather than on the consumer alone: the sentence names
+		# what this *build* can decide, and a hardcoded one would go on saying L4 is out of
+		# reach after FR-024 to FR-035 flips the flag that puts it in reach.
+		typer.secho(
+			f"\n  A third-party consumer leaves the θ_hi = {L4_GATE_THETA:g} gate "
+			"(FR-024 to FR-035) unchanged, so L4 is reachable only through it — and that "
+			"gate is not built in this build, so this scope's target is inside L2 to L3. "
+			"The type refuses to let you declare past it rather than accepting a target "
+			"nothing here could decide.",
+			fg="yellow",
+		)
 
 
 @app.command(name="composition")

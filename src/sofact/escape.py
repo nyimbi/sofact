@@ -44,9 +44,11 @@ from sofact._uuid7 import uuid7str
 from sofact.views import (
 	MODULE_CLASS_CEILING,
 	AutonomyLevel,
+	Consumer,
 	Contract,
 	Decomposition,
 	DeliveryReport,
+	DeploymentScope,
 	DeployRecord,
 	EscapeBudget,
 	EscapeEvent,
@@ -170,6 +172,8 @@ def measure_escapes(
 	budgets: Sequence[EscapeBudget] = (),
 	overrides: Sequence[EscapeOverride] = (),
 	contracts: Sequence[Contract] = (),
+	scope: DeploymentScope | None = None,
+	delivered_ceiling: AutonomyLevel | None = None,
 	rendered_at: datetime | None = None,
 ) -> EscapeReport:
 	"""Fold the log into FR-022's rate, and FR-023's reduction, per lane.
@@ -294,6 +298,8 @@ def measure_escapes(
 		unbudgeted=tuple(unbudgeted),
 		orphan_deployments=orphans,
 		deployed_reports=len(deployed_ids),
+		scope=scope,
+		delivered_ceiling=delivered_ceiling,
 	)
 
 
@@ -308,3 +314,89 @@ def ceilings_from(escapes: EscapeReport | None) -> Mapping[ModuleClass, Autonomy
 	if escapes is None:
 		return None
 	return {lane.lane: lane.reduced_ceiling for lane in escapes.lanes}
+
+
+def load_deployment_scope(path: Path) -> DeploymentScope:
+	"""Read the autonomy target this deployment is aiming at (FR-157).
+
+	The same seam :func:`load_escape_budget` and :func:`sofact.envelope.load_envelope`
+	provide, and FR-157's own word is why: the target is "**deployment-scoped, not
+	product-scoped**", so it is a fact about one deployment and cannot be a constant in
+	the product. A product-scoped target would be the θ gate imposed as a default, which
+	is the thing the requirement exists to prevent.
+
+	One object rather than a list, unlike the budgets: a deployment aims at *one* level.
+	Two declarations would leave a reader to decide which governs, and a target that is
+	one of two numbers is a target nobody is aiming at.
+
+	Two shapes, matching the other loaders: the object bare, or under ``deployment_scope``.
+	Unknown fields are refused rather than ignored — the failure mode this whole family of
+	loaders guards against is a misspelled key that reads as configured while configuring
+	nothing, and here it would be a target that silently defaulted to whatever the
+	validator's floor is.
+	"""
+	target = path
+	try:
+		text = target.read_text(encoding="utf-8")
+	except OSError as exc:
+		raise ValueError(f"cannot read deployment scope {target}: {exc}") from exc
+	try:
+		raw: object = json.loads(text)
+	except ValueError as exc:
+		raise ValueError(f"{target}: not valid JSON: {exc}") from exc
+	if not isinstance(raw, dict):
+		raise ValueError(f"{target}: expected a JSON object describing one deployment")
+	document = cast("dict[str, Any]", raw)
+	body: object = (
+		document["deployment_scope"] if set(document) == {"deployment_scope"} else document
+	)
+	if not isinstance(body, dict):
+		raise ValueError(f"{target}: expected an object under 'deployment_scope'")
+	declared = cast("dict[str, Any]", body)
+	known = {"consumer", "target", "escape_tracking", "declared_by", "note"}
+	unknown = sorted(set(declared) - known)
+	if unknown:
+		raise ValueError(
+			f"{target}: names {unknown}, which is not a scope field; {sorted(known)} are, "
+			"and a misspelled key would otherwise be ignored and the scope would read as "
+			"declared while declaring the wrong target"
+		)
+	for required in ("consumer", "target", "escape_tracking"):
+		if required not in declared:
+			raise ValueError(
+				f"{target}: declares no {required}. FR-157 scopes a target by who consumes "
+				"the artefact and requires the escape rate be tracked beside it, so a scope "
+				"missing either is not a partial declaration — it is one that would default "
+				"into the very thing the requirement refuses"
+			)
+	try:
+		consumer = Consumer(str(declared["consumer"]))
+	except ValueError as exc:
+		known_consumers = ", ".join(c.value for c in Consumer)
+		raise ValueError(
+			f"{target}: consumer {declared['consumer']!r} is not one of {known_consumers}"
+		) from exc
+	try:
+		level = AutonomyLevel(int(declared["target"]))
+	except (ValueError, TypeError) as exc:
+		names = ", ".join(level.name for level in AutonomyLevel)
+		raise ValueError(
+			f"{target}: target {declared['target']!r} is not an autonomy level; {names} are"
+		) from exc
+	if not isinstance(declared["escape_tracking"], bool):
+		raise ValueError(
+			f"{target}: escape_tracking must be true or false, not "
+			f"{declared['escape_tracking']!r}; a scope that stated it as a string would "
+			"read as tracking while tracking nothing (FR-157, FR-022)"
+		)
+	note = declared.get("note")
+	if note is not None and not isinstance(note, str):
+		raise ValueError(f"{target}: note must be a string")
+	return DeploymentScope(
+		consumer=consumer,
+		target=level,
+		escape_tracking=declared["escape_tracking"],
+		declared_by=str(declared.get("declared_by", f"{target}")),
+		declared_at=now(),
+		note=note,
+	)

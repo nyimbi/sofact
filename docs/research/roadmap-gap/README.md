@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1350 passed, 0 failed** (2026-10-14, after ADR-0056).
+`tests/ci` at the last refresh: **1396 passed, 0 failed** (2026-10-14, after ADR-0057).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -131,7 +131,7 @@ closed since carry their date.
 | FR-154 plugin composition frozen, pinned | **Implemented** (2026-10-14, ADR-0056) | `PluginComposition` (`views.py`) with `pins`, `admissions`, `argv_frozen`, `frozen`, `pinned_content`; `composition_for`/`load_composition`/`verify_composition` (`composition.py`), `SOFACT_COMPOSITION`, `FactoryService.composition`/`composition_hash`, `DispatchRecord.composition_hash` (FR-149, R29), and `sofact composition`. **The freeze is derived, not declared**: `HarnessSpec.freezing_flags` + `composition_frozen` compute from the spec's own `argv`, so `pi` is frozen by `--no-extensions`, `pi-research` is not (it drops the flag because the research loop *is* an extension), and `dsh` is not — reported as FR-154 not carried out rather than a clean freeze it does not have. `argv_frozen` is in the hash, and so are the admissions. A licence is required exactly on an admitted plugin (R28). `TestTheFreezeIsDerivedFromTheArgv`, `TestTheFreezeIsVerifiable`, `TestTheLoader`. |
 | FR-155 third-party plugin deletion test | **Implemented** (2026-10-14, ADR-0056) | `PluginVerdict` (four values, because §8.7 reaches four — `BUILT_HERE` is code replacing the plugin, `SUPERSEDED` is FR-156's configuration remedy) and `PluginAdmission` over FR-155's five surfaces (`VERDICT_SURFACES`: completion, contract integrity, oracle strength, budget, egress). The type refuses an `ADMISSIBLE` verdict with a surface missing, a `REFUSED` verdict with every surface held, a surface outside the five, a `SUPERSEDED` with no setting named, and a licence on a plugin that is not installed. **The deletion test itself is not automated and cannot be** — whether removing a plugin changes a verdict is a question about a running system, and a function answering it from a table would be the manufactured-judge defect ADR-0053 refuses; what is built is the form the answer is written in. §8.7's eight-row table transcribes through the real loader in `TestTheDeletionTestOnTheMeasuredEcosystem`, which is the only check that the four verdicts are the right four. |
 | FR-156 capability by configuration not code | **Implemented** (2026-10-14, ADR-0056) | `load_specs` (`harness.py`), `--tools`/`SOFACT_TOOLS`; `test_the_readme_example_loads_through_the_real_loader` (`test_cli.py`). Extended to the composition itself: `load_composition` reads JSON through the same seam and `SOFACT_COMPOSITION` names it, so a composition that could only be expressed by editing `src/` would be a capability obtained by code. The file cannot declare `argv_frozen` (read from the harness spec) and cannot name an unregistered harness. FR-156 is also the floor `PluginComposition.discharged` always returns — an empty composition *is* the configuration-only answer, which is why it is never the whole set by default. `TestTheConfigurationSeam`, `TestTheVacuousComposition`. |
-| FR-157 deployment-scoped autonomy target | **Partly** (2026-10-13, ADR-0054) | Its stated input now exists: FR-157's requirement is "L2–L3 with escape-rate tracking (FR-107)", and both halves are built — FR-107's audit (ADR-0053) and FR-022's rate (ADR-0054). What is still absent is the **target** itself: no deployment scope type carries "this deployment targets L3", so nothing compares a measured rate against a declared ambition. The θ gate (FR-024–035) is still absent, so the target has nothing to be scoped *by*. |
+| FR-157 deployment-scoped autonomy target | **Implemented** (2026-10-14, ADR-0057) | `DeploymentScope` (`views.py`) carries the target, and `EscapeReport.meets_target` is the comparison. The target is a **type** rather than a number because the two ways a declared target can be one this build cannot honour are structural and carry different remedies: a personal scope may not reach L4 (the gate "must not be imposed as a default", nor reached by declaring it), and a third-party scope may not either while `THETA_GATE_BUILT` is `False` (there the gate applies unchanged, and nothing measures an oracle strength to decide it). `None` means *this deployment declared none* — a product-supplied default would be the very gate D17 removed — so `meets_target` returns `None` rather than `False` when either input is missing. `load_deployment_scope` reads it through `SOFACT_SCOPE` (FR-156's rule reaching the declaration). What remains outside the requirement: **FR-024–035's θ gate is still absent**, which is what bounds a third-party target to L2–L3 here and is recorded on the scope's own caveats rather than as an FR-157 gap. |
 | FR-158 evolvability debt reported as first-class, Mode M L1 | **Implemented** | `EVOLVABILITY_DEBT = 1.0` and `MODE_M_CEILING = L1` (`views.py:322`, `views.py:301`), the number surfaced as `DeliveryReport.evolvability_debt` beside FR-108's measured debt; `MAINTAINABILITY_NOT_VERIFIED` (`views.py:337`) is a `ClassVar` interpolating it, so the sentence and the number cannot drift; `MaintenanceLane.ceiling` refuses a lane above the cap and `delivery.handover` clamps §13's L4 lanes to it; the `maintainability_not_verified` check reports both ceilings as two numbers (FR-158(b)); both renderers and `sofact deliver` state it. 12 tests (`test_delivery.py::TestMaintainabilityIsNotVerified`). |
 | FR-159 differential change-cost oracle | **Not built** | ADR-0011 records it as "specified and **unbuilt**". |
 | FR-160 gate-cost measurement | **Implemented** | `GateCost` (`views.py`) carries the pair FR-160 names — `human_minutes` and `rework_fraction` — and `FactoryService.record_gate_cost` refuses a cost for a gate whose phase is not complete, because the approval is the evidence a human was there. `ProjectState.gate_cost` reads the latest per gate so `total_human_minutes` cannot double-count a re-measure, and `None` means unmeasured rather than free. `envelope.measure(human_minutes=...)` now measures §1.3's `HUMAN_MINUTES` (one fewer unmeasured dimension), the pair travels into `DeliveryReport.gate_costs` with a mean `rework_fraction`, and the `gate_cost_reported` check reports without failing on an unmeasured project. `sofact gate --cost P2:90:0.25` records one; `sofact deliver` prints the pair under its own heading (ADR-0043). 4 + 4 + 6 tests; canaried three times. |
@@ -159,8 +159,10 @@ against `HEAD` gives 85/25/0/9 where the file recorded 76/26/0/17 — nine rows 
 closed by the ADR-0035..0053 units without the count being moved, which is the same
 class of defect this audit exists to find in other people's documents. The ADR-0054 unit
 moved exactly two rows (FR-021-023 Not built → Implemented, FR-157 Not built → Partly),
-so 85/25/0/9 became 86/26/0/7; this change moves one (FR-102 Partly → Implemented), and
-87/25/0/7 is asserted against the 119 row count rather than trusted.
+so 85/25/0/9 became 86/26/0/7; the FR-102 unit moved one (Partly → Implemented) to
+87/25/0/7, the ADR-0056 unit moved two (FR-154 Partly → Implemented, FR-155 Not built →
+Implemented) to 88/25/0/6, and this change moves one (FR-157 Partly → Implemented), and
+89/24/0/6 is asserted against the 119 row count rather than trusted.
 
 The `Implemented` count includes FR-152's row, whose cell reads
 `**Implemented (as a documented refusal)**` — the one verdict spelled with a
@@ -170,8 +172,8 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 88 |
-| Partly | 25 |
+| Implemented | 89 |
+| Partly | 24 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 6 |
 | **Total rows** | **119** |
@@ -190,7 +192,8 @@ refresh counted it as Implemented, which is why its total read 87/25/0/7 rather 
 88/25/0/6 on the same tree minus this unit's two rows.
 
 Closed since the 2026-10-13 refresh: **FR-154** (Partly → Implemented) and **FR-155**
-(Not built → Implemented), both 2026-10-14, ADR-0056. The six Not built rows are
+(Not built → Implemented), both 2026-10-14, ADR-0056; **FR-157** (Partly → Implemented),
+2026-10-14, ADR-0057. The six Not built rows are
 FR-008–011, FR-012–015, FR-036, FR-052–056, FR-134 and FR-159.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not

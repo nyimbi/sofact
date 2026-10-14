@@ -100,6 +100,7 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeliveryGate,
 	DeliveryReport,
+	DeploymentScope,
 	DeploymentTopology,
 	DeployRecord,
 	DispatchRecord,
@@ -373,6 +374,7 @@ class FactoryService:
 		envelope: DeliveryEnvelope | None = None,
 		topology: DeploymentTopology | None = None,
 		escape_budgets: Sequence[EscapeBudget] = (),
+		scope: DeploymentScope | None = None,
 		compositions: Mapping[str, PluginComposition] | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
@@ -404,6 +406,12 @@ class FactoryService:
 		product has not measured. So nothing is invented, no lane is reduced, and the
 		delivery report says FR-023 is not in force rather than printing a clean table.
 
+		``scope`` is FR-157's autonomy target, and ``None`` means *this deployment declared
+		none* rather than "the personal default". The same distinction the other four make,
+		and the one FR-157 is about: the requirement's own words are that the target is
+		"deployment-scoped, not product-scoped", so a factory that supplied a default would
+		be imposing the very thing D17 removed. The report states which happened.
+
 		``compositions`` is FR-154's declared plugin composition, keyed by harness name, and
 		``None`` means *this deployment declared none* rather than "no composition" -- a
 		harness with no declaration runs the empty composition derived from its own spec, which
@@ -418,6 +426,7 @@ class FactoryService:
 		self._envelope = envelope
 		self._topology = topology
 		self.escape_budgets: tuple[EscapeBudget, ...] = tuple(escape_budgets)
+		self.scope: DeploymentScope | None = scope
 		self._compositions: Mapping[str, PluginComposition] = dict(compositions or {})
 		self._state: ProjectState | None = None
 
@@ -2912,6 +2921,13 @@ class FactoryService:
 		bad history by deploying again.
 		"""
 		state = await self.state()
+		# FR-157's comparison needs the delivery's own number, and this fold does not hold
+		# the contract and decomposition `ceiling` computes it from. It is read off the
+		# latest *report* instead — which is the same number, recorded by the render that
+		# computed it — so the rate and the target are compared against one figure rather
+		# than two derived independently. `None` when no delivery exists, which the report
+		# states rather than reading as a shortfall.
+		delivered = state.delivery
 		return measure_escapes(
 			deploys=state.deploys,
 			reports=state.deliveries,
@@ -2920,6 +2936,8 @@ class FactoryService:
 			budgets=self.escape_budgets,
 			overrides=state.escape_overrides,
 			contracts=state.contracts,
+			scope=self.scope,
+			delivered_ceiling=None if delivered is None else delivered.autonomy,
 		)
 
 	async def escapes(self, report_id: str | None = None) -> tuple[EscapeEvent, ...]:

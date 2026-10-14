@@ -18,6 +18,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from conftest import COLLECTED
+
 from sofact.views import Phase, PhaseGate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +28,14 @@ README = ROOT / "README.md"
 PHASES = ROOT / "docs" / "phases.md"
 
 _ROW = re.compile(r"^\|\s*\*\*(P[A-Za-z0-9]*)\b", re.M)
+
+_SUITE_COUNT = re.compile(r"^uv run pytest -vxs tests/ci\s+#\s*(\d+) tests$", re.M)
+"""The README's own line for running the suite, and the figure it states.
+
+Anchored to the whole line rather than searching for a bare number, because a four-digit
+figure appears all over a README and a check that matched any of them would pass on the
+wrong one — and would then be a gate about nothing in particular.
+"""
 """A phase code in the row shape both documents use.
 
 The pattern is ``P[A-Za-z0-9]*`` rather than ``P\\d`` deliberately. Written as ``P\\d``
@@ -65,3 +76,42 @@ class TestThePhaseReferenceMatchesTheFrontPage:
 		text = README.read_text(encoding="utf-8").lower()
 		for gate in PhaseGate:
 			assert gate.value.replace("_", " ") in text or gate.value in text, gate.value
+
+
+# --------------------------------------------------------------------------- #
+# the suite's size, which the README states and nothing checked
+# --------------------------------------------------------------------------- #
+
+
+class TestTheSuiteCountIsTheOneThatRan:
+	"""The README publishes a test count, and it had drifted 1282 to 1394 unnoticed.
+
+	An unguarded figure in a living document is a figure that is eventually wrong, and
+	this one is read by exactly the person deciding whether to trust the project. The
+	count asserted is pytest's own, not one derived from the tree: an inventory read from
+	the source is not an inventory of what runs.
+	"""
+
+	def test_the_readme_states_a_count_at_all(self) -> None:
+		assert _SUITE_COUNT.search(README.read_text(encoding="utf-8")), (
+			"README.md no longer states the suite's size on the command line that runs it"
+		)
+
+	def test_the_stated_count_is_the_one_this_run_collected(self) -> None:
+		"""Skipped on a filtered run, and the skip is the point.
+
+		``-k``/``-m`` make the collected count differ from the run's, so a gate asserting
+		on it would fail for a reason its operator cannot act on — the way a check teaches
+		people to bypass it. A filtered run is not a run that measured this.
+		"""
+		assert COLLECTED.get("all"), "conftest did not record what was collected"
+		if not COLLECTED.get("whole_suite"):
+			pytest.skip("only an unfiltered run over tests/ci measures the suite's size")
+
+		match = _SUITE_COUNT.search(README.read_text(encoding="utf-8"))
+		assert match is not None, "the count line is absent; the sibling test reports that"
+		stated = int(match.group(1))
+		assert stated == COLLECTED["all"], (
+			f"README.md says {stated} tests and this run collected {COLLECTED['all']}. "
+			"The count is the suite's size, so update the line when the suite changes."
+		)

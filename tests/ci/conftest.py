@@ -50,6 +50,58 @@ GOOD_ANSWERS: dict[ElicitationDimension, str] = {
 """Answers that clear every dimension's floor on the first attempt."""
 
 
+COLLECTED: dict[str, int] = {}
+"""What this run collected, for the one document that states the number.
+
+Three keys, because a filtered run and a full one collect different counts and only the
+full one is the number the README is about: ``"all"`` is what collection found, recorded
+before ``-k``/``-m`` deselect anything, ``"selected"`` is what actually ran, and
+``"whole_suite"`` is whether this run measured the suite at all. A gate that asserted on
+a narrowed run would fail for a reason its operator cannot act on, which is how a check
+teaches people to bypass it.
+"""
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+	"""Record the count before deselection, so a filtered run can be told from a full one.
+
+	The README states the suite's size and nothing checked it: the number had drifted
+	1282 to 1394 by the time anyone looked, which is what an unguarded figure in a living
+	document does. This is the guard, and it is the count pytest itself collected rather
+	than a number derived from the tree — an inventory read from the source is not an
+	inventory of what runs.
+	"""
+	COLLECTED["all"] = len(items)
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+	"""Record what was selected, and whether this run measured the whole suite.
+
+	Three ways a run can fail to be *the suite*: ``-k``/``-m`` deselect after collection,
+	``-x`` stops it partway, and a positional path narrower than ``testpaths`` collects a
+	subset — which is how this check first reported 5 where the README said 1396, having
+	been handed ``tests/ci/test_docs.py``. Each of those makes the collected count a
+	number about something other than the suite, so the gate below declines to compare
+	rather than failing for a reason its operator cannot act on.
+	"""
+	COLLECTED["selected"] = len(session.items)
+	option = session.config.option
+	paths = [arg for arg in session.config.args if not arg.startswith("-")]
+	# `getattr` rather than attribute access, because the first version of this hook read
+	# `option.exitfirst` and pytest does not define it: the whole run died with
+	# INTERNALERROR before a single test executed. A guard that can break collection is
+	# worse than no guard, so every read here is optional and every default means
+	# *not narrowed* — the hook's only job is to report, never to decide.
+	narrowed = paths not in ([], ["tests/ci"])
+	COLLECTED["whole_suite"] = int(
+		not narrowed
+		and not getattr(option, "keyword", "")
+		and not getattr(option, "markexpr", "")
+		and not getattr(option, "maxfail", 0)
+	)
+
+
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
 	"""Point the advisor at a closed port for every test by default.

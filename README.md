@@ -230,6 +230,10 @@ into a per-lane rate. The producer writes oracles and modules — it does not wr
 reverts, which is what makes this the factory's only ground truth. A lane over its declared
 budget has its ceiling reduced automatically until the rate returns
 ([ADR-0054](docs/adr/0054-the-escape-rate-is-the-one-number-no-producer-authored.md)).
+`sofact scope` declares what the deployment is aiming at, so the rate has something to be
+aimed at: the target is **deployment-scoped, not product-scoped**, and there is deliberately
+no default
+([ADR-0057](docs/adr/0057-the-autonomy-target-is-a-deployment-scoped-type.md)).
 
 ## Harness
 
@@ -245,6 +249,7 @@ sofact repair                       # hand each refuted clause back to the produ
 sofact attempts                     # what the repair loop cost: attempts, tokens, wall clock
 sofact composition                  # the frozen plugin set, and whether FR-154's freeze holds
 sofact composition --verify a=<sha> # re-check the pins against what is installed now
+sofact scope                        # the autonomy target this deployment declared (FR-157)
 sofact integrity                    # re-verify the pinned hashes
 sofact integrate                    # P7
 sofact deliver --root ./delivery    # P8: the report, its chain, its handover
@@ -268,6 +273,17 @@ mutable at runtime by the agent, does not, and the verb says so instead of print
 table. §8.7's worked audit of the ecosystem is the corpus: eight measured rows, four
 distinct verdicts, one plugin admitted
 ([ADR-0056](docs/adr/0056-the-freeze-is-derived-from-the-argv-and-the-deletion-test-admits.md)).
+
+`scope` reports what this deployment is aiming at, and **exits non-zero when none was
+declared** — there is no default, because FR-157 makes the target deployment-scoped and a
+product-supplied one would be the θ gate imposed as the very default it removes. `escapes`
+prints the same comparison against the last delivery's own number. The target is a *type*
+rather than a number because the two ways a declared target can be one this build cannot
+honour carry different remedies: a personal deployment may not reach L4, and a third-party
+one may not either while the gate that admits it is unbuilt. Absence is a state, not a
+missed target: a deployment that declared none is told no comparison was made, not that it
+fell short
+([ADR-0057](docs/adr/0057-the-autonomy-target-is-a-deployment-scoped-type.md)).
 
 `probe` is not optional: dispatching against an assumed capability is exactly what the spec
 forbids, so `dispatch` refuses until a profile exists. Which harness is a **row of data, not
@@ -352,7 +368,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1282 tests
+uv run pytest -vxs tests/ci          # 1396 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

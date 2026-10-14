@@ -36,6 +36,7 @@ __all__ = [
 	"EVOLVABILITY_DEBT",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
+	"L4_GATE_THETA",
 	"MACHINE_API_VERSION",
 	"MAINTAINABILITY_NOT_VERIFIED",
 	"MODE_G_CEILING",
@@ -43,6 +44,8 @@ __all__ = [
 	"MODULE_CLASS_CEILING",
 	"ORACLE_AUDIT_REQUIREMENTS",
 	"ORACLE_RANK",
+	"PERSONAL_AUTONOMY_BAND",
+	"THETA_GATE_BUILT",
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
 	"VERDICT_SURFACES",
@@ -59,6 +62,7 @@ __all__ = [
 	"ClauseStem",
 	"ClauseVerdict",
 	"CompletionClaim",
+	"Consumer",
 	"Contract",
 	"Contradiction",
 	"Cut",
@@ -71,6 +75,7 @@ __all__ = [
 	"DeliveryGate",
 	"DeliveryReport",
 	"DeployRecord",
+	"DeploymentScope",
 	"DeploymentTopology",
 	"DimensionBound",
 	"DimensionStatus",
@@ -2727,6 +2732,56 @@ class EscapeReport(View):
 	reading claims anything at all.
 	"""
 
+	scope: DeploymentScope | None = None
+	"""The target this deployment declared, when it declared one (FR-157).
+
+	Carried on the *measurement* rather than beside it, because FR-157's whole point is
+	that a rate with no declared ambition is a number nobody is aiming at: "the θ_hi = 0.80
+	gate ... must not be imposed as a default" is the same statement read the other way,
+	and a deployment that declared no target has one fewer thing to be measured against.
+	``None`` means *no target was declared*, which the report states rather than assuming
+	:data:`PERSONAL_AUTONOMY_BAND`'s floor — a default target would be a product-scoped
+	one, which is exactly what the requirement refuses.
+	"""
+
+	delivered_ceiling: AutonomyLevel | None = None
+	"""The delivery's own number, when the caller supplied one, for :attr:`meets_target`.
+
+	``None`` when the measurement is read for its own sake rather than as part of a
+	delivery. The comparison FR-157 asks for is against what the *deployment* may claim,
+	and this module does not compute that — :func:`sofact.delivery.ceiling` does, from a
+	contract and a decomposition this fold does not hold. So the number arrives from the
+	caller and its absence is a state the report names rather than fills.
+	"""
+
+	@property
+	def meets_target(self) -> bool | None:
+		"""Whether the delivery reaches the declared target (FR-157).
+
+		``None`` in either of two cases, and they are the same case: no target was declared,
+		or no delivery ceiling was supplied. A boolean here would have to be ``False`` for
+		both, and ``False`` reads as a *shortfall* — which is a claim about a comparison
+		that was never made. The report says which of the three states it is in, which is
+		the rule :attr:`discharged` keeps one property down.
+		"""
+		if self.scope is None or self.delivered_ceiling is None:
+			return None
+		return self.scope.met_by(self.delivered_ceiling)
+
+	@property
+	def target_shortfall(self) -> int | None:
+		"""How many levels short of the target the delivery is, or ``None`` (FR-157).
+
+		Signed rather than clamped: a delivery above its target is a real and reportable
+		state — a deployment aiming at L2 whose modules sustain L3 has headroom, not a
+		problem — and clamping at zero would erase the difference between meeting a target
+		exactly and exceeding it.
+		"""
+		if self.meets_target is None:
+			return None
+		assert self.scope is not None and self.delivered_ceiling is not None
+		return int(self.scope.target) - int(self.delivered_ceiling)
+
 	@property
 	def deployed_changes(self) -> int:
 		"""How many distinct deployed reports the measurement saw, placed or not."""
@@ -2832,6 +2887,199 @@ def lane_ceiling(
 	if override is not None:
 		return granted
 	return AutonomyLevel(max(int(granted) - 1, int(AutonomyLevel.L0)))
+
+
+# --------------------------------------------------------------------------- #
+# FR-157 — the deployment-scoped autonomy target
+# --------------------------------------------------------------------------- #
+
+
+class Consumer(StrEnum):
+	"""Who consumes the delivered artefact, which is what FR-157 scopes the target by.
+
+	The requirement's whole move is that the *same* machinery carries two thresholds
+	because the cost of a false completion differs by who bears it: "a false completion
+	costs a third party a production incident and costs the operator a debugging session
+	with code they did not write — both real, neither equal".
+	"""
+
+	OPERATOR = "operator"
+	"""D17's personal-use case: the blast radius is the operator's own working time."""
+
+	THIRD_PARTY = "third_party"
+	"""The artefact is consumed by someone who did not commission it."""
+
+
+PERSONAL_AUTONOMY_BAND: Final[tuple[AutonomyLevel, AutonomyLevel]] = (
+	AutonomyLevel.L2,
+	AutonomyLevel.L3,
+)
+"""FR-157's "required ceiling is L2–L3 with escape-rate tracking" for D17's case.
+
+A *band* rather than a number because the requirement states a range: L2 is the floor
+below which the escape-rate tracking it mandates is measuring something nobody is aiming
+at, and L3 is the top of what a personal deployment may claim. L4 is outside it in both
+directions of reasoning — above because FR-157 says the θ_hi = 0.80 gate "must not be
+imposed as a default", and a target that could be reached by declaring it would be that
+gate imposed by a side door.
+"""
+
+L4_GATE_THETA: Final[float] = 0.80
+"""The measured oracle strength FR-157 leaves unchanged for third-party consumers.
+
+FR-024–FR-035's gate. It is named here because FR-157 is the requirement that decides
+*who it applies to*, and a number stated in one requirement and applied in another is a
+number a reader has to go looking for.
+"""
+
+THETA_GATE_BUILT: Final[bool] = False
+"""Whether this build can decide the θ ≥ 0.80 gate (FR-024–FR-035).
+
+``False``, and the roadmap records why: the routing function, the autonomy ladder and the
+θ computation are **Partly** — the ceilings half is built and the θ half is not, so
+nothing in this build measures an oracle strength to compare against
+:data:`L4_GATE_THETA`. It is a named constant rather than a comment so that a third-party
+scope's refusal can say *which* thing is missing, and so that building FR-024–FR-035
+flips one boolean instead of rewriting a sentence in three places.
+"""
+
+
+class DeploymentScope(View):
+	"""The autonomy target one deployment is aiming at (FR-157).
+
+	FR-157's requirement is that the target be "**deployment-scoped, not
+	product-scoped**", and the roadmap recorded the gap precisely: the *inputs* existed —
+	FR-107's audit and FR-022's escape rate — and "no deployment scope type carries 'this
+	deployment targets L3', so nothing compares a measured rate against a declared
+	ambition".
+
+	So this type is the ambition, and :meth:`met_by` is the comparison. What makes it
+	worth a type rather than a number in a config file is the refusal set: the two ways a
+	declared target can be one this build cannot honour are both structural, and both are
+	worth catching before a build rather than after a delivery.
+
+	**A personal scope may not target L4.** FR-157 says the θ gate "must not be imposed as
+	a default" for D17's case, and the symmetric error is a deployment that grants itself
+	the level the gate exists to withhold — declaring the target would be the gate imposed
+	by a side door, with the requirement's own remedy (measure, or do not claim) skipped.
+
+	**A third-party scope may not target L4 either, and for a different reason.** There the
+	gate applies unchanged, so L4 is reachable *through* it — and :data:`THETA_GATE_BUILT`
+	is ``False``, so this build cannot decide it. The two refusals carry different
+	sentences because they have different remedies: one is "you are not aiming at the right
+	band", the other is "the instrument that would admit you is not built yet", and a
+	single message would send the second operator looking for a setting.
+
+	**Escape-rate tracking is required of both.** FR-157 names it beside the personal band,
+	but its argument is general: with no external market there is no exogenous escape
+	signal, so the rate is the only thing distinguishing an imagined product from a
+	plausible-looking one. A scope that declares a target and declines the instrument is
+	the target NFR-024 refuses — one the product has not measured.
+	"""
+
+	consumer: Consumer
+	target: AutonomyLevel
+	"""The ceiling this deployment is aiming at, inside :attr:`band`."""
+
+	escape_tracking: bool
+	"""Whether FR-022's rate is measured for this deployment.
+
+	Required ``True``: a target with no instrument is an unmeasured target (NFR-024), and
+	FR-157's own text pairs the personal band with "with escape-rate tracking".
+	"""
+
+	declared_by: NonEmptyStr
+	declared_at: datetime
+	note: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _a_target_this_build_can_honour(self) -> Self:
+		floor, ceiling = self.band
+		if not self.escape_tracking:
+			raise ValueError(
+				f"the {self.consumer.value} scope declares a target of {self.target.name} "
+				"with no escape-rate tracking; FR-157 pairs its band with the rate and "
+				"FR-022 makes it the primary safety metric, so a declared target nobody "
+				"measures is the unmeasured target NFR-024 refuses"
+			)
+		if self.consumer is Consumer.OPERATOR and not floor <= self.target <= ceiling:
+			raise ValueError(
+				f"a personal-use deployment targets {self.target.name}, outside FR-157's "
+				f"required band {floor.name}-{ceiling.name}. Above it, the θ_hi = "
+				f"{L4_GATE_THETA:g} gate that admits L4 must not be imposed as a default "
+				"and must not be reached by declaring it either; below it, the escape-rate "
+				"tracking the requirement mandates is measuring a level nobody is aiming at"
+			)
+		if (
+			self.consumer is Consumer.THIRD_PARTY
+			and self.target > AutonomyLevel.L3
+			and not THETA_GATE_BUILT
+		):
+			raise ValueError(
+				f"a third-party deployment targets {self.target.name}, which FR-157 admits "
+				f"only through the unchanged θ_hi = {L4_GATE_THETA:g} gate (FR-024–FR-035) "
+				f"— and that gate is not built in this build, so nothing here measures an "
+				f"oracle strength to decide it. Declaring the target does not discharge the "
+				f"gate"
+			)
+		return self
+
+	@property
+	def band(self) -> tuple[AutonomyLevel, AutonomyLevel]:
+		"""The range a target may fall in for this consumer (FR-157).
+
+		The personal band is the requirement's own L2 to L3. A third-party band runs to L4
+		because the gate applies *unchanged* rather than being raised — so the top of the
+		range is reachable in principle and by the gate in practice, which is the
+		distinction :attr:`admits_l4` exists to keep.
+		"""
+		if self.consumer is Consumer.OPERATOR:
+			return PERSONAL_AUTONOMY_BAND
+		return (AutonomyLevel.L2, AutonomyLevel.L4)
+
+	@property
+	def admits_l4(self) -> bool:
+		"""Whether this scope could reach L4 *in this build* (FR-157, FR-024 to FR-035).
+
+		Both conditions are required and neither is a formality: a personal scope never
+		does, whatever the gate's state, and a third-party scope does only once the gate
+		can be decided. A property rather than a field because it is a fact about the
+		build and the consumer, and a stored boolean would be a claim nothing checks.
+		"""
+		return self.consumer is Consumer.THIRD_PARTY and THETA_GATE_BUILT
+
+	def met_by(self, ceiling: AutonomyLevel) -> bool:
+		"""Whether a delivery's computed ceiling reaches this scope's target (FR-157).
+
+		``ceiling`` is the delivery's number — :func:`sofact.delivery.ceiling`, FR-123's
+		cap applied — and not the modules'. The target FR-157 scopes is what the
+		*deployment* may claim, so comparing it against a per-module number would report a
+		shortfall the delivery never had.
+		"""
+		return ceiling >= self.target
+
+	@property
+	def caveats(self) -> tuple[str, ...]:
+		"""What a declared target does not claim, stated rather than left to inference.
+
+		The same discipline :attr:`EscapeReport.caveats` keeps. A target is an *ambition*:
+		it is not a measurement, it does not raise any ceiling, and the two directions of
+		the personal band are refused for two different reasons that a reader of the
+		number alone would collapse into one.
+		"""
+		return (
+			"the target is an ambition and not a measurement: it raises no ceiling, and "
+			"whether it is met is decided by comparing it against the delivery's own "
+			"number (FR-157)",
+			f"L4 is admitted only through the θ_hi = {L4_GATE_THETA:g} gate (FR-024–FR-035), "
+			f"which is {'built' if THETA_GATE_BUILT else 'not built in this build'}; "
+			f"a {self.consumer.value} deployment {'may' if self.admits_l4 else 'may not'} "
+			f"reach it here",
+			"the personal band's two ends are refused for different reasons — above it the "
+			"gate must not be imposed as a default, below it the mandated escape-rate "
+			"tracking would be measuring a level nobody aims at — so a target outside the "
+			"band is not one error but one of two",
+		)
 
 
 # --------------------------------------------------------------------------- #
