@@ -130,9 +130,9 @@ class TestTheCeilingFollowsTheMeasurement:
 		"""The whole of A2's arithmetic. T1 is the degraded declaration and lowers L4 to
 		L3; a deployment *measured* to confine its children is not degraded, so charging
 		it T1's penalty would be the same conflation R2 names, in the other direction."""
-		assert (
-			topology_ceiling(AutonomyLevel.L4, DeploymentTopology.T1).name == "L3"
-		), "the undeclared T1 case must be unchanged"
+		assert topology_ceiling(AutonomyLevel.L4, DeploymentTopology.T1).name == "L3", (
+			"the undeclared T1 case must be unchanged"
+		)
 		assert (
 			topology_ceiling(
 				AutonomyLevel.L4, DeploymentTopology.T1, boundary=_boundary(enforced=True)
@@ -145,9 +145,7 @@ class TestTheCeilingFollowsTheMeasurement:
 		existing call site and fixture would change meaning."""
 		assert (
 			topology_ceiling(AutonomyLevel.L4, DeploymentTopology.T1).name
-			== topology_ceiling(
-				AutonomyLevel.L4, DeploymentTopology.T1, boundary=None
-			).name
+			== topology_ceiling(AutonomyLevel.L4, DeploymentTopology.T1, boundary=None).name
 		)
 
 	def test_a_boundary_that_did_not_hold_does_not_raise_the_ceiling(self) -> None:
@@ -169,9 +167,9 @@ class TestTheCeilingFollowsTheMeasurement:
 		assert raised.modifier == 0
 		assert TOPOLOGY_MODIFIER[DeploymentTopology.T1] == -1
 		for topology in DeploymentTopology:
-			assert (
-				topology_ceiling(AutonomyLevel.L4, topology, boundary=raised).name == "L4"
-			), f"{topology.value} must not exceed L4 with a measured boundary"
+			assert topology_ceiling(AutonomyLevel.L4, topology, boundary=raised).name == "L4", (
+				f"{topology.value} must not exceed L4 with a measured boundary"
+			)
 
 	def test_the_declared_table_is_unchanged(self) -> None:
 		"""§5.4's table is read back by another test and must not have been edited to make

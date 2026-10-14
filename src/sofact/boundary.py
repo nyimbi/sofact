@@ -133,14 +133,11 @@ def seatbelt_profile(
 	return (
 		"(version 1)\n"
 		"(deny default)\n"
-		"(allow file-read*)\n"
-		+ denied
-		+ "(allow process-exec*)\n"
+		"(allow file-read*)\n" + denied + "(allow process-exec*)\n"
 		"(allow process-fork)\n"
 		"(allow sysctl-read)\n"
 		'(allow file-write* (literal "/dev/null") (literal "/dev/stdout") '
-		'(literal "/dev/stderr"))\n'
-		+ allowance
+		'(literal "/dev/stderr"))\n' + allowance
 	)
 
 
@@ -204,10 +201,12 @@ def _escape_target(workspace: Path, granted: Sequence[Path]) -> Path:
 	escape marker and be credited as confinement the profile never demonstrated.
 	"""
 	escape = workspace.resolve().parent
-	assert not any(
-		root == escape or root in escape.parents for root in granted
-	), f"the escape target {escape} is inside a granted root, so the write probe would be void"
-	assert escape.is_dir(), f"the escape target {escape} does not exist, so a failed touch proves nothing"
+	assert not any(root == escape or root in escape.parents for root in granted), (
+		f"the escape target {escape} is inside a granted root, so the write probe would be void"
+	)
+	assert escape.is_dir(), (
+		f"the escape target {escape} does not exist, so a failed touch proves nothing"
+	)
 	return escape
 
 
@@ -472,7 +471,9 @@ async def detect_boundary(
 	against a path that is not there would report a mechanism's failure to launch as a
 	boundary that did not hold.
 	"""
-	assert workspace.is_dir(), f"cannot measure a boundary in a workspace that is not one: {workspace}"
+	assert workspace.is_dir(), (
+		f"cannot measure a boundary in a workspace that is not one: {workspace}"
+	)
 	attempt = only if only is not None else tuple(BoundaryMechanism)
 	roots = tuple(root.resolve() for root in deny_read)
 	grants = tuple(root.resolve() for root in writable)
@@ -488,11 +489,7 @@ async def detect_boundary(
 			attempted=(
 				f"ran one child under a Seatbelt profile permitting writes only under "
 				f"{workspace.resolve()}"
-				+ (
-					f" and {', '.join(str(root) for root in grants)}"
-					if grants
-					else ""
-				)
+				+ (f" and {', '.join(str(root) for root in grants)}" if grants else "")
 				+ f", told to write {INSIDE_MARKER} there and then {ESCAPE_MARKER} in "
 				f"{escape}"
 				+ (
