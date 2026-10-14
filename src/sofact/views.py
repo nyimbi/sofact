@@ -1382,8 +1382,40 @@ class Decomposition(View):
 
 		A first-class metric rather than a derived nicety: integration risk grows with
 		it, possibly as ``n²`` (§1.4), so it is a gate input.
+
+		It is the count of *surfaces*, which is one per module: a module is the unit that
+		exposes an interface, so the integration points are the modules. That is why the
+		number is minimised by grouping clauses rather than by trimming a member list —
+		and why :meth:`interface_members` is reported beside it, since a count of
+		surfaces says nothing about how wide each one is.
+
+		The bound on this number is §1.3's modules dimension. The spec gives no *interface*
+		threshold, so none is invented here; what FR-091 makes checkable is the comparison
+		against the grouping the system model declares, which lives in
+		:func:`sofact.decomposition.interface_groups` — one rule in one place, because a
+		proposer and a gate that read the model differently would let the proposer emit a
+		proposal its own gate refuses.
 		"""
 		return len(self.modules)
+
+	@property
+	def interface_members(self) -> int:
+		"""Total declared public names across every module's surface (FR-091, §20.1).
+
+		The other half of the interface metric. Two decompositions can expose the same
+		number of surfaces at very different widths, and §20.1's "interface count per
+		module" is the ratio of the two. Counted with duplicates, because the same name on
+		two surfaces is two places a caller can reach it — which is the integration
+		exposure the number exists to state.
+		"""
+		return sum(len(module.surface) for module in self.modules)
+
+	@property
+	def interfaces_per_module(self) -> float:
+		"""§20.1's metric, as the ratio it names rather than a second absolute count."""
+		if not self.modules:
+			return 0.0
+		return self.interface_members / len(self.modules)
 
 	@property
 	def class_distribution(self) -> dict[ModuleClass, int]:

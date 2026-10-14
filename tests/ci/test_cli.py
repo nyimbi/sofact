@@ -382,6 +382,34 @@ class TestTheContract:
 		assert "no oracle covers, so the ceiling is L2 (FR-109)" in result.output
 
 
+class TestTheInterfaceCount:
+	"""FR-091 at the surface: the number the operator approves is the number §20.1 names.
+
+	The gate reports it and the CLI prints it, and the two are read at different moments by
+	different readers. Checking the printed line against *itself* is what is available here
+	without reaching into the service: the count has to be the size of the list printed
+	underneath it, and the ratio has to be the members over that same count. A number that
+	disagrees with the list it counts is a number nobody can act on.
+	"""
+
+	def test_the_count_is_the_size_of_the_list_beneath_it(self, home: Path) -> None:
+		conversation(home)
+		result = _proposed(home)
+		assert result.exit_code == 0, result.output
+		counts = re.search(
+			r"(\d+) module\(s\); (\d+) declared member\(s\) on their surfaces "
+			r"\(([\d.]+) per module, FR-091\)",
+			result.output,
+		)
+		assert counts is not None, result.output
+		modules, members, ratio = int(counts.group(1)), int(counts.group(2)), counts.group(3)
+		order = re.search(r"build order: (.+)", result.output)
+		assert order is not None, result.output
+		assert len(order.group(1).split(" -> ")) == modules
+		assert ratio == f"{members / modules:.1f}", "the ratio is the members over that count"
+		assert "G1-G2 share" in result.output, "FR-125 is printed beside it, not instead of it"
+
+
 # --------------------------------------------------------------------------- #
 # the adversarial audit — FR-107 at the operator's surface
 # --------------------------------------------------------------------------- #

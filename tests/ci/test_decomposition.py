@@ -27,6 +27,8 @@ from sofact.decomposition import (
 	classify,
 	decomposition_hash,
 	gate,
+	interface_groups,
+	minimal_interface_count,
 	propose,
 )
 from sofact.planner import DEFAULT_MODULE_BUDGET, compile_plan
@@ -44,6 +46,8 @@ from sofact.views import (
 	OracleClass,
 	OracleDeclaration,
 	ReasoningClass,
+	SystemInterface,
+	SystemModel,
 )
 
 MakeContract = Callable[..., Contract]
@@ -90,8 +94,17 @@ def decomposition_of(*modules: Module, contract: Contract) -> Decomposition:
 
 
 class TestTheProposal:
-	def test_every_clause_becomes_a_module(self, make_contract: MakeContract) -> None:
-		"""FR-088 direction two, at the proposal: no obligation is left unowned."""
+	def test_every_clause_becomes_a_module_without_a_model(
+		self, make_contract: MakeContract
+	) -> None:
+		"""FR-088 direction two, at the proposal: no obligation is left unowned.
+
+		Without a model there is no declared grouping to honour, so one module per clause is
+		the proposal — which is what this asserts. The *model-bearing* case is
+		:class:`TestTheInterfaceCount`: FR-091 makes a declared interface over several
+		clauses one surface, and a test named "every clause becomes a module" would then be
+		a lie about the proposer rather than a test of it.
+		"""
 		contract = make_contract(
 			("the api returns 200", oracle()),
 			("the total is summed", oracle()),
@@ -304,6 +317,326 @@ class TestTheClassifier:
 
 
 # --------------------------------------------------------------------------- #
+# FR-091: the interface count, and what "minimise" is checkable as
+# --------------------------------------------------------------------------- #
+
+
+def model_with(*interfaces: SystemInterface) -> SystemModel:
+	return SystemModel(interfaces=interfaces)
+
+
+def an_interface(
+	name: str, clause_ids: tuple[str, ...], *members: InterfaceMember
+) -> SystemInterface:
+	return SystemInterface(name=name, clause_ids=clause_ids, members=members)
+
+
+class TestTheInterfaceCount:
+	"""FR-091, and the line §7.1 draws that this must not cross.
+
+	"Minimise interface surface" is checkable *only* against a grouping the operator
+	declared: §7.1 says there is no oracle for choosing one. FR-083 already made the model
+	the single source for interface definitions, and an interface there is declared over
+	clauses — so the model states how many surfaces those clauses need, and the proposer
+	either honours it or multiplies it. These tests exercise both, and the state where
+	nothing was declared to minimise against.
+	"""
+
+	def test_without_a_model_one_module_per_clause(self, make_contract: MakeContract) -> None:
+		"""Nothing declared, nothing merged: the proposer's behaviour is unchanged.
+
+		This is the state of every project whose P2 declared no model, and it is why the
+		grouping cannot be a behaviour change for existing deployments.
+		"""
+		contract = make_contract(
+			("the api returns 200", oracle()),
+			("the total is summed", oracle()),
+		)
+
+		proposal = propose(contract)
+
+		assert len(proposal.modules) == 2
+		assert minimal_interface_count(contract) == 2
+
+	def test_a_declared_interface_over_two_clauses_is_one_module(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The minimisation itself: one declared surface, one integration point.
+
+		The model says these two clauses introduce one interface. Giving each its own
+		module contradicts the model it was handed — which is FR-083's defect one phase
+		later, and exactly what FR-091's "minimise" exists to stop.
+		"""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses)
+		model = model_with(
+			an_interface(
+				"ledger",
+				(first, second),
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+				InterfaceMember(name="sum", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+
+		proposal = propose(contract, model)
+
+		assert len(proposal.modules) == 1, "one declared interface is one surface"
+		assert proposal.interface_count == 1
+		assert minimal_interface_count(contract, model) == 1
+		module = proposal.modules[0]
+		assert set(module.clause_ids) == {first, second}
+		assert module.name == "ledger", "the module is named after the interface it is"
+		assert [m.name for m in module.surface] == ["record", "sum"], (
+			"the surface is the model's, and it is the union of what the group's clauses introduce"
+		)
+		assert proposal.interface_members == 2
+
+	def test_interfaces_over_disjoint_clauses_merge_nothing(
+		self, make_contract: MakeContract
+	) -> None:
+		"""Two interfaces, four clauses, no overlap: there is nothing to merge."""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+			("the api returns 200", oracle()),
+			("the api returns 404", oracle()),
+		)
+		first, second, third, fourth = (c.id for c in contract.clauses)
+		model = model_with(
+			an_interface("ledger", (first, second)),
+			an_interface("api", (third, fourth)),
+		)
+
+		proposal = propose(contract, model)
+
+		assert len(proposal.modules) == 2
+		assert proposal.interface_count == minimal_interface_count(contract, model) == 2
+
+	def test_two_clauses_sharing_an_interface_in_different_lanes_do_not_merge(
+		self, make_contract: MakeContract
+	) -> None:
+		"""``ModuleClass`` is "the class of work this module needs" (FR-050).
+
+		Two clauses in different lanes are different kinds of work however they are
+		surfaced, and merging them would move a module's autonomy ceiling — §14 gives G7 L1
+		*by class*. The interface is honoured; the lane is what stops it.
+		"""
+		contract = make_contract(
+			("the session service issues a token", oracle()),  # G7: "session", "token"
+			("the api returns 200", oracle()),  # G3: "api"
+		)
+		first, second = (c.id for c in contract.clauses)
+		assert classify(contract.clauses[0].statement) is not classify(
+			contract.clauses[1].statement
+		), "the fixture must put the two clauses in different lanes or it tests nothing"
+		model = model_with(an_interface("gateway", (first, second)))
+
+		proposal = propose(contract, model)
+		check = next(
+			c
+			for c in gate(proposal, contract, model=model).checks
+			if c.name == "interface_count_minimised"
+		)
+
+		assert len(proposal.modules) == 2, "a declared interface does not merge across lanes"
+		assert minimal_interface_count(contract, model) == 2, (
+			"the *grouping* respects the lane too, so the model does not ask for one surface "
+			"here — the proposer is not under-delivering against it"
+		)
+		assert check.passed, "the proposer did the only thing the lane rule permits"
+		assert "gateway spans" in check.detail and "FR-050" in check.detail, (
+			"the tension between the model's declaration and the lane rule is reported "
+			"rather than silently resolved, because the operator is the one who can "
+			"re-declare the interface"
+		)
+
+	def test_transitive_interfaces_group_everything_they_reach(
+		self, make_contract: MakeContract
+	) -> None:
+		"""Interfaces chain: one over {a, b} and one over {b, c} put all three on one surface.
+
+		Honouring only the first would leave the second split, which is the same defect
+		half-fixed.
+		"""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+			("the ledger rejects an unbalanced entry", oracle()),
+		)
+		first, second, third = (c.id for c in contract.clauses)
+		model = model_with(
+			an_interface("ledger", (first, second)),
+			an_interface("reconciliation", (second, third)),
+		)
+
+		groups = interface_groups(contract, model)
+
+		assert len(groups) == 1
+		assert {c.id for c in groups[0]} == {first, second, third}
+
+	def test_the_grouping_is_deterministic(self, make_contract: MakeContract) -> None:
+		"""Two runs over one unchanged contract and model must agree, name for name."""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+			("the api returns 200", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses[:2])
+		model = model_with(an_interface("ledger", (first, second)))
+
+		left, right = propose(contract, model), propose(contract, model)
+
+		assert [m.name for m in left.modules] == [m.name for m in right.modules]
+		assert [m.clause_ids for m in left.modules] == [m.clause_ids for m in right.modules]
+		assert [m.interface for m in left.modules] == [m.interface for m in right.modules]
+
+	def test_a_split_declared_interface_fails_the_gate(self, make_contract: MakeContract) -> None:
+		"""The refusal, exercised the only way it can be: a decomposition built by hand.
+
+		``propose`` honours the model, so a split means a module was revised by hand or a
+		future proposer stopped reading the model — which is the case the check is for. A
+		gate that trusted the proposer would fail open the moment a second proposer exists.
+		"""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses)
+		model = model_with(an_interface("ledger", (first, second)))
+		split = decomposition_of(
+			module_of("record", (first,)),
+			module_of("sum", (second,)),
+			contract=contract,
+		)
+
+		result = gate(split, contract, model=model)
+		check = next(c for c in result.checks if c.name == "interface_count_minimised")
+
+		assert not check.passed
+		assert "record" in check.detail and "sum" in check.detail, (
+			"a refusal that does not name both modules is one the operator re-derives by hand"
+		)
+		assert "ledger ->" in check.detail, "and it names the interface that was split"
+
+	def test_a_proposal_the_model_drove_passes_that_check(
+		self, make_contract: MakeContract
+	) -> None:
+		"""The default path: what the proposer emits is what the check passes on."""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses)
+		model = model_with(an_interface("ledger", (first, second)))
+
+		result = gate(propose(contract, model), contract, model=model)
+		check = next(c for c in result.checks if c.name == "interface_count_minimised")
+
+		assert check.passed, check.detail
+		assert "1 module(s) for 1 declared interface(s)" in check.detail
+
+	def test_no_model_is_a_vacuous_pass_and_says_so(self, make_contract: MakeContract) -> None:
+		"""NFR-025: nothing measured is not the same as nothing wrong.
+
+		§7.1's denial makes this the honest answer for a project that declared no model —
+		the factory cannot minimise against a declaration that does not exist, and a check
+		that manufactured a refusal would make every such project red until it authored one.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+
+		check = next(
+			c
+			for c in gate(propose(contract), contract).checks
+			if c.name == "interface_count_minimised"
+		)
+
+		assert check.passed
+		assert "asserts nothing" in check.detail
+		assert "NFR-025" in check.detail
+
+	def test_a_model_with_no_interfaces_is_the_same_vacuous_pass(
+		self, make_contract: MakeContract
+	) -> None:
+		"""A model of entities alone declares no surface, so nothing is split.
+
+		This is the state ``synthetic.a_model_for`` produces, and therefore the state of
+		every test in this suite that comes through P2.
+		"""
+		contract = make_contract(("the api returns 200", oracle()))
+
+		check = next(
+			c
+			for c in gate(propose(contract, SystemModel()), contract, model=SystemModel()).checks
+			if c.name == "interface_count_minimised"
+		)
+
+		assert check.passed
+		assert "declares no interfaces" in check.detail
+
+	def test_the_reported_count_names_the_members_and_the_ratio(
+		self, make_contract: MakeContract
+	) -> None:
+		"""§20.1 names "interface count per module", and a count of surfaces is not it.
+
+		Two decompositions can expose the same number of surfaces at very different widths,
+		so the reported check carries the member total and the ratio beside the count.
+		"""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses)
+		model = model_with(
+			an_interface(
+				"ledger",
+				(first, second),
+				InterfaceMember(name="record", kind=InterfaceMemberKind.FUNCTION),
+				InterfaceMember(name="sum", kind=InterfaceMemberKind.FUNCTION),
+			)
+		)
+
+		check = next(
+			c
+			for c in gate(propose(contract, model), contract, model=model).checks
+			if c.name == "interface_count_reported"
+		)
+
+		assert check.passed, "the reported half never fails — there is no number to test against"
+		assert "1 integration point(s)" in check.detail
+		assert "2 declared member(s)" in check.detail
+		assert "2.0 per module" in check.detail
+		assert "§1.3's modules dimension" in check.detail, (
+			"the bound on integration points is the envelope's, and the detail must say so "
+			"rather than implying an interface threshold that does not exist"
+		)
+
+	def test_the_hash_moves_when_the_grouping_moves(self, make_contract: MakeContract) -> None:
+		"""An approval describes the modules it approved, and the grouping is a decision.
+
+		The merged proposal and the split one are different architectures — one surface or
+		two — so an approval of one must not validate the other.
+		"""
+		contract = make_contract(
+			("the ledger records an entry", oracle()),
+			("the ledger keeps a running balance", oracle()),
+		)
+		first, second = (c.id for c in contract.clauses)
+		model = model_with(an_interface("ledger", (first, second)))
+
+		merged = propose(contract, model)
+		split = decomposition_of(
+			module_of("record", (first,)),
+			module_of("sum", (second,)),
+			contract=contract,
+		)
+
+		assert decomposition_hash(merged) != decomposition_hash(split)
+
+
+# --------------------------------------------------------------------------- #
 # the machine half, exercised by making it fail
 # --------------------------------------------------------------------------- #
 
@@ -393,6 +726,7 @@ class TestTheGateRefuses:
 			"every_module_cites_a_real_clause",
 			"every_module_has_completion_criteria",
 			"every_module_declares_a_budget",
+			"interface_count_minimised",
 			"interface_count_reported",
 			"within_delivery_envelope",
 		}

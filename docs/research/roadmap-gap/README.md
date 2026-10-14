@@ -13,9 +13,12 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1424 passed, 0 failed** (2026-10-14, after ADR-0058).
-The table below was written at 725; the verdicts are the part that matters and the ones
-closed since carry their date.
+`tests/ci` at the last refresh: **1437 passed, 0 failed** (2026-10-14, after ADR-0059). The
+previous run of this unit's tree failed exactly one test,
+`test_docs.TestTheSuiteCountIsTheOneThatRan`, whose whole job is to fail when the suite's size
+moves without the README's count line moving — it caught this unit's thirteen new tests, the
+line was updated, and the run above is the rerun. The table below was written at 725; the
+verdicts are the part that matters and the ones closed since carry their date.
 
 ---
 
@@ -69,7 +72,7 @@ closed since carry their date.
 | FR-088 traceability both directions | **Implemented** | `gate` checks `every_module_traces_to_a_requirement` and `every_requirement_traces_to_a_module` (`decomposition.py:423,438`); `test_an_unowned_clause_fails_the_gate` (`test_decomposition.py:260`). |
 | FR-089 DAG, no cycles | **Implemented** | `test_the_proposal_never_contains_a_cycle` (`test_decomposition.py:109`), `test_a_cycle_fails_the_gate` (`:239`). |
 | FR-090 declared interface and dependencies | **Implemented** | `Module.interface` / `depends_on` (`views.py:491`); `test_a_dependency_follows_the_oracle_the_contract_already_carries` (`test_decomposition.py:121`). |
-| FR-091 minimise interface surface, report the count | **Partly** | `interface_count` (`views.py:641`) is **reported**, not minimised — `decomposition.py:473` says so explicitly. No threshold, no alternative proposal. |
+| FR-091 minimise interface surface, report the count | **Implemented** (2026-10-14, ADR-0059) | Both clauses, and the gap was **structural rather than a missing threshold**: `propose` emitted exactly one module per clause, so `interface_count` (`views.py`) was literally `len(self.modules)` == `len(contract.clauses)` — the module count wearing a second name, which §1.3 already had a separate dimension for. The grouping was **already declared and being discarded**: FR-083 made `SystemModel.interfaces` the single source for interface definitions and a `SystemInterface` names its `clause_ids`, so one declared interface over two clauses was becoming two modules exposing the same surface. `interface_groups`/`minimal_interface_count` (`decomposition.py`) group clauses that share a declared interface *and* the same `classify(...)` lane — the lane bound exists because `ModuleClass` is the class of work (FR-050) and `MODULE_CLASS_CEILING` grants autonomy by class (FR-126) — and `propose` loops over those groups. `interface_count_minimised` refuses a decomposition that splits a declared interface, comparing against the proposer's own rule re-derived in one function so a proposal cannot fail its own gate; a lane-forced split is **reported, never failed**, on `escape_ceiling_applied`'s precedent. `interface_count_reported` names integration points, surface members and §20.1's per-module ratio, and says the bound is §1.3's modules dimension rather than an invented interface number. A model with no interfaces merges nothing, so every existing fixture is byte-identical. `TestTheInterfaceCount` (13, `test_decomposition.py`), `TestTheInterfaceCount` (`test_cli.py`), `interface_members`/`interfaces_per_module` (`views.py`). |
 | FR-092 declared build order | **Implemented** | `build_order_exists` check (`decomposition.py:413`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-093 per-module completion criteria | **Implemented** | `completion_criteria(clause)` (`decomposition.py`), derived from `planner.exit_evidence_for` — the same conditions P5's session is handed, so the module's DoD and the session's exit evidence are one statement (ADR-0042). `propose` populates `Module.completion_criteria`; the gate check `every_module_has_completion_criteria` refuses an empty set ("not eligible to be built"); the criteria are in `decomposition_hash` and printed by `sofact decompose`. 6 tests + 2 CLI tests; canaried twice. |
 | FR-094 revisable without invalidating the whole | **Implemented** | Revisions + `decomposition_hash`; `test_approving_a_superseded_revision_is_refused` (`test_decomposition.py:467`). The **rollback verb** the capability map recorded as missing now exists (2026-10-12): `FactoryService.cut` / `sofact rollback --to N` records a `cut.recorded` row and the fold reads through the target (ADR-0034); `TestRollback` (`test_service.py`), `test_a_cut_hides_the_entries_after_its_target` (`test_state.py`). |
@@ -172,8 +175,8 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 90 |
-| Partly | 23 |
+| Implemented | 91 |
+| Partly | 22 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 6 |
 | **Total rows** | **119** |
@@ -195,7 +198,9 @@ Closed since the 2026-10-13 refresh: **FR-154** (Partly → Implemented) and **F
 (Not built → Implemented), both 2026-10-14, ADR-0056; **FR-157** (Partly → Implemented),
 2026-10-14, ADR-0057; **FR-127** (Partly → Implemented), 2026-10-14, ADR-0058 — the row
 the 2026-10-12 audit called the most valuable learning signal the product produces and
-could not connect to anything. The six Not built rows are
+could not connect to anything; **FR-091** (Partly → Implemented), 2026-10-14, ADR-0059 —
+the row the audit **downgraded on inspection** for want of a test, restored now that the
+minimisation, its rule and its tests exist. The six Not built rows are
 FR-008–011, FR-012–015, FR-036, FR-052–056, FR-134 and FR-159.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
@@ -363,7 +368,9 @@ built for.
 ### Method note
 
 Every "Implemented" verdict above names a test. One verdict was **downgraded on
-inspection** for want of one: FR-091 (the count is reported; nothing minimises it).
+inspection** for want of one: FR-091 (the count is reported; nothing minimises it) — and
+it was **restored on 2026-10-14** when the grouping, its rule and its tests landed
+(ADR-0059), which is the downgrade working as intended rather than a reversal.
 FR-102 was downgraded on the same ground — per-dispatch telemetry existed, but the
 requirement is about *attempts*, which nothing aggregated — and was **restored on
 2026-10-14** when the aggregation, its tests and the defect they caught landed

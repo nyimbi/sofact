@@ -43,6 +43,7 @@ from sofact.views import (
 	Module,
 	ModuleClass,
 	OracleClass,
+	SystemInterface,
 	SystemModel,
 	content_hash,
 	now,
@@ -54,6 +55,8 @@ __all__ = [
 	"completion_criteria",
 	"decomposition_hash",
 	"gate",
+	"interface_groups",
+	"minimal_interface_count",
 	"propose",
 ]
 
@@ -255,15 +258,25 @@ def classify(statement: str) -> ModuleClass:
 	return ModuleClass.G1
 
 
-def _module_name(clause: Clause, taken: set[str]) -> str:
-	"""A short, stable, human-readable name for the module a clause becomes.
+def _name_stem(clause: Clause) -> str:
+	"""A short, stable, human-readable stem from the clause's own words.
 
-	Deterministic and derived from the clause's own words: the operator reads these at
-	the gate, and a name that changed between two runs over one unchanged contract would
-	make the proposal look revised when it was not.
+	Deterministic and derived rather than invented: the operator reads these at the gate,
+	and a name that changed between two runs over one unchanged contract would make the
+	proposal look revised when it was not.
 	"""
 	meaningful = [w for w in _words(clause.statement) if w not in _GENERIC_STEMS and len(w) > 2]
-	stem = "-".join(meaningful[:3]) or "module"
+	return "-".join(meaningful[:3]) or "module"
+
+
+def _claim(stem: str, taken: set[str]) -> str:
+	"""``stem``, suffixed until it is not already taken, and recorded as taken.
+
+	The suffix is what keeps a name unique when two modules want the same one — an
+	interface called ``ledger`` and a clause whose first three words are also ``ledger``
+	are the ordinary case, and two modules of one name would make the build order unable
+	to name them (FR-092).
+	"""
 	name = stem
 	suffix = 2
 	while name in taken:
@@ -310,14 +323,159 @@ def completion_criteria(clause: Clause) -> tuple[str, ...]:
 	return exit_evidence_for(clause)
 
 
+def interface_groups(
+	contract: Contract, model: SystemModel | None = None
+) -> tuple[tuple[Clause, ...], ...]:
+	"""The clause groups the declared interfaces imply, in contract order (FR-091).
+
+	FR-091 asks the decomposition to **minimise interface surface**, and the only
+	grouping a machine may act on is one the operator already declared. It is declared:
+	:class:`~sofact.views.SystemInterface` names the clauses that introduce one surface,
+	so an interface over two clauses says those two clauses need *one* integration point.
+	A proposer that gives each its own module contradicts the model it was handed — which
+	is exactly the defect FR-083's ``SURFACE_DISAGREES_WITH_MODEL`` names, one phase later.
+
+	Two clauses join only when they share a declared interface **and** the class their own
+	words imply is the same. The class condition is not a refinement: ``ModuleClass`` is
+	"the class of work this module needs" (FR-050), and two clauses in different lanes are
+	different kinds of work however they are surfaced. Merging across lanes would move a
+	module's autonomy ceiling, and §14 gives G7 L1 *by class*.
+
+	Transitive closure, because interfaces chain: a declared over ``{a, b}`` and one over
+	``{b, c}`` put all three on one surface, and honouring only the first would leave the
+	second split. Deterministic — groups come out ordered by their first clause in contract
+	order, and clauses within a group in contract order, so two runs over one unchanged
+	contract produce the same proposal.
+
+	A model with no interfaces, or none at all, groups nothing: every clause is its own
+	module, which is the state of every project whose P2 declared no model.
+	"""
+	if model is None or not model.interfaces:
+		return tuple((clause,) for clause in contract.clauses)
+
+	classes = {clause.id: classify(clause.statement) for clause in contract.clauses}
+	parent: dict[str, str] = {clause.id: clause.id for clause in contract.clauses}
+
+	def root(clause_id: str) -> str:
+		while parent[clause_id] != clause_id:
+			parent[clause_id] = parent[parent[clause_id]]
+			clause_id = parent[clause_id]
+		return clause_id
+
+	for interface in model.interfaces:
+		# Only clauses this contract actually contains, and only those in one lane. A
+		# model may name a clause from an earlier contract revision; it contributes
+		# nothing here rather than a KeyError, for the reason `measure` reports an
+		# unmeasured dimension instead of raising.
+		shareable = [cid for cid in interface.clause_ids if cid in parent]
+		for other in shareable[1:]:
+			first, second = root(shareable[0]), root(other)
+			if first != second and classes[first] is classes[second]:
+				parent[second] = first
+
+	grouped: dict[str, list[Clause]] = {}
+	for clause in contract.clauses:
+		grouped.setdefault(root(clause.id), []).append(clause)
+	return tuple(tuple(clauses) for clauses in grouped.values())
+
+
+def minimal_interface_count(contract: Contract, model: SystemModel | None = None) -> int:
+	"""The fewest module surfaces this contract's declared interfaces permit (FR-091).
+
+	The number :func:`gate` compares the proposal against. It is *derived* rather than
+	thresholded, which is the difference between a gate the operator can act on and one
+	they cannot: the spec gives no interface number to test against, but it does give the
+	model, and the model states the grouping.
+	"""
+	return len(interface_groups(contract, model))
+
+
+def _splits_a_declared_interface(
+	decomposition: Decomposition, contract: Contract, model: SystemModel | None
+) -> tuple[tuple[tuple[str, ...], ...], tuple[tuple[str, ...], ...]]:
+	"""Where a decomposition spreads a declared interface over modules (FR-091).
+
+	Returns ``(splits, lane_forced)``. The module assignment is re-derived from
+	:func:`interface_groups` rather than read off the proposal, and that is the point: a
+	check that asked the decomposition how it was grouped would pass by construction,
+	including on a decomposition built by hand. This asks the model and the contract what
+	the grouping *should* be and reports where the modules disagree.
+
+	``splits`` are the refusals — an interface whose clauses the grouping puts on one
+	surface and the decomposition put on several. A proposal the proposer emitted cannot
+	appear here, which is what makes one appearing evidence of a hand revision or of a
+	second proposer that stopped reading the model.
+
+	``lane_forced`` are the interfaces the model declared over clauses that ``ModuleClass``
+	will not merge: the model asked for one surface and the lanes make more than one. That
+	is a tension between the model and FR-050 rather than a defect in the decomposition —
+	the proposer did the only thing it could — so it is reported rather than refused. A
+	refusal there would fail for a reason the operator cannot act on without abandoning a
+	lane, which is how a gate teaches its operators to bypass it.
+
+	A model with no interfaces returns two empty tuples: nothing was declared, so nothing
+	is split. The caller distinguishes that from "not measured" by whether it was handed a
+	model.
+	"""
+	if model is None or not model.interfaces:
+		return (), ()
+	by_clause = {cid: module.name for module in decomposition.modules for cid in module.clause_ids}
+	# The group each clause *would* be in if the decomposition honoured the model, so the
+	# comparison is against the grouping rather than against the module count: two modules
+	# can expose one interface, and two interfaces can share one module.
+	wanted = {
+		clause.id: index
+		for index, group in enumerate(interface_groups(contract, model))
+		for clause in group
+	}
+	splits: list[tuple[str, ...]] = []
+	lane_forced: list[tuple[str, ...]] = []
+	for interface in model.interfaces:
+		owners = {by_clause[cid] for cid in interface.clause_ids if cid in by_clause}
+		should = {wanted[cid] for cid in interface.clause_ids if cid in wanted}
+		if len(owners) <= 1 or not should:
+			continue
+		if len(should) == 1:
+			splits.append((interface.name, *sorted(owners)))
+		else:
+			lane_forced.append((interface.name, *sorted(owners)))
+	return tuple(splits), tuple(lane_forced)
+
+
+def _group_interface(clauses: tuple[Clause, ...], model: SystemModel | None) -> str:
+	"""What a module declares it exposes (FR-090).
+
+	A module standing for one clause says what that clause obliges, unchanged. A module
+	standing for several says the surface they *share* — the declared interface's own name
+	where there is one, because that is the name the operator gave the grouping and the
+	name a consumer will reach for. Naming it after one of its clauses would describe a
+	module by the smaller half of what it is.
+	"""
+	if len(clauses) == 1:
+		return _interface(clauses[0])
+	if model is not None:
+		shared = model.interfaces_for_clauses(tuple(c.id for c in clauses))
+		named = [i.name for i in shared if set(i.clause_ids) <= {c.id for c in clauses}]
+		if named:
+			oracles = ", ".join(sorted({c.oracle.oracle_class.value for c in clauses}))
+			return f"{', '.join(named)} (oracles: {oracles})"
+	oracles = ", ".join(sorted({c.oracle.oracle_class.value for c in clauses}))
+	return f"{len(clauses)} clause(s) on one surface (oracles: {oracles})"
+
+
 def propose(contract: Contract, model: SystemModel | None = None) -> Decomposition:
 	"""Propose a decomposition of ``contract`` into modules, deterministically (FR-087).
 
-	One module per clause, grouped by the class the clause's words imply, with
-	dependencies derived from the oracle class rather than invented: a clause checked by
-	``SCHEMA`` describes a shape that other clauses are checked against, so the modules
+	One module per **interface group**, grouped by the class the clause's words imply,
+	with dependencies derived from the oracle class rather than invented: a clause checked
+	by ``SCHEMA`` describes a shape that other clauses are checked against, so the modules
 	whose oracles are contract-level depend on it. That is a real, checkable relation
 	between two clauses — unlike a dependency guessed from reading English.
+
+	The grouping is FR-091's minimisation, and it is read rather than chosen: the model's
+	declared interfaces say which clauses share one surface, so honouring them is the
+	minimum this contract admits. A contract with no declared interfaces yields one module
+	per clause, which is what this proposer has always emitted.
 
 	This is a *proposal*. It is sound in the sense FR-089 and FR-092 mean — acyclic,
 	ordered, traceable — and that is the only sense in which a machine may call a
@@ -340,20 +498,46 @@ def propose(contract: Contract, model: SystemModel | None = None) -> Decompositi
 	timestamp = now()
 
 	taken: set[str] = set()
-	by_clause: dict[str, Module] = {}
-	for clause in contract.clauses:
-		by_clause[clause.id] = Module(
+	groups = interface_groups(contract, model)
+	by_group: dict[str, Module] = {}
+	for group in groups:
+		clause_ids = tuple(c.id for c in group)
+		# FR-091: one module per declared surface, so the name is the interface the
+		# operator named it after where the group has exactly one. Falling back to the
+		# clause-derived name keeps a group the model never named readable at the gate.
+		shared: tuple[SystemInterface, ...] = ()
+		if model is not None:
+			shared = model.interfaces_for_clauses(clause_ids)
+		# FR-091: a group the model declared one interface for is named after it, because
+		# that is the name the surface carries everywhere else. A group the model never
+		# named falls back to the clause-derived name, which is what keeps a proposal
+		# The stem is chosen first and claimed once, so the fallback cannot reserve a name
+		# it then does not use. Both indices are bound before the conditional because a
+		# `len(...)` test inside it narrows the tuple it measures, and a variadic tuple
+		# narrowed by length reads as the empty tuple.
+		merged = len(group) > 1
+		first = group[0]
+		stem = shared[0].name if merged and len(shared) == 1 else _name_stem(first)
+		name = _claim(stem, taken)
+		by_group[clause_ids[0]] = Module(
 			id=uuid7str(),
-			name=_module_name(clause, taken),
-			module_class=classify(clause.statement),
-			interface=_interface(clause),
-			clause_ids=(clause.id,),
+			name=name,
+			module_class=classify(group[0].statement),
+			interface=_group_interface(group, model),
+			clause_ids=clause_ids,
 			# FR-083: the model is the single source, so the surface is read off it
 			# rather than invented here. A module's clauses may intersect several
 			# interfaces, and the model's own deduplication by name is what keeps two
 			# clauses naming the same member from producing two surface entries.
-			surface=model.surface_for_clauses((clause.id,)) if model is not None else (),
-			completion_criteria=completion_criteria(clause),
+			surface=model.surface_for_clauses(clause_ids) if model is not None else (),
+			# FR-093's DoD stays derived per clause, then deduplicated in contract order:
+			# two clauses in one group commonly share a step kind, and one condition
+			# stated twice is not two conditions.
+			completion_criteria=tuple(
+				dict.fromkeys(
+					criterion for clause in group for criterion in completion_criteria(clause)
+				)
+			),
 			# FR-097's budget, declared here rather than defaulted on the type: a proposal
 			# is the one place the factory can put a number in front of the operator at P3,
 			# and the gate below reports it as a check so the approval covers it. The value
@@ -365,9 +549,10 @@ def propose(contract: Contract, model: SystemModel | None = None) -> Decompositi
 	# A clause whose oracle is SCHEMA or PROPERTY declares a shape or an invariant, and a
 	# clause checked by CONTRACT or EXAMPLE is checked *against* something. Encoding that
 	# as a dependency is reading the oracle the contract already carries, not guessing at
-	# architecture.
-	foundations = [m for m in by_clause.values() if _foundational(contract, m)]
-	dependents = [m for m in by_clause.values() if not _foundational(contract, m)]
+	# architecture. A group is foundational when any clause in it is: a surface built for
+	# a shape is a shape whatever else it also exposes.
+	foundations = [m for m in by_group.values() if _foundational(contract, m)]
+	dependents = [m for m in by_group.values() if not _foundational(contract, m)]
 	# Only depend on a foundation of a *different* class: a module depending on every
 	# foundation would make the DAG a star and the build order meaningless, and a module
 	# depending on itself is refused by the type.
@@ -384,14 +569,14 @@ def propose(contract: Contract, model: SystemModel | None = None) -> Decompositi
 		for module in dependents
 	]
 	for module in with_deps:
-		by_clause[module.clause_ids[0]] = module
+		by_group[module.clause_ids[0]] = module
 
 	decomposition = Decomposition(
 		id=uuid7str(),
 		goal_id=contract.goal_id,
 		contract_id=contract.id,
 		created_at=timestamp,
-		modules=tuple(by_clause[c.id] for c in contract.clauses),
+		modules=tuple(by_group[group[0].id] for group in groups),
 	)
 	assert decomposition.modules, "a proposal must name at least one module"
 	assert not decomposition.cycles(), "the proposer must not emit a cycle"
@@ -402,9 +587,18 @@ _FOUNDATIONAL_ORACLES: Final = frozenset({OracleClass.SCHEMA, OracleClass.PROPER
 
 
 def _foundational(contract: Contract, module: Module) -> bool:
-	"""Whether this module states something others are checked against."""
-	clause = next((c for c in contract.clauses if c.id == module.clause_ids[0]), None)
-	return clause is not None and clause.oracle.oracle_class in _FOUNDATIONAL_ORACLES
+	"""Whether this module states something others are checked against.
+
+	Asked of every clause the module owns, not the first: FR-091 groups clauses onto one
+	surface, and a surface that carries a shape alongside anything else is still the shape
+	the other modules are checked against.
+	"""
+	owned = set(module.clause_ids)
+	return any(
+		clause.oracle.oracle_class in _FOUNDATIONAL_ORACLES
+		for clause in contract.clauses
+		if clause.id in owned
+	)
 
 
 def decomposition_hash(decomposition: Decomposition) -> str:
@@ -452,6 +646,7 @@ def gate(
 	*,
 	envelope: DeliveryEnvelope | None = None,
 	value_hypothesis_declared: bool | None = None,
+	model: SystemModel | None = None,
 ) -> DecompositionGate:
 	"""Every P3 precondition a machine can check, as named results (FR-088/089/091/092).
 
@@ -464,6 +659,11 @@ def gate(
 	names the dimension. ``None`` means the caller measured nothing and the check reports
 	that rather than passing — the same distinction :func:`sofact.envelope.measure` draws,
 	for the same reason.
+
+	``model`` is FR-091's minimisation input, and it is the operator's declaration rather
+	than a second opinion: an interface there is declared over clauses, so the model says
+	how many surfaces those clauses need. ``None`` means P2 declared no model, and the
+	check reports that rather than passing silently.
 	"""
 	assert decomposition.modules, "cannot gate a decomposition with no modules"
 	checks: list[GateCheck] = []
@@ -577,19 +777,95 @@ def gate(
 		)
 	)
 
-	# FR-091: interface count is a first-class metric. It is *reported*, not thresholded:
-	# the spec gives no number, and inventing one would make a quality signal into a
-	# gate that fails for a reason its operator cannot act on.
+	# FR-091's first clause: minimise interface surface. The minimisation is *checkable*
+	# because FR-083 already made the model the single source for interface definitions —
+	# an interface there is declared over clauses, so the model states how many surfaces
+	# those clauses need, and the decomposition either honours that or multiplies it.
+	#
+	# This is not the "is this the right architecture" oracle §7.1 says does not exist.
+	# That denial is about *choosing* a grouping; this reads the grouping the operator
+	# already declared and reports where the decomposition contradicts it, which is the
+	# same act as `_foundational` reading the oracle the contract already carries.
+	#
+	# `model is None` is a vacuous pass and not a silent one (NFR-025): nothing was
+	# declared, so nothing was measured, and the check says that rather than reading as
+	# compliance. A model with no interfaces is the same state — every project whose P2
+	# declared a model of entities alone.
+	splits, lane_forced = _splits_a_declared_interface(decomposition, contract, model)
+	if model is None:
+		checks.append(
+			GateCheck(
+				name="interface_count_minimised",
+				passed=True,
+				detail=(
+					"no system model was supplied, so no declared surface was compared "
+					"against and this check asserts nothing (NFR-025). The count below is "
+					"still reported: it is a fact about the proposal whether or not a model "
+					"exists to minimise it against"
+				),
+			)
+		)
+	elif splits:
+		checks.append(
+			GateCheck(
+				name="interface_count_minimised",
+				passed=False,
+				detail=(
+					f"{len(splits)} declared interface(s) are split across several modules: "
+					+ "; ".join(f"{names[0]} -> {' + '.join(names[1:])}" for names in splits)
+					+ f". The model declares one surface for those clauses and this "
+					f"decomposition exposes {sum(len(n) - 1 for n in splits)} (FR-091, FR-083)"
+				),
+			)
+		)
+	else:
+		checks.append(
+			GateCheck(
+				name="interface_count_minimised",
+				passed=True,
+				detail=(
+					(
+						f"every declared interface is one module's surface; "
+						f"{decomposition.interface_count} module(s) for "
+						f"{len(model.interfaces)} declared interface(s)"
+						if model.interfaces
+						else "the model declares no interfaces, so no surface was declared to "
+						"minimise against and this check asserts nothing (NFR-025)"
+					)
+					+ (
+						". Not merged, and not a defect: "
+						+ "; ".join(
+							f"{names[0]} spans {', '.join(names[1:])} and FR-050 keeps "
+							"different lanes apart"
+							for names in lane_forced
+						)
+						if lane_forced
+						else ""
+					)
+				),
+			)
+		)
+
+	# FR-091's second clause: report the interface count. This one never fails, and it is
+	# the honest half — the spec gives no *interface* number to threshold against, so
+	# inventing one would make a quality signal into a gate that fails for a reason its
+	# operator cannot act on. What it can do is state the numbers §20.1 and §1.3 imply, and
+	# say where the bound on module count actually lives.
 	checks.append(
 		GateCheck(
 			name="interface_count_reported",
 			passed=True,
 			detail=(
-				f"{decomposition.interface_count} interface(s); "
+				f"{decomposition.interface_count} integration point(s) "
+				f"({decomposition.interface_members} declared member(s), "
+				f"{decomposition.interfaces_per_module:.1f} per module); "
 				f"G1-G2 share {decomposition.target_class_share:.0%}; "
 				+ ", ".join(
 					f"{k.value}={v}" for k, v in sorted(decomposition.class_distribution.items())
 				)
+				+ ". The bound on integration points is §1.3's modules dimension (FR-057), "
+				"not a number invented here: the spec prints no interface threshold, and "
+				"the derived one is the model's own declaration (FR-091)"
 			),
 		)
 	)

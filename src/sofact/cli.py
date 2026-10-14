@@ -1347,6 +1347,8 @@ def _print_decomposition(proposal: Decomposition, result: DecompositionGate) -> 
 	typer.secho(f"\ndecomposition {proposal.id}", fg="cyan", bold=True)
 	typer.echo(
 		f"  {proposal.interface_count} module(s); "
+		f"{proposal.interface_members} declared member(s) on their surfaces "
+		f"({proposal.interfaces_per_module:.1f} per module, FR-091); "
 		f"G1-G2 share {proposal.target_class_share:.0%} (FR-125)"
 	)
 	order = proposal.build_order()

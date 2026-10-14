@@ -1273,6 +1273,10 @@ class FactoryService:
 			contract,
 			envelope=self._envelope,
 			value_hypothesis_declared=specification.value_hypothesis is not None,
+			# FR-091: the model is the minimisation input, and it comes from the same
+			# approved specification the proposal was derived from, so the gate cannot
+			# compare a proposal against a model it was not built from.
+			model=specification.system_model,
 		)
 
 	async def latest_decomposition(self, contract_id: str) -> Decomposition | None:
