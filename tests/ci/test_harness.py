@@ -137,6 +137,34 @@ class TestMeasuredSpecs:
 		assert PI_RESEARCH_SPEC.usage_path == PI_SPEC.usage_path
 		assert PI_RESEARCH_SPEC.model_error_pattern == PI_SPEC.model_error_pattern
 
+	def test_pi_names_no_store_because_relocating_it_loses_the_model_registry(
+		self,
+	) -> None:
+		"""The omission is deliberate, and it was reached by trying the other thing first.
+
+		Measured 2026-10-14: ``--session-dir`` moves the *records* and leaves the config,
+		the model registry and the auth store at ``~/.pi/agent``, so the obvious fix was to
+		relocate them with ``PI_CODING_AGENT_DIR``. That was applied and then refuted —
+		under a fresh directory ``pi --list-models`` lost this host's custom provider and
+		the probe failed with ``Model "…" not found``, because the registry is operator
+		configuration rather than something ``pi`` rebuilds.
+
+		Seeding the registry forward is not a way out either: ``models.json`` carries
+		provider API keys, so copying it into the producer's store is the FR-059 violation
+		the boundary exists to prevent. So ``pi`` keeps its store where the operator put it,
+		and what that costs under a boundary is recorded in ADR-0060 rather than hidden by
+		a relocation that silently breaks model resolution.
+		"""
+		assert PI_SPEC.env == ()
+		assert PI_SPEC.isolation_env == ()
+		assert PI_RESEARCH_SPEC.env == (
+			("RESEARCH_MODEL", "{model}"),
+			("npm_config_loglevel", "error"),
+			("npm_config_audit", "false"),
+			("npm_config_fund", "false"),
+			("npm_config_progress", "false"),
+		)
+
 	def test_pi_argv_matches_the_S19_measurement(self) -> None:
 		assert PI_SPEC.argv[:2] == ("pi", "--mode")
 		assert "--offline" in PI_SPEC.argv
@@ -230,13 +258,19 @@ class TestMeasuredSpecs:
 		ordinary setting -- and the store-isolation row measures only the first. Without
 		this declaration the row would withhold ``RESEARCH_MODEL`` and npm's log level
 		alongside ``CLAUDE_CONFIG_DIR``, and a difference between the two arms could no
-		longer be attributed to containment. ``pi`` and ``pi-research`` declare none, which
-		is the honest answer: ``pi`` isolates by ``--session-dir`` in its argv.
+		longer be attributed to containment.
+
+		``pi`` and ``pi-research`` declare none, and for ``pi`` that is a measured
+		limitation rather than a claim of containment: ``--session-dir`` moves the records
+		and leaves the config and model registry at ``~/.pi/agent``, and relocating those
+		was tried and refuted (see the test above). The row reports ``inconclusive`` for
+		``pi``, which is the honest answer to "does a spec variable contain this child's
+		store" when the spec names no such variable.
 		"""
 		assert CLAUDE_SPEC.isolation_env == ("CLAUDE_CONFIG_DIR",)
 		assert DSH_SPEC.isolation_env == ("DSH_HOME",)
 		assert OPENCODE_SPEC.isolation_env == ("OPENCODE_DB", "OPENCODE_TEST_HOME")
-		assert PI_SPEC.isolation_env == (), "pi isolates by --session-dir, not by env"
+		assert PI_SPEC.isolation_env == (), "pi's store is not relocatable; see above"
 		assert PI_RESEARCH_SPEC.isolation_env == ()
 
 	def test_a_containment_variable_is_one_the_spec_actually_sets(self) -> None:

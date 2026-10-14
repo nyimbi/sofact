@@ -60,6 +60,7 @@ from sofact.views import (
 	DeliveryArtifact,
 	DeliveryArtifactKind,
 	DeliveryReport,
+	DeploymentBoundary,
 	DeploymentTopology,
 	EnvelopeActuals,
 	EscapeEvent,
@@ -236,6 +237,7 @@ def topology_statement(
 	topology: DeploymentTopology,
 	*,
 	configured: bool,
+	boundary: DeploymentBoundary | None = None,
 ) -> str:
 	"""The topology, its isolation and its modifier, as one sentence (FR-030).
 
@@ -250,11 +252,37 @@ def topology_statement(
 	facts about the world (FR-042). The second is the one an operator needs to see: it is
 	the difference between a factory that chose the dev configuration and one that never
 	said where it was running.
+
+	``boundary`` is the isolation a probe *measured*, and it replaces the declared
+	topology's isolation string when one held (FR-019). Without it this sentence would
+	name :data:`TOPOLOGY_ISOLATION` — a documented promise about a configuration — and
+	report it beside a modifier, which is R2 exactly: a number a reader must trust rather
+	than a fact they can check. The declared string is still named, because the two can
+	differ and the difference is the finding.
 	"""
+	if boundary is not None and boundary.enforced:
+		modifier = boundary.modifier
+		sign = f"{modifier:+d}" if modifier else "0"
+		return (
+			f"{topology.value} (isolation **measured**: {boundary.mechanism.value} confined "
+			f"a probe child), ceiling modifier {sign}"
+			+ (
+				""
+				if configured
+				else " — the topology itself was **not declared**, so the degraded default "
+				"is in use even though the isolation was measured"
+			)
+			+ f". Declared isolation for {topology.value} is "
+			f"{TOPOLOGY_ISOLATION[topology]!r}; the measurement governs"
+		)
 	modifier = TOPOLOGY_MODIFIER[topology]
 	sign = f"{modifier:+d}" if modifier else "0"
 	return f"{topology.value} ({TOPOLOGY_ISOLATION[topology]}), ceiling modifier {sign}" + (
 		"" if configured else " — **not declared**, so the degraded default is in use"
+	) + (
+		""
+		if boundary is None
+		else f" — a probe measured **no** boundary that held: {boundary.observed}"
 	)
 
 
@@ -300,6 +328,7 @@ def module_autonomy(
 	*,
 	topology: DeploymentTopology = DeploymentTopology.T1,
 	lane_ceilings: Mapping[ModuleClass, AutonomyLevel] | None = None,
+	boundary: DeploymentBoundary | None = None,
 ) -> AutonomyLevel:
 	"""The autonomy the *modules* sustain: the lower of the two measured ceilings (FR-122).
 
@@ -318,6 +347,14 @@ def module_autonomy(
 	radius. The default is T1 — the degraded configuration — so a caller that has not
 	said where the factory is running gets the lower ceiling rather than the product
 	target's (FR-042).
+
+	``boundary`` is the isolation a probe *measured*, and it overrides the declared
+	topology's modifier when one held (FR-019). It is threaded here for the same reason
+	the topology is: §5.4 prices the modules' blast radius, and a deployment measured to
+	confine its children has a smaller one than its declaration claimed. FR-123's L2 cap
+	is deliberately *not* given the boundary, because it is already at or below every
+	topology's number, so the boundary cannot move it — and applying it twice would
+	attribute to the isolation a reduction the cap had already made.
 	"""
 	assert contract.clauses, "cannot compute an autonomy for a contract with no clauses"
 	measured = contract.ceiling
@@ -333,7 +370,7 @@ def module_autonomy(
 					min(granted, lane_ceilings.get(module.module_class, granted))
 				)
 			measured = AutonomyLevel(min(measured, granted))
-	return topology_ceiling(measured, topology)
+	return topology_ceiling(measured, topology, boundary=boundary)
 
 
 def ceiling(
@@ -500,6 +537,7 @@ def report(
 	topology: DeploymentTopology = DeploymentTopology.T1,
 	topology_configured: bool = False,
 	topology_override: str | None = None,
+	boundary: DeploymentBoundary | None = None,
 	escapes: EscapeReport | None = None,
 	escapes_recorded: tuple[EscapeEvent, ...] = (),
 ) -> DeliveryReport:
@@ -531,6 +569,11 @@ def report(
 	indistinguishable from the silent downgrade the requirement forbids, and the whole
 	point of the refusal is that the difference between "lowered by the deployment" and
 	"lowered by weak oracles" survives into the log.
+
+	``boundary`` is the isolation a probe *measured* for this delivery (FR-019), and it
+	overrides the declared topology's modifier when one held. R2's failure was that
+	autonomy depended on isolation "asserted but never verified", so the two arrive
+	together or the number is a claim about a boundary nobody checked.
 	"""
 	assert contract.clauses, "cannot report a delivery for a contract with no clauses"
 	# FR-127: the chain is a *projection* of the intent graph rather than a second walk
@@ -552,7 +595,11 @@ def report(
 		escapes = escapes.model_copy(update={"rendered_at": rendered_at})
 	lane_ceilings = ceilings_from(escapes)
 	modules_autonomy = module_autonomy(
-		contract, decomposition, topology=topology, lane_ceilings=lane_ceilings
+		contract,
+		decomposition,
+		topology=topology,
+		lane_ceilings=lane_ceilings,
+		boundary=boundary,
 	)
 	delivered_autonomy = ceiling(contract, decomposition, topology=topology)
 	refused = refused_by_topology(contract, decomposition, topology=topology)
@@ -738,14 +785,16 @@ def report(
 			name="topology_ceiling_applied",
 			passed=True,
 			detail=(
-				f"this delivery was rendered under {topology_statement(topology, configured=topology_configured)}. "
+				f"this delivery was rendered under {topology_statement(topology, configured=topology_configured, boundary=boundary)}. "
 				+ (
 					f"The modules' number is {modules_autonomy.name} *after* the modifier, "
 					"and the delivery's is "
 					f"{delivered_autonomy.name} because FR-123's cap is at or below every "
 					"topology's number (FR-019, FR-124)"
 					if TOPOLOGY_MODIFIER[topology]
-					else "§5.4's modifier for this topology is zero, so the modules' number "
+					and not (boundary is not None and boundary.enforced)
+					else "the effective modifier for this delivery is zero — §5.4's for this "
+					"topology, or restored by a boundary that held — so the modules' number "
 					f"({modules_autonomy.name}) is the one the oracles and module classes "
 					"compute (FR-019, FR-124)"
 				)
@@ -866,6 +915,7 @@ def report(
 		module_autonomy=modules_autonomy,
 		topology=topology,
 		topology_configured=topology_configured,
+		boundary=boundary,
 		escapes=escapes,
 		# FR-127's attribution, against the graph this report's chain was projected from
 		# rather than one rebuilt now. A graph rebuilt at read time would attribute an

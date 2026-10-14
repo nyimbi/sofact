@@ -2228,6 +2228,39 @@ class TestTheTopologySeam:
 		assert result.exit_code == 0, result.output
 		assert "topology: T2" in result.output
 
+	def test_a_malformed_boundary_is_refused_rather_than_defaulted(
+		self, home: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Same discipline as the topology knob, and it matters more here.
+
+		``SOFACT_BOUNDARY`` does not *declare* isolation — it restricts which mechanisms
+		the detector may try. A value it cannot parse would otherwise be ignored, the probe
+		would run unrestricted, and the deployment would report a measurement its operator
+		never asked for. Refusing by name is the only outcome that leaves the two facts
+		apart.
+		"""
+		monkeypatch.setenv("SOFACT_BOUNDARY", "jail")
+
+		result = RUNNER.invoke(app, ["--home", str(home), "envelope"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot read SOFACT_BOUNDARY" in result.output
+		assert "seatbelt" in result.output, "the refusal must list what is accepted"
+		assert "Traceback" not in result.output
+
+	def test_the_boundary_knob_accepts_a_mechanism_list_case_insensitively(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A restriction to ``seatbelt`` must still deliver, and the delivery must report
+		the measurement rather than the restriction — the knob narrows the probe, it never
+		stands in for its verdict."""
+		monkeypatch.setenv("SOFACT_BOUNDARY", " seatbelt , container ")
+
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "isolation" in result.output
+
 	def test_the_override_flag_is_wired_to_the_gate(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:

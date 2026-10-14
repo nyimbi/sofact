@@ -495,9 +495,123 @@ for T4 would be the direction a ceiling must never move on an unmeasured premise
 """
 
 
+class BoundaryMechanism(StrEnum):
+	"""What actually confines a child process, as *measured* rather than declared (FR-019).
+
+	FR-019's own words are "the deployment boundary **where one exists**", which is a
+	conditional: the requirement anticipates deployments without one and calls that
+	configuration degraded. :class:`DeploymentTopology` records where the factory is
+	*meant* to run; this records what was *observed* to hold. The two are different facts
+	and R2 is the failure of conflating them — "autonomy depends on isolation (FR-019)
+	that is asserted but never verified".
+
+	``NONE`` is a member rather than the absence of one, for the reason ``ABSENT`` is a
+	:class:`ProbeOutcome`: "a boundary was sought and none held" is a finding, and it must
+	be distinguishable from "no boundary was sought".
+	"""
+
+	NONE = "none"
+	SEATBELT = "seatbelt"
+	CONTAINER = "container"
+	NAMESPACE = "namespace"
+
+
+class DeploymentBoundary(View):
+	"""The isolation a probe measured, with the attempt and the observation (FR-019, FR-030).
+
+	The evidence for a boundary claim is the same kind of evidence as for a capability
+	claim, so the shape is :class:`CapabilityFinding`'s: ``attempted`` names the action and
+	``observed`` the result. A boundary reported without them is a number to trust rather
+	than a fact to check, which is the failure FR-030 forbids and this type exists to fix.
+
+	``enforced`` is a separate field from ``mechanism`` because they answer different
+	questions — *what was tried* and *whether it held* — and a mechanism that was present
+	but did not confine is exactly the case a single enum would round to a lie. Measured
+	on 2026-10-14: ``sandbox-exec`` refuses a profile whose subpath is unresolved, so
+	"the tool exists" and "the tool confines" came apart on this very host.
+
+	``None`` (no probe was run) is distinct from ``enforced=False`` (a probe ran and found
+	nothing), which is FR-042's distinction between "not declared" and "declared T1"
+	carried to the boundary: a factory that never measured must not be able to report the
+	same thing as one that measured and found none.
+	"""
+
+	mechanism: BoundaryMechanism
+	enforced: bool
+	attempted: NonEmptyStr
+	observed: NonEmptyStr
+	probed_at: datetime
+	writes_confined: bool = False
+	"""Whether the FR-019 half held, recorded apart from the verdict (FR-059).
+
+	``enforced`` is the *credit*: both halves held. This is one half, and keeping it
+	separate is what lets a reader tell "nothing confined this child" from "writes were
+	confined and the answer key stayed legible" — two different deployments with two
+	different remedies, which a single boolean would round to the same report. It is also
+	what lets :func:`~sofact.boundary.detect_boundary` keep a partially-confining
+	mechanism as the finding of record instead of overwriting it with a generic verdict
+	that says less.
+	"""
+	deny_read: tuple[str, ...] = ()
+	"""Subtrees the probe found *unreadable*, as resolved paths (FR-059).
+
+	FR-019 bounds what a child can write; FR-059 bounds what it can read — "no access to
+	the oracle corpus, holdout scenarios, or factory credentials". The two are different
+	claims and a boundary can hold one without the other: a profile permitting global
+	reads confines a session's blast radius while leaving it the answer key. So the read
+	half is recorded separately and is *measured*, by a probe that tries to read a file
+	inside each named subtree rather than asserting that the rule was written.
+
+	Empty means the read half was not measured, which is not the same as measured-and-open
+	— the same distinction ``None`` makes one level up. A reader asking "could the producer
+	read the holdout" must be able to tell those apart, because only one of them is a
+	finding about this deployment.
+	"""
+	writable: tuple[str, ...] = ()
+	"""Directories the probe granted writes to *besides* the workspace, as resolved paths.
+
+	A dispatch owns two directories: its workspace and its session store. The store is the
+	one this field exists for — measured 2026-10-14, a profile granting writes under the
+	workspace alone denies ``touch <session_dir>/record.jsonl``, and every harness writes
+	its record there, so the narrower profile broke every wrapped dispatch rather than
+	confining it.
+
+	It is recorded for the same reason ``deny_read`` is: :func:`~sofact.boundary.wrap_argv`
+	rebuilds the enforcement profile from this record, and a rebuild that dropped the grant
+	would run the dispatch under a *narrower* profile than the one measured — reporting
+	confinement a session never had, which is the mirror of the defect this field fixes.
+	"""
+
+	@property
+	def degraded(self) -> bool:
+		"""Whether this is the degraded configuration FR-019 names (§5.4).
+
+		True when no boundary held. A reader asking "is this factory isolated" gets a
+		boolean that is false for the degraded case, rather than having to know which
+		mechanism names mean isolation.
+		"""
+		return not self.enforced
+
+	@property
+	def modifier(self) -> int:
+		"""The §5.4 ceiling modifier this *measured* boundary supports.
+
+		Zero when a boundary held, and this is the whole of A2's arithmetic. §5.4's table
+		tops out at 0 — T4 is "+0, unlocks L4 admissibility, not a level" — so a measured
+		boundary may only *restore* the baseline a degraded declaration gave up, never
+		exceed it. That is what keeps
+		:func:`topology_ceiling`'s guard and :data:`HIGHEST_GRANTABLE` true without
+		editing either: a modifier that could raise a level above L4 remains impossible,
+		because the maximum this returns is 0.
+		"""
+		return 0 if self.enforced else TOPOLOGY_MODIFIER[DeploymentTopology.T1]
+
+
 def topology_ceiling(
 	level: AutonomyLevel,
 	topology: DeploymentTopology,
+	*,
+	boundary: DeploymentBoundary | None = None,
 ) -> AutonomyLevel:
 	"""``level`` lowered by the topology's modifier, never below L0 (FR-019, FR-124).
 
@@ -517,10 +631,24 @@ def topology_ceiling(
 	support, which is the failure R2 names. It is an assertion rather than a min() because
 	a silent cap on a raising modifier would leave the table saying one thing and the
 	computation another.
+
+	``boundary`` is the isolation a probe *measured*, and it overrides the declared
+	topology's modifier when one held (FR-019). This is the fix for R2 rather than a
+	widening of §5.4: a deployment that declared T1 and was then measured to confine its
+	children is not running the degraded configuration, so charging it T1's penalty would
+	be the same conflation in the other direction. The override can only ever *raise* the
+	modifier to 0 — :attr:`DeploymentBoundary.modifier` is capped there by §5.4's own
+	table, whose maximum is 0 — so the assertion below keeps its full force: nothing here
+	can lift a level above :data:`HIGHEST_GRANTABLE`.
 	"""
-	modified = int(level) + TOPOLOGY_MODIFIER[topology]
+	modifier = (
+		boundary.modifier
+		if boundary is not None and boundary.enforced
+		else TOPOLOGY_MODIFIER[topology]
+	)
+	modified = int(level) + modifier
 	assert modified <= int(HIGHEST_GRANTABLE), (
-		f"{topology.value}'s modifier of {TOPOLOGY_MODIFIER[topology]:+d} would raise "
+		f"{topology.value}'s modifier of {modifier:+d} would raise "
 		f"{level.name} to {modified}, above the {HIGHEST_GRANTABLE.name} the ladder "
 		"offers at all (FR-019, §1.5)"
 	)
@@ -4444,7 +4572,24 @@ class DeliveryReport(View):
 	above L2, which is a different and false claim.
 
 	The number carries §5.4's topology modifier (FR-019, FR-124), so a T1 deployment
-	reports the lowered value rather than the one its hardware cannot support.
+	reports the lowered value rather than the one its hardware cannot support. When
+	:attr:`boundary` records a *measured* boundary that held, the modifier is §5.4's
+	baseline rather than the degraded topology's penalty, because the isolation the number
+	was priced against was measured rather than declared.
+	"""
+
+	boundary: DeploymentBoundary | None = None
+	"""The isolation a probe measured for this delivery, or ``None`` if none was measured
+	(FR-019, FR-030).
+
+	FR-030 requires the topology, its isolation and its modifier reported together, and
+	this is the half of that triple which is *measured* rather than documented. R2's
+	failure was autonomy depending on isolation "asserted but never verified": a report
+	carrying :attr:`topology` alone states what the deployment declared, and a reader has
+	no way to tell a deployment that confines its children from one that merely says so.
+
+	``None`` means no probe was run, which is not the same as a probe that found nothing —
+	that is a boundary whose :attr:`DeploymentBoundary.degraded` is true.
 	"""
 
 	topology: DeploymentTopology = DeploymentTopology.T1
@@ -5768,6 +5913,21 @@ class DispatchRecord(View):
 	be established, carries the null — and FR-154's requirement that a build *report* its
 	composition is discharged by the composition the dispatch recorded, not by this field
 	being non-null on every row.
+	"""
+
+	boundary: DeploymentBoundary | None = None
+	"""The isolation actually in force for this dispatch, as measured (FR-019).
+
+	FR-019 makes isolation the thing autonomy is priced against, so "which boundary was in
+	force" is a fact about the *dispatch* rather than about the deployment in general: a
+	host can offer a mechanism that holds for one workspace and not another, and a
+	deployment's declared topology says where it is meant to run rather than what confined
+	this child. Recording it here is what lets a reader check the ceiling against the
+	isolation it was priced at, instead of taking both on trust — R2's failure.
+
+	``None`` means no boundary was measured for this dispatch, which is distinct from a
+	measurement that found none: the first is an absent instrument and the second is a
+	degraded configuration. ``DeploymentBoundary.degraded`` states the second explicitly.
 	"""
 
 	@property

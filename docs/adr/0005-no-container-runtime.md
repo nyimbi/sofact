@@ -1,7 +1,17 @@
 # 0005 — No container runtime
 
-- **Status:** Accepted (resolves D9)
+- **Status:** Accepted (resolves D9) — **partly superseded.** The refusal of a
+  confinement layer is withdrawn by [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md);
+  what stands is the T1 lowering as the *degraded default*, the trusted-input
+  consequence for a deployment that measures no boundary, and the ruling that no
+  runtime is **required**.
 - **Date:** 2026-09-12
+- **Superseded by:** [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md)
+  — the container layer. This record is not deleted, and its reasoning is not
+  withdrawn: 0060 keeps every one of its consequences and changes only which case is
+  the default. Its closing line, "if a sandbox is ever added, the ceilings in this ADR
+  are the number to revisit, and a superseding record should say so explicitly rather
+  than silently raising them", is the instruction 0060 followed.
 
 ## Context
 

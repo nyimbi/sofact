@@ -22,11 +22,20 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import os
 from pathlib import Path
 from typing import Final
 
+from sofact.boundary import TEMP_DIRNAME, boundary_env, wrap_argv
 from sofact.git import WORKTREE_DIRNAME
-from sofact.views import Clause, Contract, Evidence, EvidenceKind, content_hash
+from sofact.views import (
+	Clause,
+	Contract,
+	DeploymentBoundary,
+	Evidence,
+	EvidenceKind,
+	content_hash,
+)
 
 __all__ = [
 	"DEFAULT_DIGEST_EXCLUDES",
@@ -51,6 +60,7 @@ DEFAULT_DIGEST_EXCLUDES: Final = (
 	".ruff_cache",
 	".mypy_cache",
 	".sofact",
+	TEMP_DIRNAME,
 	"__pycache__",
 	"node_modules",
 	"build",
@@ -133,6 +143,7 @@ class OracleRunner:
 		timeout: float = DEFAULT_TIMEOUT_SECONDS,
 		max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 		run_id: str | None = None,
+		boundary: DeploymentBoundary | None = None,
 	) -> None:
 		assert timeout > 0, f"timeout must be positive, got {timeout}"
 		assert max_output_bytes > 0, f"max_output_bytes must be positive, got {max_output_bytes}"
@@ -141,6 +152,10 @@ class OracleRunner:
 		self.timeout = timeout
 		self.max_output_bytes = max_output_bytes
 		self.run_id = run_id
+		# FR-019: the isolation measured for this runner's host, applied to every command
+		# it runs. An oracle that executed outside the boundary its dispatch ran inside
+		# would judge a producer's work under conditions the producer never had.
+		self.boundary = boundary
 
 	def __repr__(self) -> str:
 		return f"OracleRunner(workspace={self.workspace}, timeout={self.timeout})"
@@ -160,11 +175,17 @@ class OracleRunner:
 			)
 		assert self.workspace.is_dir(), f"workspace does not exist: {self.workspace}"
 
-		process = await asyncio.create_subprocess_shell(
-			command,
+		# FR-019: the command runs inside the boundary measured for this host, or beside
+		# it with that fact already recorded on the delivery. `create_subprocess_exec` on
+		# an explicit `/bin/sh -c` rather than `create_subprocess_shell`, because the
+		# wrapper has to be able to put a mechanism in front of the shell: a boundary that
+		# could only wrap the command *string* could not wrap the process at all.
+		process = await asyncio.create_subprocess_exec(
+			*wrap_argv(("/bin/sh", "-c", command), self.boundary, self.workspace),
 			cwd=self.workspace,
 			stdout=asyncio.subprocess.PIPE,
 			stderr=asyncio.subprocess.PIPE,
+			env={**os.environ, **boundary_env(self.boundary, self.workspace)},
 		)
 
 		timed_out = False

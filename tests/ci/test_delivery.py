@@ -1268,7 +1268,7 @@ class TestTheReportStatesWhereItRan:
 		contract = await service.contract_by_id(contract_id)
 		decomposition = await service.require_approved_decomposition(contract_id)
 		assert report.module_autonomy == module_autonomy(
-			contract, decomposition, topology=report.topology
+			contract, decomposition, topology=report.topology, boundary=report.boundary
 		), "the modules' number on the report must be the one this topology gives (FR-030)"
 		assert report.module_autonomy <= module_autonomy(
 			contract, decomposition, topology=BASELINE
@@ -1276,12 +1276,21 @@ class TestTheReportStatesWhereItRan:
 
 	async def test_a_declared_topology_reaches_the_report(self, home: Path, tmp_path: Path) -> None:
 		"""The configuration seam, from the service rather than the CLI: a deployment
-		that declares T2 reports T2, an unmodified ceiling, and says it declared one.
+		that declares T2 reports T2 and says it declared one.
 
 		The service that declared T2 and the one that declared nothing run the *same*
 		pipeline over the same state directory, so the two reports differ in the
 		topology fields and nothing else — which is what makes the comparison evidence
 		about the seam rather than about two fixtures.
+
+		**The two now report the same module autonomy, and that is A2 working rather
+		than a lost distinction.** §5.4's T1 penalty prices *unverified* isolation, and
+		both services measure the same boundary on this host — so charging one of them
+		the degraded modifier would be pricing a difference that was not measured. The
+		declared gap between T1 and T2 is still real and still tested: §5.4's arithmetic
+		is asserted directly above, and the no-boundary case is asserted at
+		``test_the_topology_lowers_the_module_autonomy``. What this test owns is that
+		the *declaration* reaches the report, which the two assertions below still show.
 		"""
 		undeclared = synthetic_service(home, tmp_path, "complete")
 		await undeclared.probe_harness(None)
@@ -1302,9 +1311,11 @@ class TestTheReportStatesWhereItRan:
 
 		assert report.topology is DeploymentTopology.T2
 		assert report.topology_configured is True
-		assert report.module_autonomy > at_t1.module_autonomy, (
-			"the whole point of declaring T2 is that the ceiling is not T1's: §5.4's "
-			"modifier is -1 at T1 and 0 at T2"
+		assert at_t1.topology_configured is False
+		assert report.module_autonomy == at_t1.module_autonomy, (
+			"both deployments measured the same boundary, so FR-019 prices them the "
+			"same: a modifier is charged against isolation as *measured*, and only a "
+			"measured difference can produce a different number"
 		)
 
 	async def test_the_topology_reaches_the_oracle_report_too(

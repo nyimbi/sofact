@@ -51,6 +51,28 @@ than argued. Numbering is sequential and never reused.
 | [0036](0036-a-research-budget-is-per-clause-and-its-three-caps-are-not-enforced-alike.md) | What bounds a research run: a budget declared per intent clause and scaled into the allowance the record carries, with wall clock enforced by killing the process and sources and model calls observed from the producer's own artefacts, an unmeasured count producing no violation in either direction, and a zero cap refused because a budget every run violates carries no signal | Accepted |
 | [0037](0037-a-verdict-is-per-clause-and-its-action-is-data.md) | What FR-068's table means for the pipeline: one verdict per intent clause classified against *SoFact's* clause list rather than the producer's, the third column (the action) carried as data so a check, a printout and the phase machine cannot disagree, Invalidated and Deepened stopping P1 from completing, Unverifiable becoming a flagged assumption whose refuter is what makes the action real (FR-079), and an unknown verdict refused rather than defaulted because Unverifiable is the one verdict whose action is *proceed* | Accepted |
 | [0038](0038-a-system-criterion-spans-clauses-and-its-verdicts-are-the-worst.md) | The last two of §10's six. FR-115's *present* is a set comparison over declarations — an entity names the clauses that introduced it, a module names the clauses it exists to satisfy — because the cheap text search passes on an entity called `id`, and the clause-to-module map comes from the decomposition rather than the dispatches, so a plan that skipped half its modules cannot report a conforming system. FR-116's criterion spans at least two clauses, since one clause is a module's own job P6 already checks; its verdict per clause is the *worst* across the log rather than the latest, or a criterion that failed on one module and passed on another would read as passing; and a clause with no verdict is insufficient rather than satisfied, because that is the default that fails open | Accepted |
+| [0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md) | The envelope refuses a ceiling, reports a floor, and names what it cannot measure | Accepted |
+| [0040](0040-a-delivery-report-states-five-things-and-its-gate-is-human.md) | A delivery report states five things, its gate is human, and its checks are scoped to what the factory owes | Accepted |
+| [0041](0041-a-mode-g-delivery-is-l2-and-the-modules-are-reported-separately.md) | A Mode G delivery is L2, and the modules' number is reported separately | Accepted |
+| [0042](0042-a-modules-definition-of-done-is-derived-from-its-oracles-shape.md) | A module's Definition of Done is derived from its oracle's shape | Accepted |
+| [0043](0043-a-gate-cost-is-asked-for-because-nothing-observes-a-person-reading.md) | A gate cost is asked for, because nothing observes a person reading | Accepted |
+| [0044](0044-the-factory-writes-the-two-artefacts-it-owes-and-the-delivery-is-a-fixed-point.md) | The factory writes the two artefacts it owes, and the delivery is a fixed point | Accepted |
+| [0045](0045-a-topology-is-a-type-and-a-refusal-is-not-a-downgrade.md) | A topology is a type, and a refusal is not a downgrade | Accepted |
+| [0046](0046-a-module-declares-its-budget-and-p7-measures-the-artefact.md) | A module declares its budget, and P7 measures the artefact | Accepted |
+| [0047](0047-the-debt-is-a-number-and-mode-m-is-a-separate-ceiling.md) | The debt is a number, and Mode M's ceiling is not Mode G's | Accepted |
+| [0048](0048-one-dispatch-one-envelope-and-the-gates-are-refused-by-name.md) | One dispatch, one envelope, and the gates are refused by name | Accepted |
+| [0049](0049-the-model-declares-an-interface-and-the-module-binds-it.md) | The model declares an interface and the module binds it | Accepted |
+| [0050](0050-coverage-is-a-conjunction-and-the-debt-and-the-cap-are-one-measure.md) | Coverage is a conjunction, and the debt and the cap are one measure | Accepted |
+| [0051](0051-o8-is-a-p7-check-not-an-oracle-class.md) | O8 is a P7 check, not an oracle class | Accepted |
+| [0052](0052-a-holdout-is-a-property-of-the-oracle-class-and-it-holds-at-every-door.md) | A holdout is a property of the oracle class, and it holds at every door | Accepted |
+| [0053](0053-the-adversarial-audit-is-a-must-fail-canary-and-the-empty-tree-is-the-input.md) | The adversarial audit is a must-fail canary, and the empty tree is the input | Accepted |
+| [0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md) | The escape rate is the one number no producer authored, and its reduction reports rather than refuses | Accepted |
+| [0055](0055-attempt-telemetry-is-a-join-and-the-unmeasured-token-count-is-part-of-it.md) | Attempt telemetry is a join, and the count of what it could not measure is part of the number | Accepted |
+| [0056](0056-the-freeze-is-derived-from-the-argv-and-the-deletion-test-admits.md) | The freeze is derived from the argv, and the deletion test is what admits a plugin | Accepted |
+| [0057](0057-the-autonomy-target-is-a-deployment-scoped-type.md) | The autonomy target is a deployment-scoped type, and absence is a state | Accepted |
+| [0058](0058-the-intent-graph-is-what-the-chain-is-projected-from.md) | The intent graph is what the chain is projected from, and an attribution says which kind it is | Accepted |
+| [0059](0059-the-declared-interface-is-the-surface-grouping-and-the-count-is-checked-against-it.md) | The declared interface is the surface grouping, and the count is checked against it | Accepted |
+| [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md) | The boundary is measured, and the ceiling follows the measurement | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -59,7 +81,7 @@ The product specification uses `D<n>` identifiers for open questions. Where a
 
 | Spec id | Resolution | ADR |
 | --------- | ----------- | ----- |
-| D9 — container runtime for isolation | No containers | [0005](0005-no-container-runtime.md) |
+| D9 — container runtime for isolation | **No runtime is required; the boundary is measured where one exists, and the ceiling follows the measurement.** The mechanism is a table with an honest detector (Seatbelt, a container where one is operational *and* an image is configured, and §5.4's degraded modifier everywhere else), and a measured boundary may only *restore* the baseline a degraded declaration gave up — §5.4's table tops out at 0, so the modifier space does not grow. Supersedes [0005](0005-no-container-runtime.md)'s refusal of the confinement layer; the T1 lowering, the trusted-input consequence and the no-*required*-runtime ruling all stand | [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md) |
 | D11 — which goal-mode harness to target | Delegate to an external harness, `dsh` first | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |
 | D15 — how much plugin surface to write in v1 | Withdrawn from v1 scope | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |
 | D16 — is SoFact a `dsh` plugin | No; independent control plane | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |

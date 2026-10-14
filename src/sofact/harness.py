@@ -48,8 +48,10 @@ from pathlib import Path
 from typing import Final, TypeGuard, cast
 
 from sofact._uuid7 import uuid7str
+from sofact.boundary import boundary_env, wrap_argv
 from sofact.views import (
 	CapabilityFinding,
+	DeploymentBoundary,
 	DispatchMode,
 	DispatchRecord,
 	GoalEntry,
@@ -564,6 +566,16 @@ PI_SPEC: Final = HarnessSpec(
 		"{tools}",
 		"--",
 	),
+	# `pi` deliberately names no store, and the reason is measured rather than assumed.
+	# `--session-dir` moves the records; the config, the model registry and the auth store
+	# stay at `~/.pi/agent`. Relocating them with `PI_CODING_AGENT_DIR` was tried on
+	# 2026-10-14 and *refuted*: the registry is operator configuration, not something `pi`
+	# rebuilds, so `--list-models` under a fresh directory lost this host's custom provider
+	# and every dispatch failed with `Model "…" not found. Use --list-models`. Seeding the
+	# registry forward is not an option either — `models.json` carries provider API keys,
+	# so copying it into the producer's store is the FR-059 violation the boundary exists
+	# to prevent. See ADR-0060's "a harness config store is not relocatable when it is
+	# operator configuration" for what this leaves open.
 	session_glob="**/*{session_id}*.jsonl",
 	session_is_zstd=False,
 	version_argv=("pi", "--version"),
@@ -1060,6 +1072,7 @@ class ConfiguredHarnessAdapter:
 		env: Mapping[str, str] | None = None,
 		spec_env: bool = True,
 		composition_hash: str | None = None,
+		boundary: DeploymentBoundary | None = None,
 	) -> None:
 		assert spec.name, "spec must be named"
 		assert model.strip(), "a dispatch needs a model"
@@ -1076,6 +1089,12 @@ class ConfiguredHarnessAdapter:
 		# adapter rather than passed per dispatch so every record it produces carries the
 		# same freeze -- a session that ran under one composition cannot report another.
 		self.composition_hash = composition_hash
+		# FR-019's measured boundary, bound the same way and for the same reason: every
+		# child this adapter launches runs inside the isolation that was measured for it,
+		# so a session cannot run under one boundary and be recorded as having run under
+		# another. `None` means no probe was run for this adapter, which is not a claim
+		# that nothing confines it.
+		self.boundary = boundary
 
 	def __repr__(self) -> str:
 		return f"ConfiguredHarnessAdapter({self.spec.name!r}, workspace={self.workspace})"
@@ -1087,6 +1106,7 @@ class ConfiguredHarnessAdapter:
 		tools: str | None = None,
 		env: Mapping[str, str] | None = None,
 		spec_env: bool | None = None,
+		boundary: DeploymentBoundary | None = None,
 	) -> ConfiguredHarnessAdapter:
 		"""This adapter with one slot changed, everything else held equal.
 
@@ -1100,6 +1120,11 @@ class ConfiguredHarnessAdapter:
 		else -- argv, workspace, model, the operator's overrides -- byte-identical. It
 		exists for one row: the control arm of the store-isolation differential, where the
 		question is precisely what the spec's ``env`` is doing.
+
+		``boundary`` defaults to the parent's rather than to ``None``, because a variant
+		exists to change *one* slot: a probe arm that silently ran outside the boundary its
+		parent ran inside would differ from its control in two things at once, and the
+		difference it measured would not be attributable.
 		"""
 		return ConfiguredHarnessAdapter(
 			self.spec,
@@ -1111,6 +1136,7 @@ class ConfiguredHarnessAdapter:
 			env=self.env if env is None else env,
 			spec_env=self.spec_env if spec_env is None else spec_env,
 			composition_hash=self.composition_hash,
+			boundary=self.boundary if boundary is None else boundary,
 		)
 
 	def _slots(self, session_id: str) -> dict[str, str]:
@@ -1236,6 +1262,14 @@ class ConfiguredHarnessAdapter:
 		"completed" for a session that failed and "no signal" for one that succeeded.
 		"""
 		argv = tuple(part.format(**self._slots(session_id)) for part in self.spec.session_command)
+		# Deliberately *not* routed through `wrap_argv`, and the reason is the one thing
+		# that distinguishes this launch from the two that are: this child is the factory
+		# reading its own record, not a producer session. It writes into `session_dir`,
+		# which sits inside the factory home that FR-059 denies a producer — so wrapping it
+		# would have the factory lock itself out of its own records and report the resulting
+		# empty export as "the session left no record". The boundary bounds what the
+		# *producer* may reach; a third call site is exempt because it is not the producer,
+		# and saying so here is what keeps the exemption from being an oversight.
 		process = await asyncio.create_subprocess_exec(
 			*argv,
 			cwd=self.workspace,
@@ -1322,14 +1356,22 @@ class ConfiguredHarnessAdapter:
 		``stdin`` is ``DEVNULL`` on purpose: a harness that waits for a human must fail
 		fast rather than hang an unattended build, and observing that is how FR-145's
 		``NON_INTERACTIVE`` row gets measured instead of asserted.
+
+		``argv`` is routed through :func:`~sofact.boundary.wrap_argv`, so a session runs
+		inside the boundary that was *measured* for this adapter (FR-019) rather than
+		beside it. Wrapping here rather than at each caller is the point: there is one
+		launch path, so a control applied at this line is applied to every child the
+		adapter ever starts. :func:`~sofact.boundary.boundary_env` supplies the scratch
+		directory the confinement requires, because a profile permitting writes only under
+		the workspace denies the host's ``TMPDIR``.
 		"""
 		process = await asyncio.create_subprocess_exec(
-			*argv,
+			*wrap_argv(tuple(argv), self.boundary, self.workspace),
 			cwd=self.workspace,
 			stdin=asyncio.subprocess.DEVNULL,
 			stdout=asyncio.subprocess.PIPE,
 			stderr=asyncio.subprocess.PIPE,
-			env=self._child_env(session_id),
+			env={**self._child_env(session_id), **boundary_env(self.boundary, self.workspace)},
 		)
 		timed_out = False
 		stdout = b""
@@ -2243,6 +2285,7 @@ class ConfiguredHarnessAdapter:
 				stderr_tail=stderr_tail,
 				checkout=checkout,
 				composition_hash=self.composition_hash,
+				boundary=self.boundary,
 			)
 
 		if profile is None:

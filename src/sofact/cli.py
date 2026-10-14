@@ -48,6 +48,7 @@ from sofact.views import (
 	Assumption,
 	ClaimKind,
 	ClauseKind,
+	BoundaryMechanism,
 	Consumer,
 	Contract,
 	Decomposition,
@@ -248,6 +249,7 @@ def _service(home: Path | None) -> FactoryService:
 		escape_budgets=_configured_escape_budgets(),
 		scope=_configured_scope(),
 		compositions=_configured_compositions(),
+		boundary=_configured_boundary(),
 	)
 
 
@@ -293,6 +295,48 @@ def _configured_topology() -> DeploymentTopology | None:
 		known = ", ".join(t.value for t in DeploymentTopology)
 		typer.secho(
 			f"cannot read SOFACT_TOPOLOGY: {configured!r} is not one of {known} (§5.4)",
+			fg="red",
+		)
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_boundary() -> tuple[BoundaryMechanism, ...] | None:
+	"""The boundary mechanisms FR-019's probe may attempt, if this deployment restricted them.
+
+	``None`` means *attempt every mechanism this host offers*, which is the default because
+	the probe is a measurement and refusing to take one is never the safer choice — an
+	unmeasured deployment reports §5.4's degraded modifier either way, so restricting the
+	probe can only cost information.
+
+	The value is a comma-separated list, and it is a **restriction**: naming a mechanism
+	still requires the probe to confirm it confines a real child, so no setting here can
+	raise a ceiling without a measurement behind it. ``SOFACT_BOUNDARY=none`` is the one
+	value that measures nothing and is therefore a deliberate declaration of the degraded
+	configuration rather than a way to claim isolation.
+
+	A malformed value is refused rather than defaulted, the same discipline
+	:func:`_configured_topology` uses: a typo that silently fell back to "probe everything"
+	would look exactly like a deployment that meant to.
+
+	Case is folded through a map built from the enum's own values rather than by
+	upper-casing the input, and that is not a style preference: these values are lowercase
+	(``seatbelt``, not ``SEATBELT``), so ``.upper()`` would refuse every spelling a shell
+	variable is likely to carry. Folding *both* sides is the only version that accepts
+	``SEATBELT`` without inventing a name the enum does not have.
+	"""
+	configured = os.environ.get("SOFACT_BOUNDARY")
+	if not configured:
+		return None
+	known = {mechanism.value.lower(): mechanism for mechanism in BoundaryMechanism}
+	names = [part.strip().lower() for part in configured.split(",") if part.strip()]
+	if not names:
+		return ()
+	try:
+		return tuple(known[name] for name in names)
+	except KeyError as exc:
+		typer.secho(
+			f"cannot read SOFACT_BOUNDARY: {configured!r} names a mechanism that is not "
+			f"one of {', '.join(sorted(known))} (FR-019)",
 			fg="red",
 		)
 		raise typer.Exit(code=1) from exc

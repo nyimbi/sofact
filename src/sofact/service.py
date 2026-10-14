@@ -20,6 +20,7 @@ from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
 from sofact.audit import audit_oracles as run_oracle_audit
+from sofact.boundary import TEMP_DIRNAME, detect_boundary
 from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
@@ -89,6 +90,7 @@ from sofact.views import (
 	Advice,
 	Assumption,
 	AttemptTelemetryReport,
+	BoundaryMechanism,
 	ChainStatus,
 	Clause,
 	ClauseVerdict,
@@ -101,6 +103,7 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeliveryGate,
 	DeliveryReport,
+	DeploymentBoundary,
 	DeploymentScope,
 	DeploymentTopology,
 	DeployRecord,
@@ -379,6 +382,7 @@ class FactoryService:
 		escape_budgets: Sequence[EscapeBudget] = (),
 		scope: DeploymentScope | None = None,
 		compositions: Mapping[str, PluginComposition] | None = None,
+		boundary: Sequence[BoundaryMechanism] | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -421,6 +425,13 @@ class FactoryService:
 		is a freeze on `pi` and an unfrozen profile on `dsh`. The distinction is the same one
 		the other four make, and here it separates "we pinned nothing because nothing is
 		installed" from "we pinned nothing because we did not look".
+
+		``boundary`` is the mechanisms FR-019's probe may attempt, and ``None`` means *every
+		mechanism this host offers*. It is a **restriction, not a declaration**: naming a
+		mechanism still requires the probe to confirm it confines a real child, so no value
+		here can raise an autonomy ceiling without a measurement behind it — an empty
+		sequence measures nothing and reports §5.4's degraded configuration, which is how a
+		deployment opts out of probing without claiming anything it did not check.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
@@ -431,6 +442,10 @@ class FactoryService:
 		self.escape_budgets: tuple[EscapeBudget, ...] = tuple(escape_budgets)
 		self.scope: DeploymentScope | None = scope
 		self._compositions: Mapping[str, PluginComposition] = dict(compositions or {})
+		self._boundary_mechanisms: tuple[BoundaryMechanism, ...] | None = (
+			None if boundary is None else tuple(boundary)
+		)
+		self._boundary: DeploymentBoundary | None = None
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
@@ -450,6 +465,57 @@ class FactoryService:
 	def topology_configured(self) -> bool:
 		"""Whether this deployment declared its topology, or fell back to T1 (FR-042)."""
 		return self._topology is not None
+
+	async def boundary(self, workspace: Path | None = None) -> DeploymentBoundary:
+		"""What actually confines a child here, measured once and cached (FR-019).
+
+		Measured rather than declared, because that is the whole of R2: autonomy depended
+		on isolation "asserted but never verified". The probe runs a real child that tries
+		to escape its directory, so the answer is an observation rather than a reading of
+		the deployment's own configuration.
+
+		Cached for the life of the service because the mechanisms are host properties: a
+		Seatbelt profile either confines a child or does not, and re-probing per dispatch
+		would spend a process launch per step to re-answer a question whose answer cannot
+		change within a run. The cache is what makes a *measurement* affordable at a call
+		site that would otherwise have to assert.
+
+		The probe workspace defaults to the factory's own work directory rather than the
+		operator's checkout, so measuring a boundary never writes into the repository the
+		factory was asked to build.
+
+		The read half is measured against the factory home (FR-059). That is where the
+		ledger, the holdout scenarios and the credentials live, and it is the subtree a
+		producer must not reach: "the harness must run inside the lane's sandbox with no
+		access to the oracle corpus, holdout scenarios, or factory credentials". It is
+		passed *as well as* the workspace, not instead of it, because the workspace usually
+		sits inside the home — the profile denies the home and re-allows the workspace, so
+		both halves are exercised by one probe rather than one being assumed from the other.
+
+		The session store is granted *besides* the workspace, and it is the same store for
+		every harness (``<home>/sessions``, one subtree rather than one per name), so the
+		grant does not fragment this cache. Without it the profile denies the very directory
+		a dispatch writes its record into: measured 2026-10-14, ``touch
+		<session_dir>/record.jsonl`` under the workspace-only profile fails ``Operation not
+		permitted``, and the run then reports "no session completed" for a session that was
+		never allowed to write one. A boundary that breaks the dispatch is not confinement.
+		"""
+		if self._boundary is None:
+			probe_root = (
+				Path(workspace)
+				if workspace is not None
+				else (self.home / "workspace")
+			)
+			probe_root.mkdir(parents=True, exist_ok=True)
+			sessions = self.home / "sessions"
+			sessions.mkdir(parents=True, exist_ok=True)
+			self._boundary = await detect_boundary(
+				probe_root,
+				only=self._boundary_mechanisms,
+				deny_read=(self.home,),
+				writable=(sessions,),
+			)
+		return self._boundary
 
 	def __repr__(self) -> str:
 		return f"FactoryService(home={self.home}, entries={len(self.ledger)})"
@@ -921,6 +987,7 @@ class FactoryService:
 			workdir,
 			timeout=timeout,
 			run_id=uuid7str(),
+			boundary=await self.boundary(workdir),
 		).run_all(contract)
 		for item in produced:
 			self._commit(
@@ -1042,6 +1109,7 @@ class FactoryService:
 			workdir,
 			timeout=timeout,
 			run_id=run_id,
+			boundary=await self.boundary(workdir),
 		).run_all(contract)
 		for item in produced:
 			self._commit(
@@ -1545,7 +1613,7 @@ class FactoryService:
 		"""
 		home = self.home.resolve()
 		resolved = workspace.resolve()
-		unowned = (WORKTREE_DIRNAME,)
+		unowned = (WORKTREE_DIRNAME, TEMP_DIRNAME)
 		if resolved != home and home not in resolved.parents:
 			return tuple(name for name in unowned if (resolved / name).exists())
 		nested = (*unowned, LEDGER_FILENAME, LOCK_FILENAME, "sessions")
@@ -1606,6 +1674,13 @@ class FactoryService:
 		if step is None:
 			raise KeyError(f"plan {plan_id} has no step {step_id}")
 		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
+		# FR-019: the session runs inside the boundary measured for *this* workspace, and
+		# it is attached here rather than in :meth:`adapter` because the capability probes
+		# go through that factory too — and the sandbox probe's whole instrument is an
+		# escape a host boundary would mask, so wrapping it would make the probe report
+		# SoFact's confinement as the harness's. Measured at the dispatch, applied at the
+		# dispatch, and the same measurement reaches the delivery report.
+		adapter = adapter.variant(boundary=await self.boundary(adapter.workspace))
 		# FR-100: the branch is established *before* the session starts, so the producer
 		# builds on it rather than in place. Refusing here rather than dispatching
 		# unbranched is the point -- a session that ran in place has already done the
@@ -1649,6 +1724,10 @@ class FactoryService:
 			exclude=self._unowned_paths(adapter.workspace),
 		)
 		record = record.model_copy(update={"checkout": sealed})
+		# FR-019: the record already carries the boundary the adapter ran under, because
+		# `dispatch` sets it from the same attribute `wrap_argv` was given. Re-sealing
+		# rewrites the checkout and must not drop it, which is why the model_copy above
+		# names one field rather than rebuilding the record.
 		self._commit(
 			LedgerKind.STEP_DISPATCHED,
 			{"dispatch": record.model_dump(mode="json")},
@@ -2686,6 +2765,12 @@ class FactoryService:
 			else None
 		)
 
+		# FR-019: measured once, before the render loop, because `render` is synchronous and
+		# a fixed point needs the same boundary on every round — a probe taken inside the
+		# loop could return a different answer and the two rounds would then disagree about
+		# a fact neither of them changed.
+		measured_boundary = await self.boundary(root or (self.home / "workspace"))
+
 		def render() -> DeliveryReport:
 			"""One render of the report, reading nothing the caller has not already read."""
 			return delivery_report(
@@ -2705,6 +2790,7 @@ class FactoryService:
 				topology=self.topology(),
 				topology_configured=self.topology_configured(),
 				topology_override=topology_override,
+				boundary=measured_boundary,
 				escapes=escapes,
 				escapes_recorded=state.escapes,
 			)

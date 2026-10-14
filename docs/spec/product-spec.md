@@ -1312,7 +1312,7 @@ ones are thin wrappers around tools SoFact already drives.
 | `dsh-plugin-kit` (shared approval/session-event gates) | Fails deletion: it *is* the gate | **Refuse.** Gates are the human's (FR-140); a shared plugin makes them a dependency. |
 | `dsh-git-worktree` (FR-141) | Passes deletion | **Refuse; built here instead.** It is a thin wrapper over `git worktree add`, and FR-141 is no longer deferred: SoFact drives `init`, `switch`, `config`, `add`, `commit`, `status`, `worktree add`/`list`/`remove`, `merge` and `merge --abort` ([ADR-0033](../adr/0033-a-worktree-is-per-module-and-a-wave-is-isolated-only-when-every-step-has-one.md)). What the wrapper would have to supply that SoFact does not — the integration line, the per-wave merge order, the conflict record — is the part that makes the feature safe, and it is the part a wrapper cannot see. Vetting plus pinning plus licence review costs more than the code either way. |
 | `030611/dsh-telemetry-redactor` | Passes deletion, but is superseded by config | **Refuse in favour of configuration** (FR-156). See below. |
-| `dsh-research-container`, egress plugins (FR-019/FR-152) | Fails: an in-process guard cannot be the boundary of the process it guards | **Refuse as boundary.** Egress confinement belongs to the container/network layer (D9). |
+| `dsh-research-container`, egress plugins (FR-019/FR-152) | Fails: an in-process guard cannot be the boundary of the process it guards | **Refuse as boundary.** Egress confinement belongs to the container/network layer, and the *boundary* is measured there rather than declared (D9, ADR-0060). |
 | `LongHorizon-Harness` (T4 split producer/evaluator) | Fails: it is an outer loop, i.e. §8's subject | **Refuse; study as prior art.** |
 | `upstream-radar` (breaking-change monitoring) | Passes deletion | **Admissible** — and its existence is evidence that R28 is a real, already-productised problem. |
 
@@ -2249,7 +2249,7 @@ v0.1's R1–R12 retained. New risks from the 0.2 scope:
 
 ## 22. Open decisions
 
-v0.1's D1–D10 retained; **D1 is superseded**, **D14 and D16 are resolved**, and D3/D8 are revised. New: D11–D17, of which **D11, D16, and D17 are resolved** (§8.6, §8.7, §1.4).
+v0.1's D1–D10 retained; **D1 is superseded**, **D9, D14 and D16 are resolved**, and D3/D8 are revised. New: D11–D18, of which **D11, D16 and D17 are resolved** (§8.6, §8.7, §1.4, ADR-0060).
 
 | # | Decision | Why it blocks | Recommendation |
 | --- | --- | --- | --- |
@@ -2261,7 +2261,7 @@ v0.1's D1–D10 retained; **D1 is superseded**, **D14 and D16 are resolved**, an
 | **D6** | x402/metering in v1 | Scope | No |
 | **D7** | L12 self-modification in v1 | Unbounded blast radius | No — M6 |
 | **D8** | Fine-tuning target | Complexity budget | **Revised:** oracle manufacturing (§18.3), not lane routing |
-| **D9** | Container runtime on target VM | FR-019 and all ceilings depend on a real boundary | Docker/Podman required |
+| ~~**D9**~~ | ~~Container runtime on target VM~~ | — | **Resolved: no runtime is *required*; the boundary is measured where one exists.** FR-019's own text is conditional ("where one exists"), so the mechanism is a table with an honest detector rather than a dependency: Seatbelt on darwin, a container runtime where one is operational and an image is configured, and §5.4's degraded modifier everywhere else. The ceiling follows the *measurement*, and a measured boundary may only restore the baseline a degraded declaration gave up (ADR-0060, superseding ADR-0005's refusal of the layer). |
 | **D10** | CPU-only target support | §18.1 says CPU-only DeepSeek-V3 is ~5 tok/s = unusable | **Revised:** CPU-only must be explicitly unsupported for Mode G, or a small local model becomes the CPU-only tier |
 | ~~**D11**~~ | ~~Which goal-mode harness first?~~ | — | **Resolved: `dsh` primary, `pi` second adapter** (§8.6). Grounds: Python SDK; typed replayable event log (FR-151); loop, sandbox, and scheduler as plugins; first-party goal package; harness-in-harness as its own idiom; MIT; Linux x64/arm64. `pi` retained as the interface's real test. **Residual:** the choice is made on documentation [S20], and M0 item 6 may overturn it — FR-147 governs. |
 | **D12** | **Hosted vs self-hosted model tiering** | Determines which ICP is servable and what the product costs to run (§18.2) | Two-tier: cheap hosted default + self-hosted GPU tier for sovereign, priced separately |
