@@ -25,6 +25,7 @@ from sofact import __version__
 from sofact import api as machine_api
 from sofact._uuid7 import uuid7str
 from sofact.audit import EMPTY_WORKSPACE_INSTRUMENT
+from sofact.changecost import load_change_units, trend_statement
 from sofact.composition import load_composition, verify_composition
 from sofact.contract import ground_truth_debt
 from sofact.elicitation import DIMENSIONS
@@ -54,6 +55,7 @@ from sofact.views import (
 	ClaimKind,
 	ClauseKind,
 	BoundaryMechanism,
+	ChangeUnit,
 	Consumer,
 	Contract,
 	Decomposition,
@@ -231,6 +233,14 @@ _MEASURED_STRENGTH_OPTION = typer.Option(
 		"by default: it runs the oracle once per mutant, so it is the operator's call."
 	),
 )
+_CHANGE_COST_OPTION = typer.Option(
+	False,
+	"--change-cost",
+	help=(
+		"Measure FR-159's differential change cost for each pinned unit. Off by default: "
+		"it launches git per unit, and the number it produces moves no ceiling (D18)."
+	),
+)
 _APPROVE_OPTION = typer.Option(None, "--approve", help="Pass the gate for this report, naming it.")
 _GATE_BY_OPTION = typer.Option("operator", "--by", help="Who is passing the gate (FR-119).")
 _GATE_NOTE_OPTION = typer.Option(None, "--note", help="Why, recorded with the decision.")
@@ -263,6 +273,7 @@ def _service(home: Path | None) -> FactoryService:
 		scope=_configured_scope(),
 		compositions=_configured_compositions(),
 		boundary=_configured_boundary(),
+		change_units=_configured_change_units(),
 		manufacture=_configured_manufacture(),
 	)
 
@@ -468,6 +479,24 @@ def _configured_escape_budgets() -> tuple[EscapeBudget, ...]:
 		return load_escape_budget(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_ESCAPE_BUDGET: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_change_units() -> tuple[ChangeUnit, ...]:
+	"""The change units this deployment pinned, if it pinned any (FR-159).
+
+	An empty tuple means *this deployment pinned none*, which is not the same as "no
+	change is expensive": FR-159's instrument is differential and a trend needs a pinned
+	set to trend, so an undeclared deployment gets no measurement and a report that says
+	the instrument had nothing to read, rather than a flat line that reads as stable.
+	"""
+	configured = os.environ.get("SOFACT_CHANGE_UNITS")
+	if not configured:
+		return ()
+	try:
+		return load_change_units(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_CHANGE_UNITS: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -3451,6 +3480,7 @@ def deliver_command(
 	entry_point: str | None = _ENTRY_POINT_OPTION,
 	override_topology: str | None = _TOPOLOGY_OVERRIDE_OPTION,
 	measured_strength: bool = _MEASURED_STRENGTH_OPTION,
+	change_cost: bool = _CHANGE_COST_OPTION,
 ) -> None:
 	"""Render P8's delivery report (FR-117, FR-118)."""
 	asyncio.run(
@@ -3461,6 +3491,7 @@ def deliver_command(
 			entry_point=entry_point,
 			override_topology=override_topology,
 			measured_strength=measured_strength,
+			change_cost=change_cost,
 		)
 	)
 
@@ -3473,6 +3504,7 @@ async def _deliver(
 	entry_point: str | None,
 	override_topology: str | None,
 	measured_strength: bool,
+	change_cost: bool,
 ) -> None:
 	goal = await svc.current_goal()
 	if goal is None:
@@ -3505,6 +3537,7 @@ async def _deliver(
 		entry_point=entry_point,
 		topology_override=override_topology,
 		measured_strength=measured_strength,
+		measure_change_cost=change_cost,
 	)
 
 	typer.secho(f"\ndelivery report {report.id}", fg="cyan", bold=True)
@@ -3657,6 +3690,20 @@ async def _deliver(
 		fg="yellow",
 	)
 	typer.secho(f"    {report.maintainability_statement}", fg="yellow")
+	if report.change_cost is not None:
+		# FR-159's instrument, printed beside FR-158's debt because it is the *input* to
+		# the question the debt names. It is printed as a trend with its caveats and never
+		# as a verdict: the pressure on a proxy that produces a number is to promote it,
+		# and the ceiling this could inform is not moved here (D18).
+		typer.secho("\n  change cost (FR-159, D18)", fg="cyan")
+		typer.secho(f"    {trend_statement(report.change_cost)}", fg="yellow")
+		for scope, magnitudes in report.change_cost.trends.items():
+			typer.secho(
+				f"    {scope}: " + " -> ".join(f"{m:g}" for m in magnitudes),
+				fg="bright_black",
+			)
+		for caveat in report.change_cost.caveats:
+			typer.secho(f"    {caveat}", fg="bright_black")
 	for lane in handed.lanes:
 		typer.secho(
 			f"    {lane.lane} ({lane.ceiling.name}): {lane.description} — "

@@ -21,6 +21,7 @@ from typing import Any, Final, cast
 from sofact._uuid7 import uuid7str
 from sofact.audit import audit_oracles as run_oracle_audit
 from sofact.boundary import TEMP_DIRNAME, detect_boundary
+from sofact.changecost import measure_change_costs
 from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
@@ -94,15 +95,16 @@ from sofact.state import fold
 from sofact.telemetry import measure_attempts
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
+	COVERING_ORACLE_MAX_RANK,
 	PHASE_GATE,
 	PHASE_GATE_INVERSE,
 	PHASE_SEQUENCE,
-	COVERING_ORACLE_MAX_RANK,
 	Advice,
 	Assumption,
 	AttemptTelemetryReport,
 	BoundaryMechanism,
 	ChainStatus,
+	ChangeUnit,
 	Clause,
 	ClauseVerdict,
 	CompletionClaim,
@@ -198,6 +200,31 @@ normally; this constant is what a caller gets when it says "ignore that for this
 
 
 research_url_pattern = re.compile(r"https?://[^\s()>]+")
+
+
+def _repository_of(root: Path | None, state: ProjectState, plan: GoalPlan) -> Path | None:
+	"""The one tree FR-159's footprint may be read from, or ``None``.
+
+	FR-159 measures a diff, and a diff is a fact about **one** repository. A delivery whose
+	dispatches ran in two workspaces has no single tree to read a footprint from, and
+	reading one of them would report a trend over an arbitrary half of the work. So the
+	answer is ``None`` in that case and the measurement reports *unmeasured* rather than
+	reading whichever workspace happened to be first — the rule
+	:meth:`FactoryService._measured_strengths` applies to the same question one subsystem
+	over.
+
+	``root`` is the delivery root when the caller named one, because that is the tree the
+	report is *about*. The dispatch workspaces are the fallback: a render with no root
+	still has the tree the sessions ran in, and a footprint read from it is a fact about
+	the code that was built rather than about where the documents were written.
+	"""
+	if root is not None and (root / ".git").exists():
+		return root
+	workspaces = {r.workspace for r in state.dispatches_for(plan.id) if r.workspace}
+	if len(workspaces) != 1:
+		return None
+	candidate = Path(next(iter(workspaces)))
+	return candidate if candidate.is_dir() else None
 
 
 def extract_source_urls(text: str) -> tuple[str, ...]:
@@ -391,6 +418,7 @@ class FactoryService:
 		envelope: DeliveryEnvelope | None = None,
 		topology: DeploymentTopology | None = None,
 		escape_budgets: Sequence[EscapeBudget] = (),
+		change_units: Sequence[ChangeUnit] = (),
 		scope: DeploymentScope | None = None,
 		compositions: Mapping[str, PluginComposition] | None = None,
 		boundary: Sequence[BoundaryMechanism] | None = None,
@@ -462,6 +490,7 @@ class FactoryService:
 		self._envelope = envelope
 		self._topology = topology
 		self.escape_budgets: tuple[EscapeBudget, ...] = tuple(escape_budgets)
+		self.change_units: tuple[ChangeUnit, ...] = tuple(change_units)
 		self.scope: DeploymentScope | None = scope
 		self._compositions: Mapping[str, PluginComposition] = dict(compositions or {})
 		self._boundary_mechanisms: tuple[BoundaryMechanism, ...] | None = (
@@ -2901,6 +2930,7 @@ class FactoryService:
 		entry_point: str | None = None,
 		topology_override: str | None = None,
 		measured_strength: bool = False,
+		measure_change_cost: bool = False,
 	) -> DeliveryReport:
 		"""Render FR-118's delivery report for a plan's work, and record it (FR-117).
 
@@ -2927,6 +2957,12 @@ class FactoryService:
 		renders do not read, and would make two renders of one log differ by timing. With
 		it off, every verified clause renders as *declared rank, not measured* — which is
 		the honest sentence, not a missing feature.
+
+		``measure_change_cost`` is FR-159's instrument, and it is off by default for
+		:``measured_strength``'s reason plus one of its own: reading a footprint launches
+		``git`` per unit, and — more to the point — a report is not the thing that decides
+		whether the ceiling may rise. The measurement is available on demand and the number
+		it produces moves nothing (D18); a caller that wants the trend asks for it.
 
 		**The two artefacts SoFact owes are written here** (FR-117). ADR-0040 scoped the
 		artefact check to the two kinds the factory produces, and nothing produced them: a
@@ -3012,6 +3048,24 @@ class FactoryService:
 			else {}
 		)
 
+		# FR-159's instrument, measured once outside the render loop for the reason the
+		# boundary and the strengths are: `render` is synchronous and a fixed point needs
+		# the same measurement on every round, and a diff read inside the loop could
+		# return a different answer only if something committed mid-render — which would
+		# make the two rounds disagree about a fact neither of them changed.
+		#
+		# `None` when the caller did not ask, which is a different statement from a
+		# measurement that found no trend: the report carries `None` and says nothing,
+		# rather than carrying an empty measurement that reads as a clean trend line.
+		change_cost = (
+			await measure_change_costs(
+				self.change_units,
+				workspace=_repository_of(root, state, plan),
+			)
+			if measure_change_cost
+			else None
+		)
+
 		def render() -> DeliveryReport:
 			"""One render of the report, reading nothing the caller has not already read."""
 			return delivery_report(
@@ -3034,6 +3088,7 @@ class FactoryService:
 				boundary=measured_boundary,
 				escapes=escapes,
 				escapes_recorded=state.escapes,
+				change_cost=change_cost,
 				strengths=strengths,
 			)
 

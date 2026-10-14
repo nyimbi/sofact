@@ -16,6 +16,7 @@ field, so no code path can write a report claiming the factory certified value.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ from synthetic import (
 )
 
 from sofact._uuid7 import uuid7str
+from sofact.changecost import pin_unit
 from sofact.decomposition import propose
 from sofact.delivery import (
 	DELIVERY_ARTIFACT_PATHS,
@@ -45,8 +47,9 @@ from sofact.delivery import (
 	topology_statement,
 	verified_and_unverified,
 )
+from sofact.git import head_commit
 from sofact.planner import DEFAULT_MODULE_BUDGET, compile_plan
-from sofact.service import FactoryService
+from sofact.service import FactoryService, _repository_of  # pyright: ignore[reportPrivateUsage]
 from sofact.views import (
 	DELIVERY_ARTIFACTS,
 	DELIVERY_REQUIREMENTS,
@@ -1007,6 +1010,39 @@ class TestTheModeGCap:
 		assert report.module_autonomy.name in check.detail
 
 
+async def _git(workspace: Path, *args: str) -> str:
+	"""Run git in ``workspace``, and fail loudly rather than returning empty output."""
+	process = await asyncio.create_subprocess_exec(
+		"git",
+		*args,
+		cwd=workspace,
+		stdin=asyncio.subprocess.DEVNULL,
+		stdout=asyncio.subprocess.PIPE,
+		stderr=asyncio.subprocess.PIPE,
+	)
+	stdout, stderr = await process.communicate()
+	assert process.returncode == 0, f"git {' '.join(args)} failed: {stderr.decode()}"
+	return stdout.decode("utf-8", errors="replace")
+
+
+async def _a_git_repository(root: Path) -> None:
+	"""Make ``root`` a repository with one commit, so a diff has a base to be against."""
+	root.mkdir(parents=True, exist_ok=True)
+	await _git(root, "init", "-q", ".")
+	await _git(root, "config", "user.email", "factory@example.invalid")
+	await _git(root, "config", "user.name", "SoFact")
+	(root / "seed.py").write_text("a\nb\n", encoding="utf-8")
+	await _git(root, "add", "--all")
+	await _git(root, "commit", "--quiet", "-m", "first")
+
+
+async def _commit_all(root: Path, message: str) -> str:
+	"""Commit everything in ``root`` and return the new sha."""
+	await _git(root, "add", "--all")
+	await _git(root, "commit", "--quiet", "-m", message)
+	return (await _git(root, "rev-parse", "HEAD")).strip()
+
+
 async def _walk_to_the_specification_gate(service: FactoryService) -> None:
 	"""Complete P0 and P1, present P2's gate and pass it (FR-061).
 
@@ -1931,6 +1967,105 @@ class TestTheMeasuredStrengthReachesTheReport:
 		assert report.verified, "the fixture must verify something for this to be a test"
 		assert not any(clause.measured for clause in report.verified), (
 			"a render nobody asked to measure reported a measurement"
+		)
+
+
+class TestTheChangeCostReachesTheReport:
+	"""FR-159's instrument, wired end to end: a declared unit, a real repository, a render.
+
+	The seam is `_repository_of`, and the thing it must not do is pick a tree. A footprint
+	is a fact about *one* repository, so a delivery whose dispatches ran in two workspaces
+	has no footprint to report — and reporting one of them would trend an arbitrary half
+	of the work. The three tests below are the three answers it can give: the delivery
+	root, the single dispatch workspace, and `None`.
+	"""
+
+	async def test_the_measurement_is_off_by_default(self, home: Path, tmp_path: Path) -> None:
+		"""Reading a footprint launches `git` per unit, and the number moves no ceiling
+		(D18) — so a render that did it unasked would pay for a measurement most renders do
+		not read."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands="true"
+		)
+		await service.dispatch_plan(plan.id, max_steps=1)
+
+		report = await service.render_delivery(plan.id, root=_a_delivery_root(tmp_path))
+
+		assert report.change_cost is None, (
+			"a render that did not ask for the instrument carried a measurement anyway"
+		)
+
+	async def test_a_pinned_unit_is_measured_against_the_delivery_root(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The whole path: a unit declared with a commit range, a real repository at the
+		delivery root, and a footprint on the report."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands="true"
+		)
+		await service.dispatch_plan(plan.id, max_steps=1)
+		root = _a_delivery_root(tmp_path)
+		await _a_git_repository(root)
+		base = await head_commit(root)
+		assert base is not None
+		(root / "one.py").write_text("a\nX\n", encoding="utf-8")
+		head = await _commit_all(root, "one edit")
+		service.change_units = (
+			pin_unit("add a line", scope="root", base_commit=base, head_commit=head),
+		)
+
+		report = await service.render_delivery(plan.id, root=root, measure_change_cost=True)
+
+		assert report.change_cost is not None
+		assert report.change_cost.rows[0].footprint is not None
+		assert report.change_cost.rows[0].footprint.files_touched == 1
+		assert report.change_cost.repository == str(root)
+
+	async def test_no_repository_reports_unmeasured_rather_than_clean(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A delivery root that is not a repository, and dispatches in one workspace that
+		is not one either, is a delivery with no diff to read. The row says so by name."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands="true"
+		)
+		await service.dispatch_plan(plan.id, max_steps=1)
+		service.change_units = (
+			pin_unit("add a line", scope="root", base_commit="a" * 40, head_commit="b" * 40),
+		)
+
+		report = await service.render_delivery(
+			plan.id, root=_a_delivery_root(tmp_path), measure_change_cost=True
+		)
+
+		assert report.change_cost is not None
+		assert report.change_cost.measured_rows == ()
+		assert report.change_cost.rows[0].unmeasured_because is not None
+		assert report.change_cost.discharged == (), (
+			"a report over no repository must not claim FR-159 was discharged"
+		)
+
+	async def test_two_dispatch_workspaces_are_not_a_repository(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The refusal that matters: a footprint is a fact about *one* repository, so a
+		delivery spread over two workspaces has none — and reading whichever came first
+		would trend an arbitrary half of the work."""
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands="true"
+		)
+		await service.dispatch_plan(plan.id, max_steps=1)
+		state = await service.state()
+		first = next(iter(state.dispatches_for(plan.id)))
+		second = first.model_copy(update={"id": uuid7str(), "workspace": str(tmp_path / "other")})
+
+		workspace = _repository_of(
+			None, state.model_copy(update={"dispatches": (*state.dispatches, second)}), plan
+		)
+
+		assert workspace is None, (
+			"two workspaces were read as one repository, so the trend would be over half "
+			"the work chosen by dict order"
 		)
 
 

@@ -2757,3 +2757,106 @@ class TestTheOverrideIsAttributedOrRefused:
 
 		assert result.exit_code != 0, result.output
 		assert "Traceback" not in result.output
+
+
+class TestTheChangeCostSeam:
+	"""FR-159's instrument is configured the way every other deployment declaration is:
+	a file named by an environment variable, read at service construction, refused rather
+	than defaulted when malformed.
+
+	The verb under test is ``deliver``, because it is the only command that reaches the
+	instrument. A reader asserted on its own would prove the file parses; what these check
+	is that a deployment's declaration *arrives* at the render — the seam that can be
+	severed while every unit test of the reader still passes.
+	"""
+
+	def _units(self, tmp_path: Path, payload: str) -> Path:
+		path = tmp_path / "units.json"
+		path.write_text(payload, encoding="utf-8")
+		return path
+
+	def test_a_declared_set_reaches_the_render(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The whole path: the file is named, the units are pinned, the render measures.
+
+		The delivery root is not a repository, so every unit measures as *unmeasured* —
+		which is the point. The assertion is that the render carried a report at all: an
+		undeclared deployment renders no ``change_cost`` section, and this one must.
+		"""
+		path = self._units(
+			tmp_path,
+			'[{"statement": "add a line", "scope": "root",'
+			' "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+			' "head_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]',
+		)
+		monkeypatch.setenv("SOFACT_CHANGE_UNITS", str(path))
+
+		result = _delivered(home, tmp_path, monkeypatch, "--change-cost")
+
+		assert result.exit_code == 0, result.output
+		assert "change cost (FR-159, D18)" in result.output
+		assert "unmeasured" in result.output, (
+			"a unit whose diff cannot be read must be reported as unmeasured, never as a "
+			"footprint of zero"
+		)
+
+	def test_an_undeclared_deployment_prints_no_section(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``--change-cost`` with nothing pinned is a report claiming nothing, and the
+		absence is stated rather than rendered as a flat line that reads as stable."""
+		result = _delivered(home, tmp_path, monkeypatch, "--change-cost")
+
+		assert result.exit_code == 0, result.output
+		assert "change cost (FR-159, D18)" in result.output
+		assert "no change unit has a footprint" in result.output
+
+	def test_the_instrument_is_off_unless_asked_for(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""Reading a footprint launches ``git`` per unit, and the number moves no ceiling
+		(D18) — so a plain ``deliver`` pays for nothing it did not ask for."""
+		result = _delivered(home, tmp_path, monkeypatch)
+
+		assert result.exit_code == 0, result.output
+		assert "change cost (FR-159, D18)" not in result.output
+
+	def test_a_malformed_declaration_is_a_sentence_not_a_traceback(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The config seam's own failure mode. Refusing is the right answer rather than
+		defaulting: a silently-ignored declaration would read as configured while pinning
+		nothing.
+
+		Asserted on ``status`` rather than on ``deliver``, and that is the honest place:
+		the declaration is read when the *service* is constructed, so a malformed file
+		stops every verb rather than the one that happens to use the instrument. A
+		refusal that only fired at the render would let an operator run a whole pipeline
+		against a declaration the factory could not read.
+		"""
+		path = self._units(tmp_path, '{"statement": "not an array"}')
+		monkeypatch.setenv("SOFACT_CHANGE_UNITS", str(path))
+
+		result = RUNNER.invoke(app, ["--home", str(home), "status"])
+
+		assert result.exit_code == 1, result.output
+		assert "cannot read SOFACT_CHANGE_UNITS" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_misspelled_field_is_refused_rather_than_ignored(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A misspelled ``base_commit`` would otherwise load as a unit with no range, which
+		measures as *unmeasured* and reads as work that has not landed — a typo reported as
+		a fact about the codebase."""
+		path = self._units(
+			tmp_path, '[{"statement": "one", "scope": "root", "base_commit_sha": "abc"}]'
+		)
+		monkeypatch.setenv("SOFACT_CHANGE_UNITS", str(path))
+
+		result = RUNNER.invoke(app, ["--home", str(home), "status"])
+
+		assert result.exit_code == 1, result.output
+		assert "not a change-unit field" in result.output
+		assert "Traceback" not in result.output

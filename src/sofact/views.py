@@ -30,6 +30,12 @@ from sofact._uuid7 import uuid7str
 
 __all__ = [
 	"ATTEMPT_TELEMETRY_REQUIREMENTS",
+	"CHANGE_COST_AXIS",
+	"CHANGE_COST_BASELINE_UNMEASURED",
+	"CHANGE_COST_NOT_A_VERIFICATION",
+	"CHANGE_COST_PROXY_DECLARATION",
+	"CHANGE_COST_REQUIREMENTS",
+	"CHANGE_COST_RISE_FACTOR",
 	"COMPOSITION_REQUIREMENTS",
 	"ESCAPE_RATE_READING",
 	"ESCAPE_REQUIREMENTS",
@@ -55,6 +61,10 @@ __all__ = [
 	"AttemptTelemetryReport",
 	"AutonomyLevel",
 	"CapabilityFinding",
+	"ChangeCostReport",
+	"ChangeCostRow",
+	"ChangeFootprint",
+	"ChangeUnit",
 	"Claim",
 	"ClaimKind",
 	"Clause",
@@ -543,7 +553,10 @@ MAINTAINABILITY_NOT_VERIFIED: Final[str] = (
 	"green suite here is evidence about obligations and no evidence at all about whether "
 	f"this system can be changed cheaply or safely. The evolvability debt of every module "
 	f"is {EVOLVABILITY_DEBT:g} by construction, which is the correct value rather than a "
-	"measurement failure (FR-158). Mode M is capped at L1 for the same reason."
+	"measurement failure (FR-158). Mode M is capped at L1 for the same reason. FR-159's "
+	"change-cost instrument measures a diff footprint and is a proxy, not an oracle: where "
+	"it reports a trend it reports one over a declared scope, and where it has no history "
+	"to trend it reports that rather than a flat line."
 )
 """FR-158(c), as a constant, for the reason :data:`DeliveryReport.VERIFIED_NOT_VALUE` is one.
 
@@ -552,6 +565,100 @@ free-text field would let a report state it in a sentence of the author's choosi
 the failure mode is not a report that omits the sentence — it is a report that says
 something adjacent and flattering. As a constant no code path can phrase it away, which
 is what makes the refusal structural rather than editorial.
+
+The FR-159 clause is appended rather than allowed to *replace* anything, and that is the
+edit this sentence must not be given: an instrument landing is exactly the event that
+tempts a report to soften "was not verified" into "and a trend was measured". The
+instrument is named, its proxy status is named, and the two constants it would have to
+move — the debt and the ceiling — are not moved.
+"""
+
+# --------------------------------------------------------------------------- #
+# FR-159 — the change-cost instrument, and what it is not (D18, NFR-024)
+# --------------------------------------------------------------------------- #
+
+CHANGE_COST_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-159",)
+"""What one change-cost measurement can carry out.
+
+One requirement, because FR-159 is one instrument. A reading that measured no unit
+carries nothing, which is a different state from a reading whose units all held — the
+rule :data:`ESCAPE_REQUIREMENTS` states one subsystem over.
+"""
+
+CHANGE_COST_PROXY_DECLARATION: Final[str] = (
+	"change cost is a PROXY. FR-159 measures the mechanical diff footprint a change unit "
+	"produced — files touched, hunks, lines added and removed, modules crossed — and not "
+	"the cost of making it: a codebase can get cheaper to change through better tests, "
+	"better tooling, or familiarity, none of which moves a line count. NFR-024 applies, so "
+	"this is declared as a proxy wherever it is reported and it is never a verdict."
+)
+"""FR-159's own boundary, stated once so no render can phrase it away.
+
+FR-159 says the instrument "is a **proxy** (NFR-024 applies, and it must be declared as
+one)". A declaration left to each report's author is a declaration that survives until
+the report that would rather not make it, which is the failure mode
+:data:`MAINTAINABILITY_NOT_VERIFIED` exists to close — so it is a constant.
+"""
+
+CHANGE_COST_AXIS: Final[str] = (
+	"the axis is *comparable* change units, not calendar time. FR-159's claim is "
+	"differential — a rising footprint on units of the same declared scope is shotgun "
+	"surgery observed — so a unit is compared against units of its own scope and never "
+	"against the codebase's average, which would report a large module as a decay."
+)
+"""FR-159's comparison rule, stated because the alternative reading is the tempting one.
+
+A trend line over all units pooled is the obvious chart and the wrong measurement: it
+moves when the *mix* of work changes, so a quarter of small fixes would read as an
+improvement whether or not anything got cheaper to change.
+"""
+
+CHANGE_COST_RISE_FACTOR: Final[float] = 1.5
+"""How much larger a unit's footprint must be before the trend alarm sounds (FR-159).
+
+A factor rather than an absolute delta, because the units are line counts and a module
+that grew from 200 to 400 lines is a different statement from one that grew from 20 to
+40 — the ratio is the quantity that is comparable across units, and the spec's own
+quantity is a *trend*.
+
+1.5 is a declared threshold and it is declared here rather than defaulted per
+deployment: unlike FR-023's escape budget, which bounds a *rate* the product has never
+measured (§20.3 item 4), a footprint ratio is defined the moment two comparable units
+exist. It is still not a verdict — the alarm reports that the footprint rose, and
+whether that is decay is the human's reading.
+"""
+
+CHANGE_COST_BASELINE_UNMEASURED: Final[str] = (
+	"the baseline is UNMEASURED. FR-159 tracks a footprint across a codebase's history, "
+	"and a codebase that has produced one unit per scope has no history to trend over — so "
+	"a scope with fewer than two measured units is reported as unmeasured rather than "
+	"clean, exactly as ADR-0054 reported the escape rate's baseline before a deployment "
+	"existed. 'No trend observed' and 'not enough history to observe one' are different "
+	"statements and must not print the same line."
+)
+"""ADR-0054's precedent, applied to the second instrument that needs a history.
+
+The escape rate needed a deployment and got a report saying so; a change-cost trend needs
+a codebase history and gets the same treatment. NFR-024 forbids reporting a target the
+product has not measured, and "the footprint is stable" over one unit is that forbidden
+target wearing a chart.
+"""
+
+CHANGE_COST_NOT_A_VERIFICATION: Final[str] = (
+	"this is not a verification and cannot become one. FR-159 is admissible as a trend "
+	"alarm and as an input to a Mode M ceiling decision; it observes no clause and "
+	"discharges none, so a delivery whose change-cost trend is flat is a delivery about "
+	"which nothing further has been verified. The evolvability debt stays 1.0 by "
+	"construction (FR-158) and the Mode M ceiling stays L1."
+)
+"""The line that keeps the instrument from being read as the oracle FR-158 says is absent.
+
+D18 adopted FR-159 as a *proxy*, and the pressure on a proxy that produces a number is
+always to promote it: a flat trend is the shape a reader wants to see beside a delivery,
+and the sentence they will supply unprompted is "and it can be maintained". This constant
+is the refusal of that promotion, and it names the two things that do not move when the
+instrument lands — the debt and the ceiling — because those are the two a promotion would
+have to move.
 """
 
 # --------------------------------------------------------------------------- #
@@ -3207,6 +3314,275 @@ def lane_ceiling(
 
 
 # --------------------------------------------------------------------------- #
+# FR-159 — the change-cost instrument (D18)
+# --------------------------------------------------------------------------- #
+
+
+class ChangeUnit(View):
+	"""One pinned change, held out from the producer (FR-159).
+
+	FR-159's instrument is differential, which is what makes it buildable without a new
+	model capability: decay is a *trend*, and a trend needs a consistent measurement
+	rather than a correct one. So the unit is **pinned** — declared before the work, with
+	the scope it is expected to touch — because a unit chosen after the diff is a unit
+	chosen by the person who wrote the diff.
+
+	``expected_modules`` is the declared scope, and it is what makes the comparison
+	*comparable*: FR-159 tracks "a rising footprint on comparable change units", and two
+	units are comparable when they declared the same scope. It is deliberately not
+	compared against the modules the diff actually touched — that would make the
+	comparison a tautology, since a unit that crossed more modules would be compared
+	against a baseline that also crossed more.
+
+	``clause_id`` ties the unit to an intent clause when one owns it, so a footprint that
+	rose can be read against *what* got more expensive to change rather than only *that*
+	something did.
+	"""
+
+	id: UUID7
+	statement: NonEmptyStr
+	"""What the change is, in the operator's words. Not parsed and not verified."""
+
+	scope: NonEmptyStr
+	"""The comparison group: units declaring the same scope are compared to each other."""
+
+	expected_modules: tuple[NonEmptyStr, ...] = ()
+	"""The modules the unit declares it will touch, which is a *prediction*, not a bound.
+
+	A unit that crossed more modules than it declared is the ordinary case and is
+	reported as ``crossed`` rather than refused: FR-159's quantity is what a change cost,
+	and a unit that could not be confined to its declared modules cost more by exactly
+	that fact.
+	"""
+
+	clause_id: UUID7 | None = None
+	declared_at: datetime | None = None
+
+	base_commit: NonEmptyStr | None = None
+	"""The commit the unit's work started from, or ``None`` when none is recorded.
+
+	``None`` is the ordinary state of a unit that has been *pinned* and not yet landed,
+	which is why both this and :attr:`head_commit` are optional: FR-159's units are held
+	out from the producer before the work, and a unit whose work has not happened has no
+	range. It is measured as unmeasured rather than as a zero footprint
+	(:data:`CHANGE_COST_BASELINE_UNMEASURED`).
+	"""
+
+	head_commit: NonEmptyStr | None = None
+	"""The commit the unit's work ended at, or ``None`` when none is recorded.
+
+	Stored as a *sha* rather than defaulting to ``HEAD``, because FR-159's units are
+	**pinned**: a unit that read ``HEAD`` at measurement time would measure whatever had
+	landed since, which is the opposite of a fixed comparison.
+	"""
+
+	@property
+	def measured_range(self) -> tuple[str, str] | None:
+		"""``(base, head)`` when both ends are recorded, else ``None``."""
+		if self.base_commit is None or self.head_commit is None:
+			return None
+		return (self.base_commit, self.head_commit)
+
+
+class ChangeFootprint(View):
+	"""The mechanical diff one change unit produced (FR-159).
+
+	Mechanical, and the word is the whole of the instrument's honesty: every number here
+	is read from ``git diff --numstat`` and ``git diff`` between two commits. Nothing in
+	this type required a model, a judgement, or a producer's cooperation, which is why
+	FR-159 is the one instrument [S24] leaves available.
+
+	**Binary files are counted as files and contribute no lines.** ``--numstat`` reports
+	``-`` for both counts on a binary path, and reading that as zero would let a unit
+	that added a 40 MB artefact report the footprint of a comment. The counts are ``None``
+	rather than 0 for such a path, and the unit's line totals exclude it — stated here
+	because a reader comparing two units needs to know that one of them may be carrying a
+	binary the other is not.
+	"""
+
+	files_touched: int
+	"""Paths the diff names, renames counted once — a rename is one file, not two."""
+
+	hunks: int
+	"""``@@`` blocks across every changed file. The count that distinguishes one edit in
+	forty files from forty edits in one, which a line count alone cannot."""
+
+	lines_added: int
+	lines_removed: int
+	modules_crossed: int
+	"""Distinct top-level packages the touched paths fall under.
+
+	A coarser unit than the file and a finer one than the count, and the one FR-159 names:
+	fifty files inside one package is a large change to one thing, and fifty files across
+	fifty packages is a change to fifty things.
+	"""
+
+	binary_paths: tuple[NonEmptyStr, ...] = ()
+	"""Touched paths whose line counts git declines to report. Named, not silently zeroed."""
+
+	@property
+	def lines_changed(self) -> int:
+		"""Added plus removed, which is the spec's "lines changed"."""
+		return self.lines_added + self.lines_removed
+
+	@property
+	def magnitude(self) -> int:
+		"""The single number two units of one scope are compared by (FR-159).
+
+		``lines_changed + hunks``, and the hunk term is not decoration: two units can
+		change the same number of lines while one makes a single contiguous edit and the
+		other makes thirty scattered ones, and it is the scattered one that is shotgun
+		surgery. A lines-only magnitude would call those two equal.
+		"""
+		return self.lines_changed + self.hunks
+
+
+class ChangeCostRow(View):
+	"""One unit's footprint, and what it is measured against (FR-159).
+
+	Every field is required, including the awkward ones, for :class:`LaneEscape`'s reason:
+	``measured`` is ``False`` rather than the row being absent, because a unit with no
+	recorded diff is a *gap in the measurement* and a report that dropped it would show a
+	trend over the units that happened to have one.
+	"""
+
+	unit: ChangeUnit
+	measured: bool
+	"""Whether a diff was read for this unit. ``False`` is not "clean"."""
+
+	unmeasured_because: str | None = None
+	"""Why no diff was read, named. Required when :attr:`measured` is ``False``."""
+
+	footprint: ChangeFootprint | None = None
+	"""``None`` exactly when :attr:`measured` is ``False``, and never a zeroed one."""
+
+	baseline: float | None = None
+	"""The median magnitude of this scope's *earlier* measured units, or ``None``.
+
+	``None`` when this unit is the first of its scope — the unmeasured baseline ADR-0054
+	established as the honest answer. Not ``0.0``, which would make the first unit of
+	every scope an infinite regression.
+	"""
+
+	@property
+	def ratio(self) -> float | None:
+		"""This unit's magnitude over its baseline, or ``None`` when there is no baseline."""
+		if not self.measured or self.footprint is None or not self.baseline:
+			return None
+		return self.footprint.magnitude / self.baseline
+
+	@property
+	def rose(self) -> bool | None:
+		"""Whether the footprint rose past :data:`CHANGE_COST_RISE_FACTOR` (FR-159).
+
+		``None`` when there is no baseline, which is the third state and not ``False``: a
+		unit with nothing to compare against has not held steady, it is unmeasured.
+		"""
+		ratio = self.ratio
+		if ratio is None:
+			return None
+		return ratio >= CHANGE_COST_RISE_FACTOR
+
+
+class ChangeCostReport(View):
+	"""FR-159's measurement: the footprint per pinned unit, and the trend per scope.
+
+	A fold over pinned units and a repository's own history. It runs no oracle, reads no
+	contract, and decides nothing — :data:`CHANGE_COST_NOT_A_VERIFICATION` says so on every
+	report, because the pressure on a proxy that produces a number is to promote it.
+	"""
+
+	id: UUID7
+	rendered_at: datetime
+	rows: tuple[ChangeCostRow, ...] = ()
+	repository: str | None = None
+	"""The tree the diffs were read from, or ``None`` when none was read.
+
+	Named because a footprint is a fact about *one* repository: two projects' units are
+	not comparable, and a report that pooled them would trend a mix of work rather than a
+	cost.
+	"""
+
+	@property
+	def measured_rows(self) -> tuple[ChangeCostRow, ...]:
+		"""The units a diff was actually read for."""
+		return tuple(row for row in self.rows if row.measured)
+
+	@property
+	def unmeasured_rows(self) -> tuple[ChangeCostRow, ...]:
+		"""The units with no diff, which are gaps and are reported as gaps."""
+		return tuple(row for row in self.rows if not row.measured)
+
+	@property
+	def scopes(self) -> dict[str, tuple[ChangeCostRow, ...]]:
+		"""The measured units grouped by the scope they declared (FR-159).
+
+		Grouped by declaration rather than inferred, because "comparable" is a claim the
+		unit makes about itself before the work: a grouping derived from the diff would
+		put every unit in a group of its own, which is a trend over one point.
+		"""
+		grouped: dict[str, list[ChangeCostRow]] = {}
+		for row in self.measured_rows:
+			grouped.setdefault(row.unit.scope, []).append(row)
+		return {scope: tuple(rows) for scope, rows in sorted(grouped.items())}
+
+	@property
+	def trends(self) -> dict[str, tuple[float, ...]]:
+		"""Each scope's measured magnitudes in declaration order — the trend itself."""
+		return {
+			scope: tuple(row.footprint.magnitude for row in rows if row.footprint is not None)
+			for scope, rows in self.scopes.items()
+		}
+
+	@property
+	def rising(self) -> tuple[ChangeCostRow, ...]:
+		"""The units whose footprint rose past the factor, on a scope with a baseline."""
+		return tuple(row for row in self.measured_rows if row.rose)
+
+	@property
+	def unmeasured_scopes(self) -> tuple[str, ...]:
+		"""Scopes with fewer than two measured units, so no trend is claimed for them.
+
+		This is ADR-0054's report shape: the instrument exists and the baseline does not,
+		and the honest output is the scope's *name* rather than a flat line.
+		"""
+		return tuple(scope for scope, rows in self.scopes.items() if len(rows) < 2)
+
+	@property
+	def declared_baseline(self) -> str:
+		"""FR-159's baseline statement, which is a constant for FR-158(c)'s reason."""
+		return CHANGE_COST_BASELINE_UNMEASURED
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this reading carried out, which may be none (NFR-024).
+
+		A trend over zero measured units claims nothing, and so does one over a single unit
+		per scope: :data:`CHANGE_COST_BASELINE_UNMEASURED` is the statement, and this
+		property is the machine-readable half of it.
+		"""
+		trended = [scope for scope, rows in self.scopes.items() if len(rows) >= 2]
+		if not trended:
+			return ()
+		return CHANGE_COST_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-159 this reading did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in CHANGE_COST_REQUIREMENTS if name not in discharged)
+
+	@property
+	def caveats(self) -> tuple[str, ...]:
+		"""What this measurement does not claim, stated rather than left to inference."""
+		return (
+			CHANGE_COST_PROXY_DECLARATION,
+			CHANGE_COST_AXIS,
+			CHANGE_COST_NOT_A_VERIFICATION,
+		)
+
+
+# --------------------------------------------------------------------------- #
 # FR-157 — the deployment-scoped autonomy target
 # --------------------------------------------------------------------------- #
 
@@ -4767,6 +5143,22 @@ class DeliveryReport(View):
 	a gap in FR-022's rate, which is a fold over the whole ledger, but it is a fact a reader
 	of a stored report needs — and FR-117 versions reports precisely so an approver's copy
 	stays as it was.
+	"""
+
+	change_cost: ChangeCostReport | None = None
+	"""FR-159's change-cost measurement, or ``None`` when none was taken (D18).
+
+	Beside :attr:`escapes` and for the same reason: a report must stay readable from the
+	log alone, so a trend a delivery was rendered under is part of what the report *says*
+	rather than something a later reader reconstructs from a repository that has since
+	moved.
+
+	``None`` means no measurement was taken — no pinned units, or no repository — which is
+	a different statement from a measurement that found no trend, and
+	:attr:`ChangeCostReport.discharged` is what distinguishes them. This field **does not
+	change the ceiling and does not change the debt**: FR-159 is admissible as a trend
+	alarm and a Mode M ceiling *input*, and the input is read by a human deciding D18's
+	question, not by this report.
 	"""
 
 	intent: IntentGraph | None = None

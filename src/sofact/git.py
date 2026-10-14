@@ -28,15 +28,17 @@ import asyncio
 from pathlib import Path
 from typing import Final
 
-from sofact.views import ModuleCheckout
+from sofact.views import ChangeFootprint, ModuleCheckout
 
 __all__ = [
 	"BRANCH_PREFIX",
 	"WORKTREE_DIRNAME",
 	"GitUnavailableError",
+	"diff_footprint",
 	"ensure_module_branch",
 	"ensure_module_worktree",
 	"git_available",
+	"head_commit",
 	"integrate_worktree",
 	"seal_branch",
 ]
@@ -468,6 +470,123 @@ async def _changed_paths(workspace: Path) -> tuple[str, ...]:
 		entry = line[3:].strip()
 		paths.append(entry.split(" -> ")[-1].strip().strip('"'))
 	return tuple(p for p in paths if p)
+
+
+async def head_commit(workspace: Path) -> str | None:
+	"""The commit ``workspace``'s HEAD resolves to, or ``None`` on an unborn branch."""
+	return await _head_commit(workspace)
+
+
+async def diff_footprint(workspace: Path, *, base: str, head: str = "HEAD") -> ChangeFootprint:
+	"""FR-159's mechanical footprint of ``base..head``, read from git's own diff.
+
+	Here rather than in :mod:`sofact.changecost` because this module is the one place
+	SoFact touches git (see the module docstring), and a second path to ``git diff`` would
+	be a second place for the arguments to drift. The change-cost instrument decides
+	*which* range to read; reading it is git's job.
+
+	**Two git calls, and the second is not redundant.** ``--numstat`` gives the per-file
+	line counts and, with ``-z``, unambiguous path separation — a path containing a space
+	or a newline is otherwise a parse error waiting for the first operator whose repository
+	has one. It does *not* give hunk counts, so ``--unified=0`` supplies those. Hunk count
+	is the term that separates one edit in forty files from forty edits in one, which is
+	the distinction FR-159's "shotgun surgery" is actually about.
+
+	**Renames are one file.** ``-z`` numstat spells a rename as three NUL-separated fields
+	(``added``, ``removed``, then old and new path), so a naive reader counts the second
+	path as a file of its own. Measured 2026-10-15 against a real repository: a single
+	``git mv`` produced ``0\\t0\\t`` followed by two path fields, and the counts for a
+	rename are zero on both sides — a rename is not a line change.
+
+	**Binary paths are named, not zeroed.** ``--numstat`` reports ``-`` for both counts on
+	a binary file. Reading that as zero would let a unit that added a 40 MB artefact report
+	the footprint of a comment, so such paths are collected into
+	:attr:`ChangeFootprint.binary_paths` and excluded from the line totals.
+
+	Raises :class:`GitUnavailableError` when the range cannot be read, rather than
+	returning a zeroed footprint: a footprint of zero and a diff that could not be taken
+	are different facts, and FR-159's whole claim rests on the first being measured.
+	"""
+	assert base, "a footprint is a diff against a base, and an empty base names no commit"
+	code, stdout, stderr = await _git(("diff", "--numstat", "-z", f"{base}..{head}"), cwd=workspace)
+	if code != 0:
+		raise GitUnavailableError(
+			f"git diff --numstat {base}..{head} failed in {workspace}: {stderr.strip()}"
+		)
+
+	files = 0
+	added = 0
+	removed = 0
+	binaries: list[str] = []
+	paths: list[str] = []
+	fields = stdout.split("\0")
+	index = 0
+	while index < len(fields):
+		entry = fields[index]
+		index += 1
+		if not entry:
+			continue
+		parts = entry.split("\t")
+		if len(parts) < 3:
+			continue
+		left, right, path = parts[0], parts[1], "\t".join(parts[2:])
+		if path == "":
+			# A rename. Measured 2026-10-15 against git 2.x on darwin: the counts are
+			# present and zero (``0\t0\t``), the *path* field is empty, and the two names
+			# follow as their own NUL-separated fields. So the tell is the empty path and
+			# not empty counts — a reader keyed on ``left == ""`` reads the rename as an
+			# ordinary file with no name, which counts correctly by luck and then files
+			# every rename under a module named ``""``.
+			old = fields[index] if index < len(fields) else ""
+			new = fields[index + 1] if index + 1 < len(fields) else ""
+			index += 2
+			path = new or old
+			left, right = "0", "0"
+		files += 1
+		paths.append(path)
+		if left == "-" or right == "-":
+			binaries.append(path)
+			continue
+		added += int(left)
+		removed += int(right)
+
+	code, stdout, stderr = await _git(
+		("diff", "--unified=0", "--no-color", f"{base}..{head}"), cwd=workspace
+	)
+	if code != 0:
+		raise GitUnavailableError(
+			f"git diff --unified=0 {base}..{head} failed in {workspace}: {stderr.strip()}"
+		)
+	hunks = sum(1 for line in stdout.splitlines() if line.startswith("@@ "))
+
+	return ChangeFootprint(
+		files_touched=files,
+		hunks=hunks,
+		lines_added=added,
+		lines_removed=removed,
+		modules_crossed=len({_module_of(path) for path in paths}),
+		binary_paths=tuple(binaries),
+	)
+
+
+def _module_of(path: str) -> str:
+	"""The module a repository-relative path belongs to (FR-159's ``modules crossed``).
+
+	The first path segment, except under a ``src/`` or ``packages/`` layout where the
+	second is the module and the first is a convention — ``src/sofact/git.py`` is one
+	module and ``src/sofact/views.py`` is the same one, while a reader taking the first
+	segment would report both as ``src`` and count every change to the tree as crossing
+	one module.
+
+	A path with no directory is its own module, which is the honest answer for a
+	repository-root file: it is not part of any package.
+	"""
+	parts = [p for p in path.split("/") if p]
+	if len(parts) <= 1:
+		return parts[0] if parts else path
+	if parts[0] in {"src", "packages", "libs", "apps"} and len(parts) >= 3:
+		return f"{parts[0]}/{parts[1]}"
+	return parts[0]
 
 
 async def seal_branch(

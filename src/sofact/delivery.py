@@ -55,6 +55,7 @@ from sofact.views import (
 	UNPRODUCIBLE,
 	UNPRODUCIBLE_KINDS,
 	AutonomyLevel,
+	ChangeCostReport,
 	Contract,
 	Decomposition,
 	DeliveryArtifact,
@@ -556,6 +557,7 @@ def report(
 	boundary: DeploymentBoundary | None = None,
 	escapes: EscapeReport | None = None,
 	escapes_recorded: tuple[EscapeEvent, ...] = (),
+	change_cost: ChangeCostReport | None = None,
 	strengths: Mapping[str, float] | None = None,
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
@@ -591,6 +593,13 @@ def report(
 	overrides the declared topology's modifier when one held. R2's failure was that
 	autonomy depended on isolation "asserted but never verified", so the two arrive
 	together or the number is a claim about a boundary nobody checked.
+
+	``change_cost`` is FR-159's measurement, carried onto the report and **read by
+	nothing here**. That is deliberate and is the whole of D18's shape: the instrument is
+	built, the number is reported, and the two constants it would have to move —
+	:data:`~sofact.views.EVOLVABILITY_DEBT` and :data:`~sofact.views.MODE_M_CEILING` —
+	are not moved by a report that carries it. A trend is an *input* to a human deciding
+	whether the ceiling may rise, not a licence for the ceiling to rise itself.
 	"""
 	assert contract.clauses, "cannot report a delivery for a contract with no clauses"
 	# FR-127: the chain is a *projection* of the intent graph rather than a second walk
@@ -698,7 +707,10 @@ def report(
 				"The two are reported as two numbers (FR-158(b)). The sentence is a constant "
 				"on the type, so no code path can phrase the claim away. This check reports "
 				"rather than fails: FR-158 makes the debt structural, and refusing a delivery "
-				"for a debt every delivery carries would refuse all of them"
+				"for a debt every delivery carries would refuse all of them. FR-159's "
+				"change-cost instrument is built (D18) and is a proxy: it moves neither the "
+				"debt nor the ceiling, and its baseline is unmeasured until a scope has two "
+				"units."
 			),
 		),
 		GateCheck(
@@ -934,6 +946,7 @@ def report(
 		topology_configured=topology_configured,
 		boundary=boundary,
 		escapes=escapes,
+		change_cost=change_cost,
 		# FR-127's attribution, against the graph this report's chain was projected from
 		# rather than one rebuilt now. A graph rebuilt at read time would attribute an
 		# escape to whatever the decomposition says *today*, and after a repair that is a

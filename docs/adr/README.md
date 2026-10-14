@@ -74,6 +74,7 @@ than argued. Numbering is sequential and never reused.
 | [0059](0059-the-declared-interface-is-the-surface-grouping-and-the-count-is-checked-against-it.md) | The declared interface is the surface grouping, and the count is checked against it | Accepted |
 | [0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md) | The boundary is measured, and the ceiling follows the measurement | Accepted |
 | [0061](0061-manufacturing-earns-the-hint-and-withholds-the-number.md) | Manufacturing earns the hint, and the strength number is withheld below its floor | Accepted |
+| [0062](0062-the-change-cost-instrument-and-its-unmeasured-baseline.md) | The change-cost instrument is built, and its baseline is unmeasured | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -89,7 +90,7 @@ The product specification uses `D<n>` identifiers for open questions. Where a
 | D15 — how much plugin surface to write in v1 | Withdrawn from v1 scope | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |
 | D16 — is SoFact a `dsh` plugin | No; independent control plane | [0004](0004-delegate-the-coding-loop-to-an-external-harness.md) |
 | D17 — is commercialisation a goal | No; capability is the goal | [0008](0008-the-model-is-advisory-only.md) |
-| D18 — adopt a change-cost instrument, or declare evolvability out of scope | **Open** — but the *shape* of either answer is fixed in code as of [0047](0047-the-debt-is-a-number-and-mode-m-is-a-separate-ceiling.md): the debt is a number on every report and Mode M is capped at L1 by the lane type, so the choice is whether Mode M can exceed L1, not whether the gap is reported | [0011](0011-the-factory-refuses-to-claim-maintainability.md) |
+| D18 — adopt a change-cost instrument, or declare evolvability out of scope | **Adopted, and built as a proxy with its baseline reported unmeasured.** `sofact.changecost` records the mechanical diff footprint of pinned change units and trends them per declared scope; a scope with fewer than two measured units reports *unmeasured* rather than clean, which is [0054](0054-the-escape-instrument-is-built-and-its-baseline-is-unmeasured.md)'s precedent applied to the second instrument that needs a history. D18's **after-M0 condition is not met and is recorded as standing**: the instrument moves neither the debt nor the Mode M ceiling, and raising the ceiling needs a trend a deployment has actually produced | [0062](0062-the-change-cost-instrument-and-its-unmeasured-baseline.md) |
 
 `FR-xxx` identifiers refer to the specification's functional requirements. `[Snn]`
 refers to an entry in the [source ledger](../sources/README.md).
