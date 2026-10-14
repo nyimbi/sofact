@@ -36,6 +36,7 @@ __all__ = [
 	"EVOLVABILITY_DEBT",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
+	"INTENT_REQUIREMENTS",
 	"L4_GATE_THETA",
 	"MACHINE_API_VERSION",
 	"MAINTAINABILITY_NOT_VERIFIED",
@@ -86,6 +87,7 @@ __all__ = [
 	"EnvelopeActuals",
 	"EnvelopeDimension",
 	"EnvelopeMeasurement",
+	"EscapeAttribution",
 	"EscapeBudget",
 	"EscapeEvent",
 	"EscapeKind",
@@ -111,6 +113,11 @@ __all__ = [
 	"IntegrityCheck",
 	"IntegrityOutcome",
 	"IntegritySubject",
+	"IntentEdge",
+	"IntentGraph",
+	"IntentHop",
+	"IntentNode",
+	"IntentNodeKind",
 	"InterfaceMember",
 	"InterfaceMemberKind",
 	"LaneEscape",
@@ -2563,6 +2570,21 @@ class EscapeEvent(View):
 	values of this field per lane, so one defect that took a revert and then a hotfix is
 	one escape rather than two (FR-022)."""
 
+	module: NonEmptyStr | None = None
+	"""The module that broke, when the operator can name it (FR-127).
+
+	``lane`` is a *class* — G4 may be four modules — so a lane-wide escape attributes to
+	every clause those modules cite, which is a candidate set rather than the "intent
+	clause that was misunderstood" FR-127 asks for. The operator who recorded the escape
+	is the only one who knows which module it was, and this field is where they say so:
+	naming one narrows the attribution to that module's clauses, and
+	:meth:`~sofact.service.FactoryService.record_escape` refuses a name the deployment did
+	not build or one outside the lane it was filed against.
+
+	Optional, because an incident report often cannot say, and a required field would be
+	filled with a guess — which is worse than a candidate set that says it is one.
+	"""
+
 	recorded_by: NonEmptyStr
 	recorded_at: datetime
 	note: NonEmptyStr | None = None
@@ -3723,6 +3745,325 @@ class TraceLink(View):
 		return f"{self.clause_id} -> {requirement} -> {module} -> {step}"
 
 
+# --------------------------------------------------------------------------- #
+# FR-127 — the intent traceability graph
+# --------------------------------------------------------------------------- #
+
+
+INTENT_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-127",)
+"""The requirement this graph discharges, named so a reading can report it."""
+
+
+class IntentHop(StrEnum):
+	"""The three declarations the graph is built from, one per phase that makes one.
+
+	FR-127 asks for a graph rather than a report, and these edges are the whole reason.
+	The three relations :class:`TraceLink` prints as a chain are **not** a chain in the
+	log: a clause cites its requirement (P2) and its module (P3) *independently*, so the
+	two are sibling branches off the clause rather than a requirement-to-module hop, and
+	only the module reaches a step (P5). Printing them linearly is what a report has to
+	do; holding them as directed edges is what lets an escape be walked backwards, which
+	is the mechanism FR-127 says does not otherwise exist.
+	"""
+
+	CLAUSE_TO_REQUIREMENT = "clause_to_requirement"
+	"""P2's ``Requirement.clause_ids``, read in the direction the requirement stated it."""
+
+	CLAUSE_TO_MODULE = "clause_to_module"
+	"""P3's ``Module.clause_ids``: the module that owns the clause."""
+
+	MODULE_TO_STEP = "module_to_step"
+	"""P5's ``GoalStep.clause_ids`` resolved through the one module that owns them."""
+
+
+class IntentNodeKind(StrEnum):
+	"""What a vertex stands for. Four kinds, because four phases declare into the graph."""
+
+	CLAUSE = "clause"
+	REQUIREMENT = "requirement"
+	MODULE = "module"
+	STEP = "step"
+
+
+class IntentNode(View):
+	"""One vertex of FR-127's graph, naming the record it stands for.
+
+	``label`` is the record's own words — a clause's statement, a requirement's statement,
+	a module's name, a step's ordinal — because the graph exists to be *read* by the
+	operator whose intent is being traced, and a graph of UUIDs is one they would have to
+	open the log to read. That is also the sense in which FR-127's attribution is the
+	learning signal §2.3 calls it: the answer has to arrive in the language of the intent,
+	not of the implementation.
+	"""
+
+	id: UUID7
+	kind: IntentNodeKind
+	label: NonEmptyStr
+	module_class: ModuleClass | None = None
+	"""Set on module vertices only, so a lane resolves to its modules without the
+	decomposition. An escape names a *lane*, so "which clauses does this escape point at"
+	starts from the class, and a graph that could not answer that from itself would send
+	every caller back to the decomposition — which is the derived-report shape FR-127
+	refuses."""
+
+	@model_validator(mode="after")
+	def _only_a_module_carries_a_class(self) -> Self:
+		if self.module_class is not None and self.kind is not IntentNodeKind.MODULE:
+			raise ValueError(
+				f"a {self.kind.value} vertex carries module class {self.module_class.value}, "
+				"but only a module has one. A class on any other vertex would make a lane "
+				"resolve to clauses that no module of it owns"
+			)
+		return self
+
+
+class IntentEdge(View):
+	"""One declaration, as a directed edge from the citing record to the cited one.
+
+	Directed, and the direction is load-bearing rather than conventional: the graph is
+	walked backwards to attribute an escape, so an edge that pointed the other way would
+	make every attribution a search over the whole graph instead of a hop.
+	"""
+
+	source: UUID7
+	target: UUID7
+	hop: IntentHop
+
+
+class EscapeAttribution(View):
+	"""One escape traced back to one intent clause — which is FR-127's entire purpose.
+
+	"the only mechanism by which an escape (§9.6) can be attributed back to the intent
+	clause that was misunderstood". The walk is the graph read backwards: the escape names
+	a lane, the lane names its modules, and the modules name the clauses that cite them.
+
+	**What this is, and what it is not.** It is a *pointer for a human*, not a diagnosis.
+	Every hop of the walk is a declaration, so the graph can say "the module built for this
+	clause is the one that got reverted" and cannot say the clause was ambiguous, that the
+	operator meant something else, or that the oracle was too weak to catch it. §2.3 makes
+	the operator's reading of the specification the only ground truth there is, and this
+	type's job is to put the right clause in front of them — the judgement stays theirs.
+	"""
+
+	escape_id: UUID7
+	report_id: UUID7
+	lane: ModuleClass
+	module: NonEmptyStr | None
+	"""The module the operator named, when they named one. ``None`` for a lane-wide escape."""
+
+	clause_id: UUID7
+	statement: NonEmptyStr
+	"""The clause's own words, so the attribution is readable without opening the log."""
+
+	requirement_id: UUID7 | None = None
+	step_ordinal: int | None = None
+
+	@property
+	def narrowed(self) -> bool:
+		"""Whether this is *the* clause rather than one of a candidate set.
+
+		``True`` when the operator named the module: a module's clauses are the specific
+		obligations that escaped. ``False`` when the escape was filed against the lane
+		alone, which is a real and common case — a revert often cannot say which module —
+		and leaves a candidate set instead of an answer. The distinction is on the type
+		because a reader who cannot tell the two apart would read a candidate set as a
+		finding, which is how an attribution becomes a false accusation.
+		"""
+		return self.module is not None
+
+	@property
+	def rendered(self) -> str:
+		"""The attribution as one line, saying *candidate* where that is what it is."""
+		qualifier = "" if self.narrowed else " (candidate: the escape named no module)"
+		return f"{self.lane.value} escape -> {self.clause_id}: {self.statement}{qualifier}"
+
+
+class IntentGraph(View):
+	"""FR-127's intent traceability graph: the clauses, and every record that cites them.
+
+	"must be a first-class component, not a derived report". The distinction is structural
+	rather than rhetorical, and this type is built to make it so: :meth:`project` is how
+	FR-117's chain is obtained, so the report is a *projection* of the graph rather than a
+	second walk over the same declarations. Two structures derived independently from one
+	set of inputs agree until someone changes one of them, and the disagreement is invisible
+	precisely because each is internally consistent — which is the failure mode a graph
+	that only rendered a picture would not have closed.
+
+	Every edge is a declaration made by a phase, so the graph is as trustworthy as the
+	phases that wrote it and no more. What it adds over a rendered chain is the *inverse*
+	walk: forward, the chain answers "what was built for this clause"; backward, the
+	question is "which clause was misunderstood", and the only route is from the module
+	that broke to the clauses that cite it. :meth:`attribute` is that route.
+	"""
+
+	id: UUID7
+	contract_id: UUID7
+	goal_id: UUID7
+	built_at: datetime
+	nodes: tuple[IntentNode, ...] = ()
+	edges: tuple[IntentEdge, ...] = ()
+	contract_hash: str | None = None
+	"""The contract this graph was built against (FR-131, FR-139).
+
+	Carried so a stored attribution can prove *which* specification it traces — a clause
+	reworded after an escape would otherwise be attributed under its new words, and the
+	whole value of §2.3's signal is that the operator sees what they actually approved.
+	"""
+
+	@property
+	def clauses(self) -> tuple[IntentNode, ...]:
+		"""The clause vertices, in contract order. The graph's spine."""
+		return tuple(node for node in self.nodes if node.kind is IntentNodeKind.CLAUSE)
+
+	@property
+	def modules(self) -> tuple[IntentNode, ...]:
+		"""The module vertices, in decomposition order."""
+		return tuple(node for node in self.nodes if node.kind is IntentNodeKind.MODULE)
+
+	def node(self, node_id: str) -> IntentNode | None:
+		"""Look up a vertex by the id of the record it stands for."""
+		return next((n for n in self.nodes if n.id == node_id), None)
+
+	def modules_in_lane(self, lane: ModuleClass) -> tuple[IntentNode, ...]:
+		"""The modules of one §14 lane, which is where an escape's attribution starts."""
+		return tuple(m for m in self.modules if m.module_class is lane)
+
+	def clauses_of_module(self, module_id: str) -> tuple[IntentNode, ...]:
+		"""The clauses one module owns, in contract order.
+
+		Ordered by the contract rather than by edge arrival, because an attribution list
+		whose order depended on how the decomposition happened to be written would be a
+		different list for the same facts.
+		"""
+		cited = {
+			edge.source
+			for edge in self.edges
+			if edge.hop is IntentHop.CLAUSE_TO_MODULE and edge.target == module_id
+		}
+		return tuple(node for node in self.clauses if node.id in cited)
+
+	def _hops(self) -> tuple[dict[str, str], dict[str, str], dict[str, int]]:
+		"""The three relations as lookups: clause to requirement, clause to module, module to step.
+
+		One reader for both :meth:`project` and :meth:`attribute`, so a chain and an
+		attribution can never disagree about which module a clause was built by — the same
+		argument that makes :func:`sofact.escape.lanes_of` one function.
+		"""
+		requirement_of: dict[str, str] = {}
+		module_of: dict[str, str] = {}
+		step_of: dict[str, int] = {}
+		for edge in self.edges:
+			if edge.hop is IntentHop.CLAUSE_TO_REQUIREMENT:
+				requirement_of.setdefault(edge.source, edge.target)
+			elif edge.hop is IntentHop.CLAUSE_TO_MODULE:
+				module_of.setdefault(edge.source, edge.target)
+			else:
+				step = self.node(edge.target)
+				# The earliest step that built the module, which is `setdefault` on a graph
+				# whose edges were added in plan order. FR-136 forbids one session per
+				# module, so several steps can share one; the first is what built it.
+				if step is not None:
+					step_of.setdefault(edge.source, int(step.label))
+		return requirement_of, module_of, step_of
+
+	def project(self) -> tuple[TraceLink, ...]:
+		"""FR-117's chain, read off the graph.
+
+		This is what makes the graph first-class rather than a second view over the same
+		inputs. A hop the graph does not hold cannot appear in a report, and a hop it does
+		hold cannot go missing from one, because there is only one structure.
+		"""
+		requirement_of, module_of, step_of = self._hops()
+		links: list[TraceLink] = []
+		for clause in self.clauses:
+			module_id = module_of.get(clause.id)
+			module = self.node(module_id) if module_id is not None else None
+			links.append(
+				TraceLink(
+					clause_id=clause.id,
+					statement=clause.label,
+					requirement_id=requirement_of.get(clause.id),
+					module=None if module is None else module.label,
+					step_ordinal=step_of.get(module_id) if module_id is not None else None,
+				)
+			)
+		return tuple(links)
+
+	@property
+	def gaps(self) -> tuple[TraceLink, ...]:
+		"""Clauses the graph cannot walk all the way, as the links that stop short.
+
+		The same rule as the report's, deliberately: a gap in the graph and a gap in the
+		chain are one fact, and two definitions of "gap" would eventually disagree. A
+		clause with no module edge was dropped by the decomposition, so nothing was built
+		for it and **no escape can ever be attributed to it** — a worse finding than an
+		escape, and exactly what a rendered chain hides by drawing a gap and moving on.
+		"""
+		return tuple(link for link in self.project() if not link.is_whole)
+
+	def attribute(self, escape: EscapeEvent) -> tuple[EscapeAttribution, ...]:
+		"""Trace one escape back to the intent clause(s) it implicates (FR-127).
+
+		The graph walked backwards: lane to modules, module to the clauses that cite it.
+		The operator may have named the module, which narrows the answer to that module's
+		clauses; without a name the escape points at every clause in the lane, and each
+		attribution says which of the two it is rather than presenting a candidate set as
+		an answer.
+
+		An escape against a lane the graph holds no module for attributes to **nothing**,
+		and that empty tuple is the honest result rather than a gap to paper over: it means
+		the change's decomposition is not the one this graph was built from, which
+		:meth:`~sofact.service.FactoryService.record_escape` refuses at recording time and
+		which a foreign log can still contain.
+		"""
+		assert escape.lane is not None, "an escape names a lane"
+		modules = self.modules_in_lane(escape.lane)
+		if escape.module is not None:
+			modules = tuple(m for m in modules if m.label == escape.module)
+		requirement_of, _, step_of = self._hops()
+		attributions: list[EscapeAttribution] = []
+		seen: set[str] = set()
+		for module in modules:
+			for clause in self.clauses_of_module(module.id):
+				if clause.id in seen:
+					# One attribution per escape and clause. A decomposition whose modules
+					# overlap on a clause would otherwise report the same clause twice for
+					# one escape, which reads as two signals.
+					continue
+				seen.add(clause.id)
+				attributions.append(
+					EscapeAttribution(
+						escape_id=escape.id,
+						report_id=escape.report_id,
+						lane=escape.lane,
+						module=escape.module,
+						clause_id=clause.id,
+						statement=clause.label,
+						requirement_id=requirement_of.get(clause.id),
+						step_ordinal=step_of.get(module.id),
+					)
+				)
+		return tuple(attributions)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this graph carried out, which may be none.
+
+		The vacuous-pass rule the rest of the product keeps: a graph over zero clauses has
+		traced nothing, and reporting FR-127 as discharged over an empty contract would be
+		a clearance derived from the absence of a specification.
+		"""
+		if not self.clauses:
+			return ()
+		return INTENT_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-127 this graph did not carry out."""
+		carried = set(self.discharged)
+		return tuple(name for name in INTENT_REQUIREMENTS if name not in carried)
+
+
 class VerifiedClause(View):
 	"""A clause that is verified, and by which oracle at which measured strength (FR-118).
 
@@ -4104,6 +4445,30 @@ class DeliveryReport(View):
 	a gap in FR-022's rate, which is a fold over the whole ledger, but it is a fact a reader
 	of a stored report needs — and FR-117 versions reports precisely so an approver's copy
 	stays as it was.
+	"""
+
+	intent: IntentGraph | None = None
+	"""FR-127's traceability graph this report's :attr:`chain` was projected from.
+
+	Carried rather than recomputed, and that is the whole of FR-127's "first-class
+	component, not a derived report": the report holds the graph, so an escape can be
+	attributed against the *same* structure the chain came from. A reader who rebuilt the
+	graph from the log would be attributing against whatever the decomposition says now,
+	which after a repair is a different graph than the one that was deployed — and the
+	escape would be pointed at a clause the change was never built against.
+
+	``None`` for a report rendered without one, which only a hand-built fixture does; the
+	renderer always supplies it.
+	"""
+
+	attributions: tuple[EscapeAttribution, ...] = ()
+	"""Every escape attributed back to an intent clause, as of this render (FR-127).
+
+	Beside :attr:`escapes` rather than inside it, because the two answer different
+	questions from one log: the rate says *how much* escaped and this says *what was
+	understood wrongly*. §2.3 calls the second the most valuable signal the product
+	produces, and a reader who had to derive it would be reading a number without the
+	thing that makes it actionable.
 	"""
 
 	topology_configured: bool = False

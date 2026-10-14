@@ -57,6 +57,7 @@ from sofact.harness import (
 	spec_for as harness_spec_for,
 )
 from sofact.integration import integrate
+from sofact.intent import attributions_for, build_graph
 from sofact.ledger import LEDGER_FILENAME, LOCK_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
 from sofact.planner import (
@@ -106,6 +107,7 @@ from sofact.views import (
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
+	EscapeAttribution,
 	EscapeBudget,
 	EscapeEvent,
 	EscapeKind,
@@ -121,6 +123,7 @@ from sofact.views import (
 	HarnessProfile,
 	IntegrationReport,
 	IntegrityCheck,
+	IntentGraph,
 	LedgerKind,
 	ModuleClass,
 	NonGoal,
@@ -2699,6 +2702,7 @@ class FactoryService:
 				topology_configured=self.topology_configured(),
 				topology_override=topology_override,
 				escapes=escapes,
+				escapes_recorded=state.escapes,
 			)
 
 		# The documents and the report describe each other: the report's artefact check
@@ -2826,11 +2830,13 @@ class FactoryService:
 		kind: EscapeKind,
 		defect: str,
 		by: str,
+		module: str | None = None,
 		note: str | None = None,
 	) -> EscapeEvent:
 		"""Record an escape against a deployed change (FR-021).
 
-		Two refusals, and both are the API being hard to get wrong rather than permissive:
+		Three refusals, and all three are the API being hard to get wrong rather than
+		permissive:
 
 		* **The change must have been deployed.** An escape from a change that never
 			shipped is not an escape — it is a defect that never got out — and counting it
@@ -2841,6 +2847,13 @@ class FactoryService:
 			only they know *which* module broke when a deployment spans several; validating it
 			against the report's own traceability chain makes filing an escape against a lane
 			that was never deployed impossible.
+		* **A named module must be one the change built, in that lane.** ``module`` is what
+			turns FR-127's attribution from a candidate set into an answer: a lane is a class,
+			so a lane-wide escape points at every clause its modules cite, and the operator
+			who recorded it is the only one who knows which module it was. A name outside the
+			lane, or one the deployment never built, is refused rather than stored, because a
+			module that did not break would point the attribution at the wrong clause — and a
+			wrong attribution is worse than none, since it reads as a finding.
 
 		The oracle-strength band and the autonomy level FR-021 also asks for are *not*
 		arguments here. They are derived at read time from the change's contract and module
@@ -2875,12 +2888,29 @@ class FactoryService:
 				f"be filed against that lane (FR-021). The lanes this deployment reached "
 				f"are: {known}"
 			)
+		named = None if module is None else module.strip()
+		if named is not None:
+			built = {
+				m.name
+				for m in (decomposition.modules if decomposition is not None else ())
+				if m.module_class is lane and m.name in {link.module for link in report.chain}
+			}
+			if named not in built:
+				known = ", ".join(sorted(built)) or "none"
+				raise ValueError(
+					f"report {report_id} built no {lane.value} module named {named!r}, so "
+					"the escape cannot be attributed to it (FR-127). A module that did not "
+					"break would point the attribution at the wrong clause, which is worse "
+					f"than no attribution because it reads as a finding. The {lane.value} "
+					f"modules this deployment built are: {known}"
+				)
 		escape = EscapeEvent(
 			id=uuid7str(),
 			report_id=report_id,
 			lane=lane,
 			kind=kind,
 			defect=defect.strip(),
+			module=named,
 			recorded_by=by,
 			recorded_at=now(),
 			note=note,
@@ -2946,6 +2976,51 @@ class FactoryService:
 		if report_id is None:
 			return state.escapes
 		return state.escapes_for(report_id)
+
+	# ------------------------------------------------- FR-127: the intent graph
+
+	async def intent_graph(self, contract_id: str) -> IntentGraph | None:
+		"""FR-127's graph for one contract, or ``None`` when the log holds no contract.
+
+		The graph is a *component*, so it is addressable on its own rather than only
+		reachable through a delivery report — which is the difference between first-class
+		and derived that FR-127 draws. Reading it directly is what an operator does when
+		they want to see the traceability before there is anything to deliver: a clause the
+		decomposition dropped is visible here and nowhere else until a report is rendered.
+
+		``None`` rather than an empty graph for a contract the log does not hold: an empty
+		graph would report FR-127 as not implemented over a contract that does not exist,
+		which is the vacuous pass read the wrong way round.
+		"""
+		state = await self.state()
+		contract = state.contract(contract_id)
+		if contract is None:
+			return None
+		return build_graph(
+			contract,
+			state.latest_decomposition(contract_id),
+			state.latest_plan(contract_id),
+			state.latest_specification(contract_id),
+		)
+
+	async def attributions(self, contract_id: str) -> tuple[EscapeAttribution, ...]:
+		"""Every escape attributed back to an intent clause for one contract (FR-127).
+
+		Scoped to the contract rather than the log, because the walk starts from a lane and
+		ends at a clause, and a clause belongs to exactly one contract. An escape whose
+		change was built against a *different* contract is not this contract's signal, and
+		including it would attribute a misunderstanding of one specification to another.
+		"""
+		graph = await self.intent_graph(contract_id)
+		if graph is None:
+			return ()
+		state = await self.state()
+		deployed_here = {
+			report.id for report in state.deliveries if report.contract_id == contract_id
+		}
+		return attributions_for(
+			graph, tuple(e for e in state.escapes if e.report_id in deployed_here)
+		)
 
 	# ------------------------------------------------------- FR-102: telemetry
 

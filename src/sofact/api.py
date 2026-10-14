@@ -180,6 +180,12 @@ MACHINE_OPERATIONS: Final[dict[str, MachineOperation]] = {
 			invariant=READ_ONLY_INVARIANT,
 		),
 		MachineOperation(
+			name="intent",
+			summary="The intent traceability graph and what each escape points at (FR-127).",
+			returns="{graph: IntentGraph, attributions: [EscapeAttribution]} or null",
+			invariant=READ_ONLY_INVARIANT,
+		),
+		MachineOperation(
 			name="sources",
 			summary="The source ledger and the claims resting on it (FR-069-FR-075).",
 			returns="SourceLedger or null",
@@ -325,6 +331,19 @@ async def payload_for(svc: FactoryService, operation: str) -> Any:
 		return {
 			"report": (await svc.escape_report()).model_dump(mode="json"),
 			"escapes": [e.model_dump(mode="json") for e in state.escapes],
+		}
+	if operation == "intent":
+		# FR-127's graph and the attributions read against it, for the contract the log
+		# holds last. Both, because the graph alone answers "what cites this clause" while
+		# the attribution answers "which clause was misunderstood" — and the second is the
+		# signal §2.3 calls the product's most valuable one.
+		latest = state.contracts[-1] if state.contracts else None
+		if latest is None:
+			return None
+		graph = await svc.intent_graph(latest.id)
+		return {
+			"graph": None if graph is None else graph.model_dump(mode="json"),
+			"attributions": [a.model_dump(mode="json") for a in await svc.attributions(latest.id)],
 		}
 	if operation == "sources":
 		ledger = await svc.current_ledger()

@@ -170,6 +170,11 @@ orchestration layer:
 | **Autonomy ceiling from measured oracle rank (FR-007, FR-105)** | — | — |
 | **Escape attribution to the misunderstood clause (FR-127's purpose)** | — | — |
 
+One of the four rows is now **built** (2026-10-14, ADR-0058): escape attribution to the
+misunderstood clause is `sofact escape --module <name>` narrowing an attribution from the lane
+to the module that broke, and `IntentGraph.attribute` walking that module back to the clauses
+that cite it. The row still reads "—" for both neighbours, which is the point.
+
 Three projects at this layer, three times the same absence. Paperclip's verification is
 "verify from diffs, screenshots & tests" with an approval stage governing completion —
 a human reading artefacts, with no separation between the party that produces the

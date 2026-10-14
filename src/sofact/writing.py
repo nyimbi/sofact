@@ -57,6 +57,7 @@ DELIVERY_HEADINGS: Final[tuple[str, ...]] = (
 	"Machine surface",
 	"Autonomy",
 	"Escapes",
+	"Escape attribution",
 	"Maintenance handover",
 	"Machine checks",
 )
@@ -301,6 +302,46 @@ def render_delivery_document(report: DeliveryReport) -> str:
 		lines.append("")
 		for caveat in escapes.caveats:
 			lines.append(f"- {caveat}")
+
+	lines += ["", "## Escape attribution", ""]
+	if not report.attributions:
+		lines.append(
+			"No escape is attributed to a clause (FR-127). Either none has been recorded "
+			"against this contract's changes, or the graph holds no module in the lane one "
+			"was filed against — and the second is a gap in the traceability rather than a "
+			"clean history."
+		)
+	else:
+		lines.append(
+			"Each recorded escape, traced back to the intent clause the change was built "
+			"for (FR-127). This is a pointer for a human and not a diagnosis: every hop is "
+			"a declaration, so it can say *which* clause the escaped module was built for "
+			"and cannot say the clause was ambiguous. §2.3 makes the operator's reading the "
+			"only ground truth there is."
+		)
+		lines.append("")
+		lines.append("| Lane | Clause | Statement | Narrowed |")
+		lines.append("| --- | --- | --- | --- |")
+		for attribution in report.attributions:
+			lines.append(
+				f"| {attribution.lane.value} | `{attribution.clause_id}` | "
+				f"{attribution.statement} | "
+				f"{'yes' if attribution.narrowed else '**no — candidate set**'} |"
+			)
+		if not all(a.narrowed for a in report.attributions):
+			lines.append("")
+			lines.append(
+				"A row that is not narrowed is a *candidate set*: the escape named a lane "
+				"rather than a module, so it points at every clause that lane's modules "
+				"cite. Recording the module (`--module`) narrows it to an answer."
+			)
+	if report.intent is not None and report.intent.gaps:
+		lines.append("")
+		lines.append(
+			f"**{len(report.intent.gaps)} clause(s) the graph cannot walk.** Nothing was "
+			"built for them, so no escape can ever be attributed to them — a worse finding "
+			"than an escape, and one a rendered chain draws as a gap and moves past."
+		)
 
 	lines += [
 		"",

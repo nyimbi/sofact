@@ -13,7 +13,7 @@ Scope: every `FR-xxx` the spec states, classified against `src/sofact/*.py` and
 - **Deferred** — named in an ADR as not-built.
 - **Not built** — no code, no test, no record.
 
-`tests/ci` at the last refresh: **1396 passed, 0 failed** (2026-10-14, after ADR-0057).
+`tests/ci` at the last refresh: **1424 passed, 0 failed** (2026-10-14, after ADR-0058).
 The table below was written at 725; the verdicts are the part that matters and the ones
 closed since carry their date.
 
@@ -101,7 +101,7 @@ closed since carry their date.
 | FR-124 per-deployment topology ceilings | **Implemented** (2026-10-13, ADR-0045) | `DeploymentTopology`/`TOPOLOGY_ISOLATION`/`TOPOLOGY_MODIFIER`/`topology_ceiling`/`topology_refusal`/`HIGHEST_GRANTABLE` (`views.py`), `topology_statement`/`refused_by_topology` plus the `topology_ceiling_applied` and `topology_refuses_l4_at_a_degraded_deployment` gate checks (`delivery.py`), `SOFACT_TOPOLOGY`/`--override-topology` (`cli.py`), the two fields on `DeliveryReport` and `VerificationReport`, and the deployment lines in `DELIVERY.md`/`RUNBOOK.md` (`writing.py`). §5.4's modifier is a delta applied to the **modules'** number and not to the delivery's (FR-123's L2 cap is already at or below every topology's). FR-031's refusal is per module class and is a **failed machine check**, so `approve_deploy` refuses it with no second enforcement path; the override is a **name**, not a flag. T4 is reported as baseline with its unlock named rather than applied, because the blast bound it unlocks is one SoFact does not hold (FR-027). `TestTheTopologyIsATypeNotAComment`, `TestTheTopologyRefusesRatherThanDowngrades`, `TestTheRefusalReachesTheGate`, `TestTheReportStatesWhereItRan` (`test_delivery.py`), `TestTheTopologySeam` (`test_cli.py`, 5 tests). **Still open**: FR-040's "first-class configuration input" is satisfied for the ceiling only — nothing reads the topology to change packaging, egress, or the container boundary FR-019 depends on (D9). |
 | FR-125 G1–G2 target classes, class distribution reported | **Implemented** | `class_distribution` (`views.py:650`) reported in the gate (`decomposition.py:484`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-126 G7 human-authored | **Implemented** | `MODULE_CLASS_CEILING` (`views.py:478`); `test_g7_is_the_only_l1_class` (`test_decomposition.py:217`), `test_every_g7_marker_classifies_as_g7` (`:204`). |
-| FR-127 intent traceability graph first-class | **Partly** | Traceability is a gate *check* over the clause→module relation (`decomposition.py:438`), not a graph with escape attribution. |
+| FR-127 intent traceability graph first-class | **Implemented** (2026-10-14, ADR-0058) | `intent.py` — `build_graph`, `requirement_map`, `attributions_for` — plus `IntentNode`/`IntentEdge`/`IntentHop`/`IntentNodeKind`/`IntentGraph`/`EscapeAttribution` (`views.py`), `intent_graph`/`attributions` (`service.py`), `sofact intent` (`cli.py`), the `intent` machine operation (`api.py`), and an `## Escape attribution` section in `DELIVERY.md`. **The graph is the structure and FR-117's chain is a projection of it**: `delivery.chain` delegates to `IntentGraph.project()`, so the two cannot drift — a graph that merely rendered the same walk would have satisfied FR-127's word ("first-class component, not a derived report") and not its requirement. The three relations are held as directed edges because they are **not a chain in the log**: a clause cites its requirement (P2) and its module (P3) independently, so requirement and module are sibling branches and only the module reaches a step (P5), which makes the backward walk a hop instead of a search. `record_escape` gained a third refusal — a module the deployment did not build in that lane — because a module that did not break points the attribution at the wrong clause, which is worse than no attribution since it reads as a finding; `EscapeAttribution.narrowed` keeps an answer distinct from a candidate set on the type. `IntentGraph.gaps` reports a clause the decomposition dropped, which is a *worse* finding than an escape: nothing was built for it, so no escape can ever be attributed to it. 28 tests (`test_intent.py`), five canaries watched failing. |
 | FR-128 model as single source of interface truth | **Implemented** (2026-10-13, ADR-0049) | The same mechanism as FR-083's second clause: the model declares the interface, the module binds it, and `propose` derives the binding rather than accepting one. This row and FR-083 were one gap counted twice; both close together. |
 | FR-129 no shared model context across phases | **Partly** | `sofact.llm` is advisory and used only for elicitation advice; no other phase calls a model. Nothing *enforces* the separation. |
 | FR-130 attributable approval | **Implemented** | `approve(..., by=…)` (`decomposition.py:493`); `test_approval_names_who_and_when` (`test_decomposition.py:340`), `test_half_an_approval_is_refused_by_the_type` (`:351`). |
@@ -172,8 +172,8 @@ trusted.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 89 |
-| Partly | 24 |
+| Implemented | 90 |
+| Partly | 23 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 6 |
 | **Total rows** | **119** |
@@ -193,7 +193,9 @@ refresh counted it as Implemented, which is why its total read 87/25/0/7 rather 
 
 Closed since the 2026-10-13 refresh: **FR-154** (Partly → Implemented) and **FR-155**
 (Not built → Implemented), both 2026-10-14, ADR-0056; **FR-157** (Partly → Implemented),
-2026-10-14, ADR-0057. The six Not built rows are
+2026-10-14, ADR-0057; **FR-127** (Partly → Implemented), 2026-10-14, ADR-0058 — the row
+the 2026-10-12 audit called the most valuable learning signal the product produces and
+could not connect to anything. The six Not built rows are
 FR-008–011, FR-012–015, FR-036, FR-052–056, FR-134 and FR-159.
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
@@ -309,9 +311,12 @@ bound) is **partly** (per-step only).
    (§23 M1) remains unbuilt — it is a convenience over the phase machine rather than a
    prerequisite for it.
 
-Honourable mentions, in the same ranking: FR-127 (traceability is a gate
-check, not the first-class graph escape attribution needs), FR-130/131 are implemented
-but FR-058's *portability* claim rests on a second adapter that has never been measured.
+Honourable mentions, in the same ranking: FR-130/131 are implemented but FR-058's
+*portability* claim rests on a second adapter that has never been measured. **FR-127
+leaves this list** (2026-10-14, ADR-0058): the graph is the structure the delivery chain
+is projected from, `record_escape` can name the module that broke so an attribution is an
+answer rather than a candidate set, and `IntentGraph.gaps` reports a clause nothing was
+built for.
 
 ---
 

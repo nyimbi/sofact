@@ -44,6 +44,7 @@ from typing import Final
 
 from sofact._uuid7 import uuid7str
 from sofact.escape import ceilings_from
+from sofact.intent import attributions_for, build_graph
 from sofact.views import (
 	EVOLVABILITY_DEBT,
 	MODE_G_CEILING,
@@ -61,6 +62,7 @@ from sofact.views import (
 	DeliveryReport,
 	DeploymentTopology,
 	EnvelopeActuals,
+	EscapeEvent,
 	EscapeReport,
 	GateCheck,
 	GateCost,
@@ -162,36 +164,16 @@ def chain(
 	delivered without a specification or a plan. The chain reports it rather than
 	refusing, because a report whose whole purpose is to state what is not there is the
 	last place to raise.
+
+	**This delegates to FR-127's graph.** It used to walk the three relations itself, and
+	so did the graph — two implementations of one walk, agreeing until someone edited one.
+	The requirement that made the graph first-class is what retires the second copy: the
+	chain is the graph projected, and a hop the graph does not hold cannot appear in a
+	report.
 	"""
-	module_for_clause: dict[str, str] = {}
-	if decomposition is not None:
-		for module in decomposition.modules:
-			for clause_id in module.clause_ids:
-				module_for_clause.setdefault(clause_id, module.name)
-
-	# The first step whose clause cover a single module owns. FR-136 forbids one session
-	# per module, so several steps can share one; the earliest is what built it, and
-	# "earliest" is the plan's ordinal order rather than the dispatches' arrival order.
-	step_for_module: dict[str, int] = {}
-	if decomposition is not None and plan is not None:
-		for step in plan.steps:
-			module = decomposition.module_for_clauses(step.clause_ids)
-			if module is not None:
-				step_for_module.setdefault(module.name, step.ordinal)
-
-	links: list[TraceLink] = []
-	for clause in contract.clauses:
-		module = module_for_clause.get(clause.id)
-		links.append(
-			TraceLink(
-				clause_id=clause.id,
-				statement=clause.statement,
-				requirement_id=requirement_for_clause.get(clause.id),
-				module=module,
-				step_ordinal=step_for_module.get(module) if module is not None else None,
-			)
-		)
-	return tuple(links)
+	return build_graph(
+		contract, decomposition, plan, requirement_for_clause=requirement_for_clause
+	).project()
 
 
 def verified_and_unverified(
@@ -519,6 +501,7 @@ def report(
 	topology_configured: bool = False,
 	topology_override: str | None = None,
 	escapes: EscapeReport | None = None,
+	escapes_recorded: tuple[EscapeEvent, ...] = (),
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -550,12 +533,11 @@ def report(
 	"lowered by weak oracles" survives into the log.
 	"""
 	assert contract.clauses, "cannot report a delivery for a contract with no clauses"
-	requirement_for_clause: dict[str, str] = {}
-	if specification is not None:
-		for requirement in specification.requirements:
-			for clause_id in requirement.clause_ids:
-				requirement_for_clause.setdefault(clause_id, requirement.id)
-	links = chain(contract, decomposition, plan, requirement_for_clause=requirement_for_clause)
+	# FR-127: the chain is a *projection* of the intent graph rather than a second walk
+	# over the same declarations. `chain` above is kept because a report is a report and
+	# FR-117 names one; this is the graph it now reads from, so the two cannot drift.
+	intent = build_graph(contract, decomposition, plan, specification)
+	links = intent.project()
 	verified, unverified = verified_and_unverified(contract, verdicts)
 	handed = handover(contract, system=system, entry_point=entry_point)
 	# FR-023's reduction reaches the autonomy computation as a pre-computed mapping, so
@@ -885,6 +867,14 @@ def report(
 		topology=topology,
 		topology_configured=topology_configured,
 		escapes=escapes,
+		# FR-127's attribution, against the graph this report's chain was projected from
+		# rather than one rebuilt now. A graph rebuilt at read time would attribute an
+		# escape to whatever the decomposition says *today*, and after a repair that is a
+		# different graph than the change was built against — the escape would be pointed
+		# at a clause it was never built for, which is worse than no attribution because it
+		# reads as a finding.
+		intent=intent,
+		attributions=attributions_for(intent, escapes_recorded),
 		handover=handed,
 		checks=tuple(checks),
 	)

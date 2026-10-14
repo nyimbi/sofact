@@ -2071,6 +2071,11 @@ def escape(
 		None, "--report", help="The delivery that escaped; defaults to the latest deployed."
 	),
 	by: str = typer.Option("operator", "--by", help="Who recorded the escape."),
+	module: str | None = typer.Option(
+		None,
+		"--module",
+		help="Which module broke, when you know (FR-127). Narrows the attribution.",
+	),
 	note: str | None = typer.Option(None, "--note", help="Anything else worth keeping."),
 ) -> None:
 	"""Record an escape against a deployed change (FR-021)."""
@@ -2082,6 +2087,7 @@ def escape(
 			defect=defect,
 			report=report,
 			by=by,
+			module=module,
 			note=note,
 		)
 	)
@@ -2095,6 +2101,7 @@ async def _escape(
 	defect: str,
 	report: str | None,
 	by: str,
+	module: str | None,
 	note: str | None,
 ) -> None:
 	state = await svc.state()
@@ -2119,6 +2126,7 @@ async def _escape(
 			kind=EscapeKind(kind.strip().lower()),
 			defect=defect,
 			by=by,
+			module=module,
 			note=note,
 		)
 	except ValueError as exc:
@@ -2207,6 +2215,88 @@ async def _escapes(svc: FactoryService, *, override: str | None, reason: str) ->
 			fg="red",
 		)
 		raise typer.Exit(code=1)
+
+
+@app.command(name="intent")
+def intent_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	contract: str | None = typer.Option(
+		None, "--contract", help="Which contract (default: the latest the log holds)."
+	),
+	attributions: bool = typer.Option(
+		False, "--attributions", help="Also trace every recorded escape back to its clause."
+	),
+) -> None:
+	"""Print FR-127's intent traceability graph, and what each escape points at."""
+	asyncio.run(
+		_intent(_service(_home_of(ctx, home)), contract=contract, attributions=attributions)
+	)
+
+
+async def _intent(svc: FactoryService, *, contract: str | None, attributions: bool) -> None:
+	state = await svc.state()
+	contract_id = contract
+	if contract_id is None:
+		if not state.contracts:
+			typer.secho(
+				"no contract exists, so there is no intent to trace (FR-127). The graph is "
+				"built from the clauses a contract holds and the requirements, modules and "
+				"steps that cite them.",
+				fg="yellow",
+			)
+			raise typer.Exit(code=1)
+		contract_id = state.contracts[-1].id
+	graph = await svc.intent_graph(contract_id)
+	if graph is None:
+		typer.secho(f"the log holds no contract {contract_id} (FR-127)", fg="red")
+		raise typer.Exit(code=1)
+	typer.secho("\nFR-127 intent traceability graph", fg="cyan", bold=True)
+	typer.secho(f"  graph {graph.id}", fg="bright_black")
+	typer.secho(
+		f"  {len(graph.clauses)} clause(s), {len(graph.modules)} module(s), "
+		f"{len(graph.nodes)} node(s), {len(graph.edges)} edge(s)",
+		fg="bright_black",
+	)
+	if graph.contract_hash is not None:
+		typer.secho(f"  built against contract {graph.contract_hash[:16]}", fg="bright_black")
+	typer.secho("")
+	for link in graph.project():
+		typer.secho(f"  {link.rendered}", fg="green" if link.is_whole else "yellow")
+	if graph.gaps:
+		# A gap here is worse than an escape: nothing was built for the clause, so no
+		# escape can ever be attributed to it. Said rather than left as a drawn gap.
+		typer.secho(
+			f"\n  {len(graph.gaps)} clause(s) the graph cannot walk, so nothing was built "
+			"for them and no escape can ever be attributed to them (FR-127). A rendered "
+			"chain draws this as a gap and moves on; it is the finding.",
+			fg="red",
+		)
+	if not attributions:
+		return
+	traced = await svc.attributions(contract_id)
+	typer.secho("\nEscape attribution (FR-127)", fg="cyan", bold=True)
+	if not traced:
+		typer.secho(
+			"  nothing is attributed. Either no escape has been recorded against this "
+			"contract's changes, or the graph holds no module in the lane one was filed "
+			"against — the two are different and `sofact escapes` says which.",
+			fg="bright_black",
+		)
+		return
+	recorded = await svc.escapes()
+	placed = {a.escape_id for a in traced}
+	for attribution in traced:
+		typer.secho(f"  {attribution.rendered}", fg="yellow" if attribution.narrowed else "white")
+	orphans = [e for e in recorded if e.id not in placed]
+	if orphans:
+		typer.secho(
+			f"\n  {len(orphans)} escape(s) attributed to no clause: the graph holds no "
+			"module in the lane they were filed against, which means the change was built "
+			"against a different decomposition than this graph (FR-127). Counted rather "
+			"than dropped.",
+			fg="red",
+		)
 
 
 @app.command(name="scope")

@@ -235,6 +235,14 @@ aimed at: the target is **deployment-scoped, not product-scoped**, and there is 
 no default
 ([ADR-0057](docs/adr/0057-the-autonomy-target-is-a-deployment-scoped-type.md)).
 
+**And an escape points back at the clause that was misunderstood.** The intent graph holds
+the clause, its requirement, its module and its step as vertices, and the delivery chain is
+**projected from it** rather than walked a second time — so a hop the graph does not hold
+cannot appear in a report. `sofact escape --module <name>` narrows an attribution from the
+lane to the module that broke, because a lane is a *class* and a lane-wide answer is a
+candidate set, not an answer
+([ADR-0058](docs/adr/0058-the-intent-graph-is-what-the-chain-is-projected-from.md)).
+
 ## Harness
 
 SoFact has no coding loop ([ADR-0004](docs/adr/0004-delegate-the-coding-loop-to-an-external-harness.md)).
@@ -250,6 +258,8 @@ sofact attempts                     # what the repair loop cost: attempts, token
 sofact composition                  # the frozen plugin set, and whether FR-154's freeze holds
 sofact composition --verify a=<sha> # re-check the pins against what is installed now
 sofact scope                        # the autonomy target this deployment declared (FR-157)
+sofact intent                       # the intent graph, and what each escape points at
+sofact intent --attributions        # which clause each escape implicates (FR-127)
 sofact integrity                    # re-verify the pinned hashes
 sofact integrate                    # P7
 sofact deliver --root ./delivery    # P8: the report, its chain, its handover
@@ -368,7 +378,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1396 tests
+uv run pytest -vxs tests/ci          # 1424 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
