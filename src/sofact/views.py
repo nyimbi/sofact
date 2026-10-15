@@ -30,6 +30,8 @@ from sofact._uuid7 import uuid7str
 
 __all__ = [
 	"ATTEMPT_TELEMETRY_REQUIREMENTS",
+	"AUDIT_REQUIREMENTS",
+	"AUDIT_SAMPLE_FLOOR",
 	"CHANGE_COST_AXIS",
 	"CHANGE_COST_BASELINE_UNMEASURED",
 	"CHANGE_COST_NOT_A_VERIFICATION",
@@ -56,6 +58,7 @@ __all__ = [
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
 	"VERDICT_SURFACES",
+	"AdversarialAuditReport",
 	"Assumption",
 	"AttemptTelemetry",
 	"AttemptTelemetryReport",
@@ -105,6 +108,7 @@ __all__ = [
 	"EscapeReport",
 	"Evidence",
 	"EvidenceKind",
+	"ExploitFix",
 	"GateCheck",
 	"GateCost",
 	"Goal",
@@ -113,6 +117,9 @@ __all__ = [
 	"GoalSpec",
 	"GoalStep",
 	"GoalStyle",
+	"HackAttempt",
+	"HackOutcome",
+	"HackTechnique",
 	"Handover",
 	"HarnessCapability",
 	"HarnessProfile",
@@ -2899,6 +2906,291 @@ class OracleAuditReport(View):
 		"""
 		ranks = {ORACLE_RANK[finding.oracle_class] for finding in self.findings}
 		return max(ranks) if ranks else None
+
+
+# --------------------------------------------------------------------------- #
+# FR-012-015 — the adversarial audit: hacker, fixer, sampling, exploit rate
+# --------------------------------------------------------------------------- #
+
+AUDIT_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-012", "FR-013", "FR-014", "FR-015")
+"""What one adversarial pass can carry out.
+
+Four requirements and they are one loop: a hacker that obtains a verdict without
+solving the task (FR-012), a fixer that closes what it found and keeps the exploit as a
+regression case (FR-013), a sampling rule that says how often the loop runs (FR-014),
+and the rate that trends to zero (FR-015). A pass that ran no attempt carries none of
+them — the rule :data:`ORACLE_AUDIT_REQUIREMENTS` states one section up.
+"""
+
+EXPLOIT_TRENDS_TO_ZERO: Final[str] = (
+	"FR-015's target is zero, and a non-zero plateau means the lane is not actually "
+	"verified. The rate is exploits found / adversarial passes run, per lane; a lane with "
+	"no pass in the window is unmeasured rather than clean, because a zero over nothing is "
+	"the forbidden target NFR-024 names."
+)
+"""FR-015's reading rule, stated once so the report and its reader use one sentence."""
+
+AUDIT_SAMPLE_FLOOR: Final[int] = 3
+"""The default N in FR-014's 1-in-N, declared rather than left to each deployment.
+
+FR-014 makes N configurable and supplies no number, so a default has to be chosen
+somewhere; choosing it here means two deployments that configured nothing still compute
+the same rate. It is *not* a threshold the product has calibrated — §20.3 item 4 is
+explicit that no rate has been measured yet — so the report states the N it used beside
+every rate it prints.
+"""
+
+
+class HackTechnique(StrEnum):
+	"""FR-012's five ways to obtain a passing verdict without solving the task.
+
+	The set is the requirement's own list — "editing tests, hard-coding expected values,
+	special-casing fixtures, disabling assertions, over-fitting to the sample" — and not
+	an invention, because FR-015's rate is a rate *per technique*: a plateau explained by
+	one technique is a different defect from a plateau spread across five.
+
+	``DISABLED_ASSERTION`` and ``EDITED_TEST`` are the two a machine can *attempt* without
+	a model, and they are the two that matter most: an oracle is a command, so editing the
+	file the command runs and disabling the assertion inside it are the same act at two
+	granularities, and both are exactly FR-139's integrity subject.
+	"""
+
+	EDITED_TEST = "edited_test"
+	"""The oracle's own command was rewritten so it no longer checks what it claimed."""
+
+	DISABLED_ASSERTION = "disabled_assertion"
+	"""An assertion inside the oracle's target was neutralised, so it cannot fail."""
+
+	HARDCODED_EXPECTED = "hardcoded_expected"
+	"""The expected value was written into the implementation rather than computed."""
+
+	SPECIAL_CASED_FIXTURE = "special_cased_fixture"
+	"""The implementation recognises its own fixture and returns the expected answer."""
+
+	OVERFIT_TO_SAMPLE = "overfit_to_sample"
+	"""The implementation satisfies the supplied cases and nothing else."""
+
+
+class HackOutcome(StrEnum):
+	"""What the hacker's attempt did to the verdict (FR-012).
+
+	``EXPLOITED`` is the finding and ``HELD`` is the good case, but ``NOT_ATTEMPTED`` is
+	the one that must exist: FR-012's loop is sampled (FR-014), so most changes are not
+	attacked, and a report that folded "we did not try" into "we tried and it held" would
+	state a clearance over an unrun instrument. That is the same distinction
+	:class:`~sofact.views.OracleAuditSkip` draws for FR-107.
+	"""
+
+	EXPLOITED = "exploited"
+	"""The attempt obtained a passing verdict without solving the task. FR-012's defect."""
+
+	HELD = "held"
+	"""The attempt ran and the verdict did not flip. The only outcome that is evidence."""
+
+	NOT_ATTEMPTED = "not_attempted"
+	"""No attack was made, and there are two reasons, both of which mean no attack.
+
+	FR-014's sample skipped this change, or the oracle already reported satisfied against
+	the honest tree so there was no passing verdict to obtain. Both are "the audit did not
+	attack", which is why they share an outcome: an oracle with nothing to obtain is not a
+	resisted attack, and folding either into ``HELD`` would report a clearance over an
+	instrument that never ran.
+	"""
+
+	INCONCLUSIVE = "inconclusive"
+	"""The attack ran and the verdict could not be read, so it decided nothing.
+
+	First-class for :class:`~sofact.views.ProbeOutcome`'s reason: rounding it to ``HELD``
+	would fabricate a clearance and rounding it to ``EXPLOITED`` would report a defect
+	nobody demonstrated.
+	"""
+
+
+class HackAttempt(View):
+	"""One adversarial attempt against one change, and what it obtained (FR-012).
+
+	Recorded as its own row rather than as a boolean on the dispatch, because the
+	*technique* and the *evidence* are what a fixer acts on: "the audit failed" is not
+	actionable, and "a rank-3 surface check reports SATISFIED after its assertion was
+	removed" is.
+
+	It carries an ``id``, unlike :class:`OracleAuditFinding`, because FR-013's fixer
+	response points back at *this* attempt: a finding is read once, and an exploit has to
+	be named by something for its fix to reference.
+	"""
+
+	id: UUID7
+	clause_id: UUID7
+	statement: NonEmptyStr
+	technique: HackTechnique
+	outcome: HackOutcome
+	detail: NonEmptyStr
+	oracle_class: OracleClass
+	"""The declared class of the oracle attacked, because severity is not uniform.
+
+	A rank-1 property oracle defeated by a hard-coded expected value was claiming to
+	establish an invariant and establishes nothing; a rank-6 example defeated the same way
+	is a sample that sampled nothing. Both are exploits, and FR-012's argument is about
+	the first.
+	"""
+
+	baseline_command: NonEmptyStr | None = None
+	"""The oracle's command before the attempt, so the finding names something to fix."""
+
+	@property
+	def is_finding(self) -> bool:
+		"""Whether this attempt demonstrated an exploit. The one predicate that gates."""
+		return self.outcome is HackOutcome.EXPLOITED
+
+
+class ExploitFix(View):
+	"""The fixer's response to one demonstrated exploit (FR-013).
+
+	FR-013 has two halves and both are here. The first is that "every demonstrated
+	exploit must produce a **fixer** action that closes it" — ``closed`` with the reason
+	it is or is not. The second is that "the exploit must be retained as a permanent
+	regression case", which is ``regression_case``: a path, or ``None`` with the reason
+	it was not retained.
+
+	The second half is the one that gets dropped. A fix that closes an exploit and keeps
+	no case for it is a fix nobody can re-test, and the same exploit returns at the next
+	refactor with the audit reporting a rate of zero in between.
+	"""
+
+	attempt_id: UUID7
+	clause_id: UUID7
+	closed: bool
+	detail: NonEmptyStr
+	regression_case: NonEmptyStr | None = None
+	regression_because: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _retention_is_whole(self) -> Self:
+		if self.regression_case is None and self.regression_because is None:
+			raise ValueError(
+				"an exploit retained no regression case and gave no reason; FR-013 makes "
+				"retention a requirement, and an absence with no reason is "
+				"indistinguishable from an oversight"
+			)
+		if self.regression_case is not None and self.regression_because is not None:
+			raise ValueError("a retained regression case does not also carry a reason for none")
+		return self
+
+
+class AdversarialAuditReport(View):
+	"""One pass of FR-012's loop over a plan's changes, with FR-015's rate.
+
+	Names the plan *and* the contract hash for the reason
+	:class:`~sofact.views.OracleAuditReport` gives: an exploit is only actionable against
+	the exact oracle set it defeated, and re-keying it to a later contract would attach an
+	old finding to oracles nobody attacked.
+	"""
+
+	id: UUID7
+	plan_id: UUID7
+	contract_id: UUID7
+	contract_hash: str
+	rendered_at: datetime
+	attempts: tuple[HackAttempt, ...] = ()
+	fixes: tuple[ExploitFix, ...] = ()
+	sample_rate: int = AUDIT_SAMPLE_FLOOR
+	"""FR-014's N, as used for this pass, reported beside the rate it produced.
+
+	Carried rather than read from configuration at render time: a rate computed under
+	1-in-3 and one computed under 1-in-30 are not comparable, and a reader of the log
+	months later cannot recover which was in force.
+	"""
+
+	changes_considered: int = 0
+	"""How many changes FR-014's rule was applied to, which is the rate's denominator."""
+
+	@property
+	def exploited(self) -> tuple[HackAttempt, ...]:
+		"""The attempts that demonstrated an exploit. FR-012's findings."""
+		return tuple(a for a in self.attempts if a.is_finding)
+
+	@property
+	def attempted(self) -> tuple[HackAttempt, ...]:
+		"""Attempts that actually ran, which excludes what sampling skipped.
+
+		The distinction :class:`HackOutcome` exists for: a pass over ten changes that
+		attacked none is a pass that learned nothing, however many rows it wrote.
+		"""
+		return tuple(a for a in self.attempts if a.outcome is not HackOutcome.NOT_ATTEMPTED)
+
+	@property
+	def techniques_exploited(self) -> tuple[HackTechnique, ...]:
+		"""Which of FR-012's five techniques got through, in the enum's order.
+
+		FR-015 wants a rate, and a rate that has plateaued needs this beside it: one
+		technique recurring is a fixable defect, five recurring is a subsystem that is not
+		being audited at all.
+		"""
+		found = {a.technique for a in self.exploited}
+		return tuple(t for t in HackTechnique if t in found)
+
+	@property
+	def exploits_unclosed(self) -> tuple[HackAttempt, ...]:
+		"""Demonstrated exploits with no fixer action that closed them (FR-013).
+
+		Derived from the fixes rather than counted, so an exploit whose fix was attempted
+		and did not close it stays in this tuple. A pass that found one exploit and wrote
+		one fix saying "not closed" is a pass with an open exploit.
+		"""
+		closed = {f.attempt_id for f in self.fixes if f.closed}
+		return tuple(a for a in self.exploited if a.id not in closed)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this pass carried out, which may be none.
+
+		The rule :attr:`OracleAuditReport.discharged` states: a pass that attacked nothing
+		claims nothing, and FR-013's half is only carried where an exploit was actually
+		found to fix.
+		"""
+		if not self.attempted:
+			return ()
+		if not self.exploited:
+			return ("FR-012", "FR-014", "FR-015")
+		return AUDIT_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-012-015 this pass did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in AUDIT_REQUIREMENTS if name not in discharged)
+
+	@property
+	def exploit_rate(self) -> float | None:
+		"""FR-015's rate: exploits found per attempted pass, or ``None`` if none ran.
+
+		``None`` rather than ``0.0`` over zero attempts, which is the whole point of
+		:attr:`attempted` existing. A lane whose every change was sampled out has a rate
+		that is *undefined*, and printing zero there would report the plateau FR-015
+		warns about as the target state.
+		"""
+		if not self.attempted:
+			return None
+		return len(self.exploited) / len(self.attempted)
+
+	@property
+	def passed(self) -> bool:
+		"""Whether the pass found no exploit at all.
+
+		**A closed exploit does not make the pass clean**, and that is deliberate: FR-013's
+		fix is a *claim* that the exploit is closed, and nothing in this pass verifies it —
+		the verification is the next audit, which attacks the rewritten oracle. So a pass
+		that found one exploit and wrote one fix saying "closed" still reports
+		``passed = False``, and :attr:`exploits_unclosed` is the separate signal saying
+		whether anything is still open. A gate that treated a fixer's word as a clearance
+		would be accepting the producer's own declaration one level up, which is the whole
+		of what FR-138 forbids.
+
+		Says only that nothing was found, never that the changes are unattackable: a pass
+		that attacked nothing passes vacuously, and :attr:`not_implemented` is what tells
+		the two apart.
+		"""
+		return not self.exploited
 
 
 # --------------------------------------------------------------------------- #
