@@ -194,7 +194,14 @@ class TestTheReviewAttachesToTheDiffNotTheStep:
 				"checkout": original.checkout.model_copy(update={"sealed_commit": "b" * 40}),
 			}
 		)
-		service._commit(LedgerKind.STEP_DISPATCHED, {"dispatch": second.model_dump(mode="json")})
+		# ``_commit`` rather than ``ledger.append``: it invalidates the derived-state
+		# cache, and without that the ``state()`` below folds a stale ``ProjectState``
+		# and the second dispatch is invisible. Reaching a private member is the point
+		# of the test, not an accident of it, so the ignore is stated rather than the
+		# call routed around -- ``test_delivery`` reaches ``_repository_of`` the same way.
+		service._commit(  # pyright: ignore[reportPrivateUsage]
+			LedgerKind.STEP_DISPATCHED, {"dispatch": second.model_dump(mode="json")}
+		)
 		state = await service.state()
 		assert {d.step_id for d in state.dispatches} == {original.step_id}, (
 			"this test needs two dispatches of one step"

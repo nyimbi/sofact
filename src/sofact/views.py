@@ -44,6 +44,9 @@ __all__ = [
 	"ESCAPE_RATE_READING",
 	"ESCAPE_REQUIREMENTS",
 	"EVOLVABILITY_DEBT",
+	"GOAL_CONTINUATION_UNMEASURED",
+	"GOAL_ENTRY_NOT_FORCED",
+	"GOAL_MODE_REQUIREMENTS",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
 	"INTENT_REQUIREMENTS",
@@ -120,6 +123,8 @@ __all__ = [
 	"GateCost",
 	"Goal",
 	"GoalEntry",
+	"GoalModeReport",
+	"GoalModeRow",
 	"GoalPlan",
 	"GoalSpec",
 	"GoalStep",
@@ -7825,6 +7830,218 @@ One requirement, because FR-102 is one sentence with three nouns in it. Naming i
 rather than in the fold keeps the two readings of "is this discharged" — the property and
 any future gate — from drifting apart.
 """
+
+
+GOAL_MODE_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-144", "FR-153")
+"""What one goal-mode reading can carry out.
+
+Two requirements, and the pair is deliberate. FR-153 is the one §20.3 item 6a leaves open
+— entry must be *forced* and verified from the session log — and FR-144 is the degradation
+that must be *reported* when it is not. A reading that counted goal-mode dispatches without
+checking whether their entry was forced would discharge neither: it would report sessions
+that were asked to enter goal mode as sessions that did.
+
+**FR-135 is deliberately absent.** The capability matrix is the *probe's* discharge, on a
+:class:`HarnessProfile` this fold does not read, and a dispatch is not evidence about the
+matrix — it is evidence about what one session did. Naming FR-135 here would let a
+project's dispatch history stand in for a probe it never ran.
+"""
+
+GOAL_ENTRY_NOT_FORCED: Final[str] = (
+	"a dispatch whose mode is `goal` and whose observed entry is `prompt` was *asked* to "
+	"enter goal mode, not made to. [S21] measured that the capability is loaded and the "
+	"producer never entered it; FR-153 requires entry by construction and verification "
+	"from the session log, so such a dispatch is a capability loss reported under FR-144 "
+	"rather than a goal session. The count is stated beside the goal-mode count because "
+	"the flattering reading — 'goal mode ran' — is available from the mode alone, and the "
+	"mode is what the probe decided before the session began."
+)
+
+GOAL_CONTINUATION_UNMEASURED: Final[str] = (
+	"a harness that writes no turn boundary reports `None`, never 1. `pi`, `claude` and "
+	"`opencode` declare no continuation event, so a dispatch on them is *unmeasured* "
+	"rather than a single-turn session — and a mean over the harnesses that do number "
+	"their turns is a fact about those harnesses, which is why the coverage count travels "
+	"beside it (NFR-024)."
+)
+
+
+class GoalModeRow(View):
+	"""One dispatch's goal-mode facts, as its session record witnessed them (FR-153).
+
+	Three fields and they must not be merged. ``mode`` is what the *probe* decided before
+	the session started — it is a prediction. ``entry`` is how the objective actually
+	reached the session, read from the record afterwards. ``continuations`` is how many
+	turns the session took, where the harness numbers them.
+
+	A dispatch can carry a goal ``mode`` and a ``prompt`` entry, and that pair is the whole
+	subject of §20.3 item 6a: the probe said goal-capable, and the session shows the model
+	was asked rather than made to enter it.
+	"""
+
+	dispatch_id: UUID7
+	step_id: UUID7
+	harness: NonEmptyStr
+	mode: DispatchMode
+	entry: GoalEntry | None = None
+	"""How the goal reached the session, or ``None`` when no record was read.
+
+	``None`` is *not observed*, which is a different fact from :attr:`GoalEntry.PROMPT`.
+	A dispatch that left no session record behind has no entry to report, and rounding it
+	to ``PROMPT`` would invent a reading of a session nobody saw.
+	"""
+
+	continuations: int | None = None
+	"""Turns the session ran, or ``None`` where the harness numbers none (FR-153)."""
+
+	@property
+	def forced(self) -> bool:
+		"""Whether the objective *entered* the session rather than being requested."""
+		return self.entry is not None and self.entry.is_forced
+
+	@property
+	def ran_as_goal(self) -> bool:
+		"""Whether the dispatch was sent as a goal, per the probe's decision."""
+		return self.mode is DispatchMode.GOAL
+
+	@property
+	def is_contradiction(self) -> bool:
+		"""A dispatch sent as a goal whose *read* session shows no forced entry (FR-153).
+
+		This is the defect the whole reading exists to make visible, and it is invisible
+		from either field alone: the mode says goal, the entry says prompt, and only the
+		conjunction says *the capability the probe claimed was not exercised*.
+
+		Requires :attr:`entry` to be non-``None``. A dispatch whose session left no record
+		has nothing to contradict: the contradiction is a claim about what the record
+		showed, and a session nobody read showed nothing. Reading ``entry is None`` as a
+		prompt would report every unwitnessed dispatch as a capability loss, which is the
+		same error as reporting an unmeasured continuation count as one turn.
+		"""
+		return self.ran_as_goal and self.entry is not None and not self.forced
+
+
+class GoalModeReport(View):
+	"""§20.3 item 6a: whether goal entry was forced, and whether continuations were seen.
+
+	The M0 probe's blocking question, read from dispatches rather than from documentation.
+	[S21] answered it at n=1 — goal mode present and loaded, the producer never entered it,
+	zero goal-typed events, `todo_write` substituted — and §20.3 says what remains open is
+	"not whether the capability exists but whether entry can be **forced** and continuations
+	observed". This fold is that question asked of a project's own sessions.
+
+	**What it does not claim.** A project whose producers never entered goal mode is more
+	observations of [S21], not a proof that entry cannot be forced — the mechanism may
+	exist on a harness this project never dispatched, and a negative over one configuration
+	is not a negative over the interface. So :attr:`forced_entries` of zero is reported as
+	*not observed to be forcible* and the caveat says so, which is the same limit
+	:attr:`EscapeReport.discharged` and §1.4's sub-linearity both carry: a reading over one
+	population is a fact about that population.
+	"""
+
+	id: UUID7
+	rendered_at: datetime
+	rows: tuple[GoalModeRow, ...] = ()
+
+	@property
+	def witnessed(self) -> tuple[GoalModeRow, ...]:
+		"""The dispatches whose session record was read, so an entry could be observed.
+
+		The denominator for every claim here, and the reason a dispatch that left no record
+		is counted rather than dropped: "no goal event was found" and "no record was read"
+		are the two answers §20.3 item 6a must keep apart, and only the first is evidence.
+		"""
+		return tuple(row for row in self.rows if row.entry is not None)
+
+	@property
+	def goal_dispatches(self) -> tuple[GoalModeRow, ...]:
+		"""The dispatches sent as goals, per the probe's pre-session decision."""
+		return tuple(row for row in self.rows if row.ran_as_goal)
+
+	@property
+	def forced_entries(self) -> tuple[GoalModeRow, ...]:
+		"""The sessions whose objective *entered* goal mode — FR-153's positive evidence."""
+		return tuple(row for row in self.witnessed if row.forced)
+
+	@property
+	def contradictions(self) -> tuple[GoalModeRow, ...]:
+		"""Goal dispatches with no forced entry: the capability the probe claimed, absent."""
+		return tuple(row for row in self.rows if row.is_contradiction)
+
+	@property
+	def measured_continuations(self) -> tuple[GoalModeRow, ...]:
+		"""The dispatches on a harness that numbers its turns."""
+		return tuple(row for row in self.rows if row.continuations is not None)
+
+	@property
+	def total_continuations(self) -> int:
+		"""Summed turns over the harnesses that number them. A floor, not a total."""
+		return sum(row.continuations or 0 for row in self.measured_continuations)
+
+	@property
+	def mean_continuations(self) -> float | None:
+		"""Turns per measured session, or ``None`` when none was measured (NFR-024).
+
+		``None`` rather than ``0.0`` for :attr:`AttemptTelemetryReport.tokens_complete`'s
+		reason: zero continuations is the claim that every session ran exactly one turn,
+		which is a measurement, and a harness that writes no turn boundary has not made it.
+		"""
+		measured = self.measured_continuations
+		if not measured:
+			return None
+		return self.total_continuations / len(measured)
+
+	@property
+	def continuation_coverage(self) -> tuple[int, int] | None:
+		"""Measured sessions against witnessed ones, or ``None`` when none was witnessed.
+
+		Beside the mean rather than in a footnote, for ADR-0068's reason: a mean over the
+		harnesses that number their turns is a fact about those harnesses, and a reader who
+		takes it for the project's goal behaviour has been misled by a subset that happens
+		to be the measurable one.
+		"""
+		if not self.witnessed:
+			return None
+		return len(self.measured_continuations), len(self.witnessed)
+
+	@property
+	def entry_forced(self) -> bool | None:
+		"""Whether forced entry was *observed at all*, or ``None`` when nothing was read.
+
+		Three states and they are not two. ``True`` — at least one session shows a forced
+		entry, so the mechanism works on this configuration. ``False`` — sessions were read
+		and none was forced, which is [S21] reproduced, not a proof of impossibility.
+		``None`` — no session record was read, so the question was never asked. Collapsing
+		``False`` and ``None`` would report an absent instrument as a measured negative.
+		"""
+		if not self.witnessed:
+			return None
+		return bool(self.forced_entries)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this reading carried out, which may be none (NFR-024).
+
+		A reading over zero witnessed sessions claims nothing, and neither does one whose
+		goal dispatches all contradicted their own mode: FR-153 is discharged by a session
+		that *entered* goal mode, so a project that only ever asked has not carried it out.
+		That is the rule :attr:`EscapeReport.discharged` states, applied where the vacuous
+		pass would otherwise be the *likely* outcome rather than an edge case.
+		"""
+		if not self.forced_entries:
+			return ()
+		return GOAL_MODE_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-144/FR-153 this reading did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in GOAL_MODE_REQUIREMENTS if name not in discharged)
+
+	@property
+	def caveats(self) -> tuple[str, ...]:
+		"""What this reading does not claim, stated rather than left to inference."""
+		return (GOAL_ENTRY_NOT_FORCED, GOAL_CONTINUATION_UNMEASURED)
 
 
 class DeclarationPrecision(View):

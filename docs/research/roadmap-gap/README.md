@@ -498,9 +498,15 @@ built for.
    ADR-0043's per-gate instrument and ADR-0068's per-diff one (`test_review.py`, 25), so
    §1.4's claim is readable against the v0.1 alternative per project — though the
    **baseline is still unmeasured**, because a rate needs a project somebody actually
-   reviewed and no project has been. What the row still states is what remains **open**:
-   items 1, 6a and 7 have no instrument at all, item 5's container half is written and
-   never witnessed, and M1's `sofact init` does not exist.
+   reviewed and no project has been. Item 6a now has a **reading** too — ADR-0069's
+   `measure_goal_mode` (`test_goal.py`, 19) folds what each dispatch recorded about forced
+   entry and turn count, over two fields that until then were written by the adapter and read
+   by nothing in `src/` — but the **probe itself is still open**: a fold can report that entry
+   was never forced, and it cannot *force* it, which needs a live run against a harness whose
+   argv enters goal mode by construction and no configured spec does that today. What the row
+   still states is what remains **open**: items 1 and 7 have no instrument at all, item 6a's
+   probe is unrun, item 5's container half is written and never witnessed, and M1's
+   `sofact init` does not exist.
    Several M6 exit criteria (O8 conformance, integration failure attribution) are partly
    met, and M3's "all 8 oracle classes" is not. The row was right about the *shape* of
    the gap — an exit criterion measured by prose — and wrong about it being total, which

@@ -53,6 +53,7 @@ from sofact.git import (
 	integrate_worktree,
 	seal_branch,
 )
+from sofact.goal import measure_goal_mode
 from sofact.harness import (
 	DEFAULT_PROBE_GOAL,
 	DEFAULT_PROBE_TIMEOUT_SECONDS,
@@ -146,6 +147,7 @@ from sofact.views import (
 	GateCheck,
 	GateCost,
 	Goal,
+	GoalModeReport,
 	GoalPlan,
 	GoalStep,
 	GoalStyle,
@@ -3602,6 +3604,25 @@ class FactoryService:
 			repairs=state.repairs,
 			dispatches=state.dispatches,
 		)
+
+	# --------------------------------------------------- §20.3 item 6a: goal mode
+
+	async def goal_mode_report(self) -> GoalModeReport:
+		"""Fold the dispatch history into §20.3 item 6a's two answers (FR-144, FR-153).
+
+		Scoped to the whole ledger rather than to a plan, unlike
+		:meth:`attempt_telemetry`, because the question is about the *harness* rather than
+		about a run: "can entry be forced" is a fact about a configuration, and a project
+		that dispatched goal plans under two plans has more evidence about it, not less.
+		The rows carry their dispatch ids, so a reader who wants one plan's answer filters
+		by step.
+
+		Every dispatch is folded, including the ones never sent, because a refusal has a
+		mode and no entry and dropping it would make an unusable harness invisible in a
+		report about whether a harness could run a goal at all.
+		"""
+		state = await self.state()
+		return measure_goal_mode(state.dispatches)
 
 	# --------------------------------------------------------- FR-143: precision
 

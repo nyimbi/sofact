@@ -151,6 +151,7 @@ _TUPLE_FIELDS: Final = (
 )
 _STRING_FIELDS: Final = (
 	"compaction_event",
+	"continuation_event",
 	"completion_reason_value",
 	"confinement_tools",
 	"model_error_pattern",
@@ -276,6 +277,21 @@ class HarnessSpec:
 	tool_names: tuple[tuple[str, str], ...] = ()
 	budget_argv: tuple[str, ...] = ()
 	compaction_event: str = ""
+	continuation_event: str = ""
+	"""The record type marking one turn of a looping session, empty when unnumbered.
+
+	A *declaration*, for the reason ``usage_path`` and ``completion_reason_path`` are:
+	:func:`parse_continuations` reads this rather than a literal, so a harness that
+	numbers its turns says so in the table and a harness that does not reports
+	``None``. Before this field the event name was hardcoded inside the parser, which
+	made it the one reader in this module that did not take its fact from the spec --
+	and made ``continuations_observed`` a field whose meaning was a string in a
+	function rather than a measured property of the harness.
+
+	Empty is not an oversight: ``pi``, ``claude`` and ``opencode`` write no turn
+	boundary at all, so for them the count is *unmeasured* rather than one.
+	"""
+
 	research_tools: tuple[str, ...] = ()
 	freezing_flags: tuple[str, ...] = ()
 	"""Argv entries whose presence means installed plugins are not auto-loaded (FR-154).
@@ -700,6 +716,10 @@ DSH_SPEC: Final = HarnessSpec(
 	goal_event_types=(),
 	goal_entry=GoalEntry.PROMPT,
 	supports_context_file_flag=False,
+	# Measured: a `turn/start` opens each turn of a looping session, so the count of
+	# them is the number of continuations after the first (FR-153). The other four
+	# specs declare none, which is why their dispatches carry `None` rather than 1.
+	continuation_event="turn/start",
 	notes=(
 		"Session record shape is measured: zstd JSONL of {seq,time,type,data} at "
 		"<DSH_HOME>/sessions/--<cwd-slug>--/session-<id>/session.v3.jsonl.zstd, with "
@@ -1037,13 +1057,22 @@ def parse_goal_entry(records: Iterable[Mapping[str, object]], spec: HarnessSpec)
 
 
 def parse_continuations(records: Iterable[Mapping[str, object]], spec: HarnessSpec) -> int | None:
-	"""Turns the session ran, where the harness numbers them.
+	"""Turns the session ran, where the harness numbers them (FR-153).
 
-	``dsh`` writes ``turn/start``; ``pi`` writes nothing comparable, so this is ``None``
-	there rather than a fabricated ``1``.
+	``dsh`` writes ``turn/start`` and the count is the number of continuations a goal
+	session took; a harness with no turn boundary reports ``None`` rather than a
+	fabricated ``1``, because "this session looped once" and "nobody counted" are the
+	two facts FR-144's degradation turns on.
+
+	The event name is read from ``spec.continuation_event`` rather than written here.
+	It was a literal until 2026-10-15, which made this the one parser in this module
+	that did not take its fact from the table -- and a literal cannot report *absent*,
+	so every harness with no turn boundary would have been counted as one that had
+	none of them. A spec that declares no event gets ``None`` by construction.
 	"""
-	_ = spec
-	turns = sum(1 for record in records if record.get("type") == "turn/start")
+	if not spec.continuation_event:
+		return None
+	turns = sum(1 for record in records if record.get("type") == spec.continuation_event)
 	return turns or None
 
 

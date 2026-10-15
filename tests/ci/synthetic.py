@@ -580,6 +580,12 @@ def base_spec(
 		usage_reduce="sum",
 		goal_event_types=("goal/created",),
 		goal_entry=GoalEntry.PROMPT,
+		# The script writes a `turn/start` record (see the record block below), so the
+		# spec declares it. Before `continuation_event` existed the parser hardcoded this
+		# name and the declaration was unnecessary; now a spec that emits turns and does
+		# not name them reports `None`, which is the honest reading of a table that does
+		# not claim to number them.
+		continuation_event="turn/start",
 		supports_context_file_flag=True,
 		model_error_pattern="not found. Use --list-models",
 		# Confinement by tool allowlist, exactly as the default harness confines a producer:

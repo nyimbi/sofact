@@ -2216,7 +2216,18 @@ tested, not assumed.
    turn, `finish_reason: completed`. Goal mode is therefore *available and
    model-discretionary* (FR-153, R25). What remains open is not whether the
    capability exists but whether entry can be **forced** and continuations
-   observed;
+   observed. **The reading now exists (2026-10-15, ADR-0069):** `sofact goalmode`
+   folds each dispatch's recorded entry and turn count into an answer, over two
+   fields — `goal_entry_observed` and `continuations_observed` — that the adapter
+   had been writing and nothing in `src/` read. It will not take a goal *mode* for
+   a forced *entry* (the mode is the probe's pre-session prediction, and it holds on
+   exactly the projects that have not exercised the capability), so it discharges
+   FR-153 only on an observed forced entry, and it reports an unmeasured turn count
+   as `None` rather than `1`, which is what `pi`, `claude` and `opencode` — none of
+   which writes a turn boundary — would otherwise be reported as. **The probe itself
+   remains open:** a fold can report that entry was never forced; it cannot force it,
+   which needs a live run against a harness whose argv enters goal mode by
+   construction, and no configured spec does that today;
    **(b)** the FR-135 matrix, **discovered at runtime** (FR-148): goal mode present;
    unattended operation; budget enforcement; telemetry source and event taxonomy;
    sandboxability (and what `dsh`'s default composition actually permits);

@@ -3140,6 +3140,94 @@ async def _attempts(svc: FactoryService) -> None:
 			typer.echo(f"      {clause_id[:8]}  {count} attempt(s)")
 
 
+@app.command(name="goalmode")
+def goalmode(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Report whether goal entry was forced and continuations observed (§20.3 item 6a)."""
+	asyncio.run(_goalmode(_service(_home_of(ctx, home))))
+
+
+async def _goalmode(svc: FactoryService) -> None:
+	"""§20.3 item 6a, read from the dispatch history rather than from documentation.
+
+	The exit code carries the finding. A project whose goal dispatches all show a prompt
+	entry has the *degraded* mode FR-144 requires be reported, and that is worth a
+	non-zero status: §20.3 calls this probe blocking for the whole Mode G design, and a
+	verb that printed the bad news and exited 0 would let a pipeline treat an unforced
+	goal mode as a pass.
+	"""
+	report = await svc.goal_mode_report()
+	if not report.rows:
+		typer.secho(
+			"no dispatch has been recorded, so §20.3 item 6a is unmeasured rather than "
+			"answered (FR-144, FR-153).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+
+	typer.secho("\ngoal mode — §20.3 item 6a", fg="cyan", bold=True)
+	typer.echo(
+		f"  {len(report.rows)} dispatch(es), {len(report.witnessed)} with a session record "
+		f"read, {len(report.goal_dispatches)} sent as a goal"
+	)
+	# The contradiction is printed before the counts, because it is the finding: a mode
+	# of `goal` beside an entry of `prompt` is the capability the probe claimed and the
+	# session did not exercise (FR-153).
+	for row in report.contradictions:
+		typer.secho(
+			f"  {row.harness}: dispatched as goal, entry {row.entry.value if row.entry else '?'} "
+			"— asked, not forced (FR-153)",
+			fg="red",
+		)
+	if report.forced_entries:
+		typer.secho(
+			f"  {len(report.forced_entries)} session(s) show a forced entry",
+			fg="green",
+		)
+	else:
+		typer.secho(
+			"  no session shows a forced entry, so entry is not observed to be forcible on "
+			"this configuration (FR-153). That is [S21] reproduced, not a proof that it "
+			"cannot be — the mechanism may exist on a harness this project never dispatched.",
+			fg="yellow",
+		)
+
+	# The continuation line states its own coverage, for the reason the token line does:
+	# a harness that writes no turn boundary reports None, and a mean that treated those
+	# as single-turn would report the cheapest goal behaviour as the observed one.
+	coverage = report.continuation_coverage
+	if report.mean_continuations is None:
+		typer.secho(
+			"  continuations unmeasured: no dispatched harness numbers its turns "
+			"(FR-153, NFR-024).",
+			fg="yellow",
+		)
+	else:
+		assert coverage is not None, "a measured mean implies a witnessed session"
+		typer.echo(
+			f"  {report.total_continuations} turn(s) over {coverage[0]} of {coverage[1]} "
+			f"witnessed session(s); mean {report.mean_continuations:.2f} per measured session"
+		)
+		if coverage[0] < coverage[1]:
+			typer.secho(
+				f"  {coverage[1] - coverage[0]} session(s) ran on a harness that writes no "
+				"turn boundary, so the mean is over the harnesses that number their turns "
+				"(NFR-024).",
+				fg="yellow",
+			)
+
+	discharged = report.discharged
+	if discharged:
+		typer.secho(f"\n  discharged: {', '.join(discharged)}", fg="green")
+	else:
+		typer.secho(
+			f"\n  not discharged: {', '.join(report.not_implemented)}. FR-153 requires a "
+			"session that *entered* goal mode, so a project that only ever asked has not "
+			"carried it out (NFR-024).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+
+
 @app.command(name="contract")
 def build_contract(
 	ctx: typer.Context,

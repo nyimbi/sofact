@@ -569,6 +569,34 @@ class TestParseGoalEntryAndTurns:
 		assert parse_continuations(rows, DSH_SPEC) == 2
 		assert parse_continuations(_records({"type": "message"}), DSH_SPEC) is None
 
+	def test_the_turn_event_is_read_from_the_spec_not_hardcoded(self) -> None:
+		"""A harness that names a different turn event must have *that* one counted.
+
+		The event name was a literal inside the parser until 2026-10-15, which made this
+		the one reader in this module that did not take its fact from the table. A test
+		that only ever passed ``DSH_SPEC`` could not tell the two apart, because ``dsh``
+		happens to write the name the literal spelled.
+		"""
+		spec = HarnessSpec(name="t", argv=("true",), continuation_event="round/begin")
+		rows = _records({"type": "round/begin"}, {"type": "turn/start"})
+		assert parse_continuations(rows, spec) == 1, (
+			"the declared event is counted and the undeclared one is not"
+		)
+
+	def test_a_spec_that_numbers_no_turns_reports_None_even_where_they_are_present(
+		self,
+	) -> None:
+		"""Empty ``continuation_event`` is a measurement, not a parser that found nothing.
+
+		``pi``, ``claude`` and ``opencode`` declare none, so a record that happens to carry
+		a ``turn/start`` must not be read as a continuation on them — the spec says the
+		harness does not number its turns, and that is the fact the count reports.
+		"""
+		spec = HarnessSpec(name="n", argv=("true",))
+		assert spec.continuation_event == "", "the default is no turn boundary"
+		rows = _records({"type": "turn/start"}, {"type": "turn/start"})
+		assert parse_continuations(rows, spec) is None
+
 
 # --------------------------------------------------------------------------- #
 # the record source: a file a harness wrote, or a command that prints one
