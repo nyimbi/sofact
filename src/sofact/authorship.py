@@ -78,6 +78,7 @@ def installed_package_root() -> Path:
 	"""
 	return Path(__file__).resolve().parent
 
+
 MODEL_REACHING_MODULES: Final[frozenset[str]] = frozenset(
 	{
 		"sofact.llm",
@@ -371,7 +372,9 @@ def governance_is_absent(*, package_root: Path) -> bool:
 	return not flagged
 
 
-def detect_authorship(*, package_root: Path) -> tuple[
+def detect_authorship(
+	*, package_root: Path
+) -> tuple[
 	tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...],
 	bool,
 ]:

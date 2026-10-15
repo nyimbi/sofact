@@ -265,7 +265,9 @@ class TestTheScannerSeesEveryFormOfImport:
 		assert "sofact.views" in closure, "`from . import views` names the sibling submodule"
 		assert reaching == ("sofact.llm",)
 
-	def test_a_relative_import_in_a_nested_package_stays_in_that_package(self, tmp_path: Path) -> None:
+	def test_a_relative_import_in_a_nested_package_stays_in_that_package(
+		self, tmp_path: Path
+	) -> None:
 		"""The level arithmetic, held against a package that is not the top one.
 
 		``from .views import X`` inside ``sofact.sub.thing`` means ``sofact.sub.views``.

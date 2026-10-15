@@ -181,8 +181,12 @@ a second. FR-124's missing half was named in its *evidence* cell
 container boundary`) while its *verdict* cell read bare `**Implemented**`, so the row was
 Partly by what it said and Implemented by the one cell the rule's statement named. Two
 rows, not one, which is exactly the 2-row gap between the line and the table. Both are
-Partly now, the line and the table are one number, and that number is asserted against the
-119 row count rather than trusted. **FR-124's verdict cell was brought into line on
+Partly now, the line and the table are one number, and that number is **derived from the
+rows by a test rather than trusted** — `TestTheRoadmapTallyIsDerivedFromItsRows` in
+`tests/ci/test_docs.py` reads every row, classifies it by the rule below, and fails when the
+published table disagrees (ADR-0065). Until 2026-10-15 that sentence was a claim about a
+check that did not exist, which is the one documentation claim that goes false silently.
+**FR-124's verdict cell was brought into line on
 2026-10-15**, in the refresh that found the rule's statement was narrower than the
 classifier behind it: it now reads `**Implemented for the ceiling half …; packaging and
 egress are not read from the topology**`, which is the shape FR-106 already had. The count
@@ -239,8 +243,10 @@ is a real limitation and the verdict says so.
 The `Implemented` count includes FR-152's row, whose cell reads
 `**Implemented (as a documented refusal)**` — the one verdict spelled with a
 qualification rather than as the bare word, and so the one a prefix match would silently
-drop. That is why the script's total is asserted against the row count rather than
-trusted.
+drop. That is why the tally is **derived from the row count by a test** (ADR-0065) rather
+than trusted, and why the derivation splits each row on the pipe rather than matching it
+with a regex: an evidence cell contains `|`, so a non-greedy pattern reads 77 rows where the
+table has 119.
 
 | Verdict | n |
 | --- | --- |

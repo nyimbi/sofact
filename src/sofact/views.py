@@ -3405,8 +3405,7 @@ class AuthorshipCheck(View):
 				)
 			else:
 				lines.append(
-					f"  {finding.surface.value}: REACHES a model via "
-					+ ", ".join(finding.reaching)
+					f"  {finding.surface.value}: REACHES a model via " + ", ".join(finding.reaching)
 				)
 		lines.append(f"FR-055: {self.governance_reason}")
 		return "\n".join(lines)
