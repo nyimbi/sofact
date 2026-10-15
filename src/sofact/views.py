@@ -32,6 +32,8 @@ __all__ = [
 	"ATTEMPT_TELEMETRY_REQUIREMENTS",
 	"AUDIT_REQUIREMENTS",
 	"AUDIT_SAMPLE_FLOOR",
+	"AUTHORSHIP_READING",
+	"AUTHORSHIP_REQUIREMENTS",
 	"CHANGE_COST_AXIS",
 	"CHANGE_COST_BASELINE_UNMEASURED",
 	"CHANGE_COST_NOT_A_VERIFICATION",
@@ -57,11 +59,15 @@ __all__ = [
 	"THETA_GATE_BUILT",
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
+	"TUNED_MODEL_UNREACHABLE",
 	"VERDICT_SURFACES",
 	"AdversarialAuditReport",
 	"Assumption",
 	"AttemptTelemetry",
 	"AttemptTelemetryReport",
+	"AuthorshipCheck",
+	"AuthorshipFinding",
+	"AuthorshipSurface",
 	"AutonomyLevel",
 	"CapabilityFinding",
 	"ChangeCostReport",
@@ -3211,6 +3217,199 @@ class AdversarialAuditReport(View):
 		the two apart.
 		"""
 		return not self.exploited
+
+
+# --------------------------------------------------------------------------- #
+# FR-052-056, FR-134 — the factory's relationship to models it did not write
+# --------------------------------------------------------------------------- #
+
+AUTHORSHIP_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-053", "FR-055", "FR-134")
+"""What one authorship check can carry out.
+
+Three requirements with one subject: a model the factory trained or tuned must never be
+the thing that *judges* (FR-053's oracle, FR-134's contract), and the factory must never
+act on another party's behalf (FR-055). FR-052, FR-054 and FR-056 are absent because they
+are not claims about *this* build's code — FR-052 and FR-054 are deployment decisions about
+what a tuning run would target and what a vendor ships, and FR-056 needs a staging
+sequence that does not exist. A check that listed them would report three requirements
+discharged by a module that never looked at any of them, which is the defect
+:data:`ORACLE_AUDIT_REQUIREMENTS` names one section up.
+"""
+
+AUTHORSHIP_READING: Final[str] = (
+	"reachability = whether the transitive import closure of the authoring path contains "
+	"any module that can talk to a model. The claim is *cannot reach*, not *does not call*: "
+	"a guard that counted call sites would pass the moment someone added one, while an "
+	"unreachable module cannot call out however the code above it changes."
+)
+"""FR-053/FR-134's reading rule, stated once so the report and its reader use one sentence."""
+
+TUNED_MODEL_UNREACHABLE: Final[str] = (
+	"FR-053 and FR-134 forbid a fine-tuned model from being an oracle or a contract author, "
+	"and the factory holds no tuning capability (FR-052's target is a deployment's choice) "
+	"so there is no tuned model to name. What this build can establish is the structural "
+	"half: the paths that write a clause's words and the paths that assign its oracle "
+	"cannot reach a model at all."
+)
+"""Why the check is structural rather than a model-identity assertion."""
+
+
+class AuthorshipSurface(StrEnum):
+	"""The two paths FR-053 and FR-134 name, each with its own closure.
+
+	Two surfaces rather than one because the requirements are two: FR-053 constrains what
+	an *oracle* may be, FR-134 constrains who may *author a contract*. They share an
+	implementation today and that is a fact about this tree, not a fact about the rule — a
+	build that let a model propose oracles but not contracts would satisfy one and violate
+	the other, and a single check could not say which.
+	"""
+
+	CONTRACT_AUTHORING = "contract_authoring"
+	"""Where a clause's statement and kind are decided (FR-134)."""
+
+	ORACLE_AUTHORING = "oracle_authoring"
+	"""Where a clause's oracle is chosen or manufactured (FR-053)."""
+
+
+class AuthorshipFinding(View):
+	"""One surface, its import closure, and whether a model is reachable from it.
+
+	``reaching`` is the finding and ``closure`` is the evidence, both recorded: a reader
+	told only "not reachable" has to re-derive the closure to check the claim, and the
+	closure is what moves when someone adds an import three modules down. The list is
+	sorted so two runs over one tree produce one document, which is what makes it
+	diffable — an unordered set would print differently and a diff would be noise.
+	"""
+
+	surface: AuthorshipSurface
+	closure: tuple[str, ...]
+	"""The transitive ``sofact.*`` modules reachable from this surface, sorted."""
+
+	reaching: tuple[str, ...]
+	"""Modules in the closure that can reach a model, sorted. Empty is the requirement met.
+
+	*Can reach a model* rather than *imports a model client*: the closure is transitive, so
+	the check is whether any module the surface depends on — however deep — imports
+	:mod:`sofact.llm`, ``httpx``, or anything else that opens a socket. A surface that
+	imported a helper which imported the client would be reported here, which a
+	direct-import check would miss.
+	"""
+
+	@property
+	def clean(self) -> bool:
+		"""Whether the surface cannot reach a model, which is FR-053/FR-134 satisfied."""
+		return not self.reaching
+
+
+class AuthorshipCheck(View):
+	"""FR-053/FR-134's measurement over the tree, with FR-055's governance boundary.
+
+	FR-055 is a different kind of claim from the other two and it is carried here rather
+	than in a report of its own because the honest finding about it is a *structural* one:
+	the factory must not autonomously set prices, accept customers, sign agreements, move
+	money, or make commitments. That is not a guard to write, it is a capability that must
+	be absent — and absence is checkable the same way reachability is. So the finding is a
+	statement of what the tree does not contain, and ``governance_absent`` says whether the
+	check found it absent rather than whether it looked.
+	"""
+
+	id: UUID7
+	checked_at: datetime
+	findings: tuple[AuthorshipFinding, ...]
+
+	governance_absent: bool
+	"""Whether no module in the tree reaches a payment, agreement or pricing interface.
+
+	``True`` means the check looked and found none. It is a *negative* finding and the
+	type says so by being a boolean beside a ``governance_reason`` rather than by being an
+	empty tuple: an empty tuple of findings cannot distinguish "nothing found" from
+	"nothing looked for".
+	"""
+
+	governance_reason: NonEmptyStr
+	"""Why the boundary is absent, in the tree's own terms rather than in a promise."""
+
+	@model_validator(mode="after")
+	def _every_surface_is_measured_once(self) -> Self:
+		if not self.findings:
+			raise ValueError(
+				"an authorship check with no findings checked nothing: FR-053 and FR-134 "
+				"are claims about two named surfaces, and a check that measured neither "
+				"would report them clean by never looking (NFR-024)"
+			)
+		seen = [f.surface for f in self.findings]
+		duplicates = sorted({s.value for s in seen if seen.count(s) > 1})
+		if duplicates:
+			raise ValueError(
+				f"surface(s) {duplicates} measured more than once: two findings for one "
+				"surface means the reader picks, and the pick is the verdict"
+			)
+		return self
+
+	def finding(self, surface: AuthorshipSurface) -> AuthorshipFinding | None:
+		"""This surface's finding, or ``None`` when the check did not measure it."""
+		return next((f for f in self.findings if f.surface is surface), None)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this check actually carried out, which may be none.
+
+		The rule :attr:`OracleAuditReport.discharged` states: a check that measured no
+		surface claims nothing. Every surface is required by the type, so the empty case is
+		reachable only by a caller constructing the model with an empty tuple, which the
+		validator refuses — the property is here because the *reader* is a report that has
+		to print the same three-way distinction as every other measurement in this file.
+		"""
+		if not self.findings:
+			return ()
+		covered = {f.surface for f in self.findings}
+		carried: list[str] = []
+		if AuthorshipSurface.CONTRACT_AUTHORING in covered:
+			carried.append("FR-134")
+		if AuthorshipSurface.ORACLE_AUTHORING in covered:
+			carried.append("FR-053")
+		if self.governance_absent:
+			carried.append("FR-055")
+		return tuple(name for name in AUTHORSHIP_REQUIREMENTS if name in carried)
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-053/FR-055/FR-134 this check did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in AUTHORSHIP_REQUIREMENTS if name not in discharged)
+
+	@property
+	def clean(self) -> bool:
+		"""Whether every measured surface is model-free and the boundary is absent.
+
+		Says only that the surfaces *cannot reach* a model, never that a tuned model was
+		checked for: nothing in this build tunes one (FR-052), so a claim that a tuned model
+		is not an oracle would be a claim about a thing that does not exist. The
+		distinction is what :data:`TUNED_MODEL_UNREACHABLE` states, and it is why the
+		report prints it beside the verdict.
+		"""
+		return all(f.clean for f in self.findings) and self.governance_absent
+
+	@property
+	def rendered(self) -> str:
+		"""The verdict, the evidence, and the structural limit, in the report's own words."""
+		lines = [
+			f"FR-053/FR-134: {len(self.findings)} authoring surface(s) measured, "
+			f"{sum(1 for f in self.findings if f.clean)} model-free"
+		]
+		for finding in self.findings:
+			if finding.clean:
+				lines.append(
+					f"  {finding.surface.value}: cannot reach a model "
+					f"({len(finding.closure)} module(s) in the closure)"
+				)
+			else:
+				lines.append(
+					f"  {finding.surface.value}: REACHES a model via "
+					+ ", ".join(finding.reaching)
+				)
+		lines.append(f"FR-055: {self.governance_reason}")
+		return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -7429,6 +7628,7 @@ class LedgerKind(StrEnum):
 	GATE_COST_RECORDED = "gate_cost.recorded"
 	ORACLE_AUDITED = "oracle.audited"
 	ADVERSARIAL_AUDITED = "adversarial.audited"
+	AUTHORSHIP_CHECKED = "authorship.checked"
 	ESCAPE_RECORDED = "escape.recorded"
 	ESCAPE_OVERRIDE_RECORDED = "escape_override.recorded"
 
@@ -7705,6 +7905,16 @@ class ProjectState(View):
 	visible. :meth:`latest_adversarial_audit` reads the most recent for a report.
 	"""
 
+	authorship_checks: tuple[AuthorshipCheck, ...] = ()
+	"""Every authorship check the log records, oldest first (FR-053, FR-055, FR-134).
+
+	Appended and never keyed, and for a reason the other two audit series do not share: the
+	subject is the *tree*, which changes under the check rather than around it. Keying to the
+	latest would report the closure measured today while the reader believes it is reading
+	the closure that held when the contract was authored — the stale-evidence mistake FR-006
+	refuses one phase over. :meth:`latest_authorship_check` reads the most recent.
+	"""
+
 	escapes: tuple[EscapeEvent, ...] = ()
 	"""Every escape the operator recorded, oldest first (FR-021).
 
@@ -7742,6 +7952,18 @@ class ProjectState(View):
 		"""
 		matching = [a for a in self.adversarial_audits if a.contract_id == contract_id]
 		return matching[-1] if matching else None
+
+	def latest_authorship_check(self) -> AuthorshipCheck | None:
+		"""The most recent authorship check, if one ran (FR-053, FR-055, FR-134).
+
+		**Not keyed by contract**, unlike :meth:`latest_oracle_audit` and
+		:meth:`latest_adversarial_audit`, and the difference is the subject rather than an
+		oversight: those two measure an oracle set, which belongs to one contract, while
+		this measures the package's own import graph. Two contracts in one project share one
+		tree, so a per-contract key would duplicate one measurement and imply the two could
+		differ.
+		"""
+		return self.authorship_checks[-1] if self.authorship_checks else None
 
 	def latest_escape_override(self, lane: ModuleClass) -> EscapeOverride | None:
 		"""The most recent override of one lane's escape budget, if any (FR-023).

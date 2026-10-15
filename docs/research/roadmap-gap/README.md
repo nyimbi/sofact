@@ -37,7 +37,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-036 per-language mutation/property tooling | **Partly** (2026-10-14, ADR-0061) | The **per-language manufacturing** half is built and D5 is resolved: `MANUFACTURE_SPECS` names `python`, `typescript` and `rust` as `ManufactureSpec` data, `SOFACT_MANUFACTURE` replaces the table wholesale, and an unknown backend is refused by name rather than falling back to Python. Each backend declares which ranks it builds — Python 1/3/5, TypeScript 3/5, Rust 3 — and refuses the rest by name. **Not built:** no per-language *mutation* engine. The strength instrument is Python-only (`ast`), so `_measured_strengths` filters a module's sealed files to `.py` and a TypeScript or Rust module renders "not measured" rather than a rate over a file the engine did not read. |
 | FR-038 verifier/executor import direction | **Implemented** | `test_verifier_cannot_reach_the_executor` (`test_verification.py:72`) scans this file's imports. |
 | FR-049 model-agnostic | **Implemented** | `SOFACT_MODEL` / `--model` resolved by the harness registry; `test_the_probe_reports_the_model_it_measured` (`test_cli.py:406`). |
-| FR-052–056 fine-tuning, monetization | **Not built** | Prose only (§18.3, §18.5). |
+| FR-052–056 fine-tuning, monetization | **Partly** (2026-10-15, ADR-0064) | FR-053 and FR-055 are built; FR-052, FR-054 and FR-056 are not, and the cell names them rather than counting the row complete on two of six. **FR-053** (a fine-tuned model must never be an oracle) and **FR-055** (the factory must not set prices, accept customers, sign agreements, move money or make commitments) share one shape with FR-134 and one instrument: `sofact.authorship` walks the **transitive import closure** of the two authoring surfaces and reports whether anything in it can talk to a model, and FR-055 is measured in two halves — the import half (a module importing `stripe` could charge a card) and the kind half (FR-002 makes the ledger the only mutable thing, so a `LedgerKind` named for an act *is* the factory having the act). `sofact authorship` exits non-zero on either. **Not built:** FR-052's tuning target and FR-054's recipe-not-weights rule are deployment decisions no module in this build can discharge — the factory holds no tuning capability, which is why the check establishes the *structural* half only and `TUNED_MODEL_UNREACHABLE` is printed beside every verdict. FR-056 needs a staging sequence (shadow → advisory → gated) that does not exist here. |
 | FR-057 envelope refusal | **Implemented** (2026-10-13, ADR-0039) | `DeliveryEnvelope`/`DimensionBound` (`views.py`), `load_envelope`/`measure` (`envelope.py`), the `within_delivery_envelope` check in P3's gate (`decomposition.py`), `SOFACT_ENVELOPE` and `sofact envelope` (`cli.py`). Refuses the **ceiling** and names the dimension; a dimension below its floor is reported and passes, because §1.3's numbers are targets and §1.4 wants small deliveries buildable. Four of eight dimensions are measured at P3; the rest are named as unmeasured with what would have to exist. `TestTheGateRefusesAnOverScopedProposal` (`test_envelope.py`), `TestTheEnvelopeVerb` (`test_cli.py`). |
 | FR-058 single adapter interface | **Implemented** | `ConfiguredHarnessAdapter` (`harness.py:819`), three specs; `test_every_shipped_harness_has_a_spec` (`test_harness.py:102`). |
 | FR-059 harness cannot reach oracle corpus/credentials | **Implemented where a boundary holds** (2026-10-14, ADR-0060) | The read half is now **measured**, not asserted: the detector plants a canary in each subtree named to deny and watches a child fail to open it, so "denied" means a file that exists was unreadable rather than a rule that was written. `DeploymentBoundary.deny_read` names the denied **subtree roots** — not the canary files — because enforcement rebuilds a profile from that tuple and a file-level deny would leave the subtree it sits in readable. `FactoryService.boundary` passes the factory home, which holds the ledger, the holdout scenarios and the credentials, and the workspace usually sits inside it, so the deny-then-re-allow ordering is exercised by one probe rather than one half being assumed from the other. A subtree that turned out readable makes the boundary `enforced=False` **even when writes held**: a producer that can read the holdout has the answer whatever it can write, so crediting write confinement while the answer key stayed legible would raise a ceiling on half a property. **The limit, stated:** this holds only where a mechanism confines reads — on a host with none, the row is a measured absence rather than a guarantee, and the prompt-text half (`planner.py:127`) is unchanged. `deny_read` empty means *not measured*, which is recorded as such and is not the same as measured-and-open. |
@@ -101,7 +101,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-117–121 P8 delivery, deploy gate, handover | **Partly** (2026-10-13, ADR-0040, ADR-0048) | **FR-117, FR-118, FR-119 and FR-121 are implemented.** `DeliveryReport`/`DeliveryGate`/`Handover` (`views.py`), `artifact`/`chain`/`verified_and_unverified`/`ceiling`/`handover`/`report` (`delivery.py`), `render_delivery`/`current_delivery`/`delivery_gate`/`approve_deploy` (`service.py`), `sofact deliver`/`sofact deploy` (`cli.py`); `TestTheDeliverVerb`/`TestTheDeployVerb` (`test_cli.py`, 11 tests), `test_delivery.py` (122 tests), `test_api.py` (33 tests). **FR-120's factory surface is built** (2026-10-13, ADR-0048): `sofact.api` publishes ten read-only operations behind one closed `MachineEnvelope`, `sofact api <operation>`/`--list` is the verb, and the four §3.3 human gates are refused by name with the human verb to use. **The delivered-system half is not built and is recorded as a producer obligation** — no oracle in O1-O8 observes whether an artefact is machine-usable, so the report names it in a `machine_surface_not_verified` check and `DELIVERY_REQUIREMENTS` keeps it in the list rather than dropping it. FR-117's image and IaC are reported as decisions (ADR-0005, FR-124) and the artefact check is scoped to the two the factory owes — **and the factory now writes those two** (2026-10-13, ADR-0044): `sofact.writing` renders `DELIVERY.md` and `RUNBOOK.md` deterministically from the report, `render_delivery` computes the delivery as a fixed point (render, write, render until a render agrees with disk), and `sofact deliver` requires `--root`. Before this, `sofact deliver` could not succeed on a fresh project: the factory reported its own output as missing. |
 | FR-122 autonomy per phase and per module, lower governs | **Partly** (2026-10-13, ADR-0040/0041) | `delivery.module_autonomy` takes the **minimum** of `Contract.ceiling` (the weakest oracle, FR-007) and every module's `MODULE_CLASS_CEILING`, so a G7 module lowers a delivery the contract alone would have raised. `test_a_module_class_can_lower_the_delivery_below_the_contract`, `test_the_lowest_module_class_governs_when_several_disagree` (`test_delivery.py`). **No per-*phase* computation**, and nothing reports it at the gate rather than in the delivery report. |
 | FR-123 Mode G delivery caps at L2 and must be reported | **Implemented** (2026-10-13, ADR-0041) | `MODE_G_CEILING` (`views.py`) is applied **last and unconditionally** in `delivery.ceiling`, including when no decomposition exists — a cap that failed open on missing input would be no cap. The report carries **two** numbers, `autonomy` (capped) and `module_autonomy` (not), because FR-123 asks for the *distinction*: one number cannot state "modules at L4 internally, delivery at L2". `autonomy_capped_for_mode_g` is a gate check and `sofact deliver` prints both lines. Canaried by removing the cap: `test_a_delivery_is_never_above_l2` and `test_the_cap_applies_with_no_decomposition` both fail. |
-| FR-124 per-deployment topology ceilings | **Implemented** (2026-10-13, ADR-0045) | `DeploymentTopology`/`TOPOLOGY_ISOLATION`/`TOPOLOGY_MODIFIER`/`topology_ceiling`/`topology_refusal`/`HIGHEST_GRANTABLE` (`views.py`), `topology_statement`/`refused_by_topology` plus the `topology_ceiling_applied` and `topology_refuses_l4_at_a_degraded_deployment` gate checks (`delivery.py`), `SOFACT_TOPOLOGY`/`--override-topology` (`cli.py`), the two fields on `DeliveryReport` and `VerificationReport`, and the deployment lines in `DELIVERY.md`/`RUNBOOK.md` (`writing.py`). §5.4's modifier is a delta applied to the **modules'** number and not to the delivery's (FR-123's L2 cap is already at or below every topology's). FR-031's refusal is per module class and is a **failed machine check**, so `approve_deploy` refuses it with no second enforcement path; the override is a **name**, not a flag. T4 is reported as baseline with its unlock named rather than applied, because the blast bound it unlocks is one SoFact does not hold (FR-027). `TestTheTopologyIsATypeNotAComment`, `TestTheTopologyRefusesRatherThanDowngrades`, `TestTheRefusalReachesTheGate`, `TestTheReportStatesWhereItRan` (`test_delivery.py`), `TestTheTopologySeam` (`test_cli.py`, 5 tests). **Still open**: FR-040's "first-class configuration input" is satisfied for the ceiling and, since ADR-0060, for the *boundary* — the topology no longer decides whether a confinement layer exists, a measurement does, and that measurement is applied at both launch points. What remains is that nothing reads the topology to change **packaging** or to vary **egress** beyond the boundary's own profile, so the row is Partly on that half alone. |
+| FR-124 per-deployment topology ceilings | **Implemented for the ceiling half (2026-10-13, ADR-0045); packaging and egress are not read from the topology** | `DeploymentTopology`/`TOPOLOGY_ISOLATION`/`TOPOLOGY_MODIFIER`/`topology_ceiling`/`topology_refusal`/`HIGHEST_GRANTABLE` (`views.py`), `topology_statement`/`refused_by_topology` plus the `topology_ceiling_applied` and `topology_refuses_l4_at_a_degraded_deployment` gate checks (`delivery.py`), `SOFACT_TOPOLOGY`/`--override-topology` (`cli.py`), the two fields on `DeliveryReport` and `VerificationReport`, and the deployment lines in `DELIVERY.md`/`RUNBOOK.md` (`writing.py`). §5.4's modifier is a delta applied to the **modules'** number and not to the delivery's (FR-123's L2 cap is already at or below every topology's). FR-031's refusal is per module class and is a **failed machine check**, so `approve_deploy` refuses it with no second enforcement path; the override is a **name**, not a flag. T4 is reported as baseline with its unlock named rather than applied, because the blast bound it unlocks is one SoFact does not hold (FR-027). `TestTheTopologyIsATypeNotAComment`, `TestTheTopologyRefusesRatherThanDowngrades`, `TestTheRefusalReachesTheGate`, `TestTheReportStatesWhereItRan` (`test_delivery.py`), `TestTheTopologySeam` (`test_cli.py`, 5 tests). **Still open**: FR-040's "first-class configuration input" is satisfied for the ceiling and, since ADR-0060, for the *boundary* — the topology no longer decides whether a confinement layer exists, a measurement does, and that measurement is applied at both launch points. What remains is that nothing reads the topology to change **packaging** or to vary **egress** beyond the boundary's own profile, so the row is Partly on that half alone. |
 | FR-125 G1–G2 target classes, class distribution reported | **Implemented** | `class_distribution` (`views.py:650`) reported in the gate (`decomposition.py:484`); `test_a_sound_proposal_passes_every_machine_check` (`test_decomposition.py:291`). |
 | FR-126 G7 human-authored | **Implemented** | `MODULE_CLASS_CEILING` (`views.py:478`); `test_g7_is_the_only_l1_class` (`test_decomposition.py:217`), `test_every_g7_marker_classifies_as_g7` (`:204`). |
 | FR-127 intent traceability graph first-class | **Implemented** (2026-10-14, ADR-0058) | `intent.py` — `build_graph`, `requirement_map`, `attributions_for` — plus `IntentNode`/`IntentEdge`/`IntentHop`/`IntentNodeKind`/`IntentGraph`/`EscapeAttribution` (`views.py`), `intent_graph`/`attributions` (`service.py`), `sofact intent` (`cli.py`), the `intent` machine operation (`api.py`), and an `## Escape attribution` section in `DELIVERY.md`. **The graph is the structure and FR-117's chain is a projection of it**: `delivery.chain` delegates to `IntentGraph.project()`, so the two cannot drift — a graph that merely rendered the same walk would have satisfied FR-127's word ("first-class component, not a derived report") and not its requirement. The three relations are held as directed edges because they are **not a chain in the log**: a clause cites its requirement (P2) and its module (P3) independently, so requirement and module are sibling branches and only the module reaches a step (P5), which makes the backward walk a hop instead of a search. `record_escape` gained a third refusal — a module the deployment did not build in that lane — because a module that did not break points the attribution at the wrong clause, which is worse than no attribution since it reads as a finding; `EscapeAttribution.narrowed` keeps an answer distinct from a candidate set on the type. `IntentGraph.gaps` reports a clause the decomposition dropped, which is a *worse* finding than an escape: nothing was built for it, so no escape can ever be attributed to it. 28 tests (`test_intent.py`), five canaries watched failing. |
@@ -111,7 +111,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-131 UUID7 + version hash per artifact | **Implemented** | `uuid7str` shim, `content_hash` (`views.py:117`); `test_uuid7_is_version_7` (`test_views.py:38`), `test_content_hash_is_stable_across_a_model_round_trip` (`:76`). |
 | FR-132 tiered declarative model config | **Partly** | One model per harness/dispatch (`--model`); no tier table, no per-phase default. |
 | FR-133 spend attributed per phase and per module | **Partly** | Attributed per **dispatch step and harness** (`DispatchRecord`, `views.py:1672`); not per phase, not per module, and not against an envelope. |
-| FR-134 fine-tuned models must not be oracles/contract authors | **Not built** | No fine-tuning; nothing to constrain. |
+| FR-134 fine-tuned models must not be oracles/contract authors | **Partly** (2026-10-15, ADR-0064) | The **contract-authoring half** is built and measured: `sofact.authorship` walks the transitive import closure of `sofact.elicitation`, `sofact.contract` and `sofact.views` and reports the modules in it that can reach a model — 4 modules, none of them reaching. Reachability rather than a call-site count, because a call-site check passes the moment someone adds one. `AuthorshipCheck`/`AuthorshipFinding`/`AuthorshipSurface` (`views.py`), `LedgerKind.AUTHORSHIP_CHECKED`, `FactoryService.check_authorship()`, `sofact authorship` (`cli.py`), `TestTheDetectorTellsAReachableSurfaceFromAnUnreachableOne` (27, `test_authorship.py`) with the canary driven against a tree whose `contract.py` imports `sofact.llm`. **Not built:** the *identity* half. FR-134 is about a **fine-tuned** model and this build holds no tuning capability (FR-052 makes the target a deployment's choice), so there is no tuned model to name and the check establishes only that the path cannot reach one at all. `TUNED_MODEL_UNREACHABLE` says so and the report prints it beside the verdict rather than in a footnote. |
 | FR-135 harness capability matrix | **Implemented** | `HarnessCapability` (`views.py:1416`, 10 rows); `test_probe_reports_every_capability_exactly_once` (`test_harness.py:442`). Rows `concurrent`, `bootstrap_empty_repo`, `goal_survives_compaction` are present and measured/attempted. |
 | FR-136 contract → goal plan compilation | **Implemented** | `compile_plan` (`planner.py:576`); `test_every_goal_spec_has_all_six_required_parts` (`test_planner.py:509`). |
 | FR-137 goals in the harness idiom, six-part shape | **Implemented** | `GoalStep`/`GoalSpec` (`views.py:1090`); same test as FR-136. |
@@ -176,10 +176,19 @@ line read `89/24/0/6` and the table `91/22/0/6`. The table was right. Re-running
 classifier over all 119 rows gives **91/22/0/6**, and the discrepancy is the counting
 rule the previous refresh stated but did not fully apply — it named **FR-106** as the one
 row whose cell leads with "Implemented" and then names a missing half, and **FR-124** is
-a second (`**Still open**: … nothing reads the topology to change packaging, egress, or
-the container boundary`). Two rows, not one, which is exactly the 2-row gap between the
-line and the table. Both are Partly now, the line and the table are one number, and that
-number is asserted against the 119 row count rather than trusted.
+a second. FR-124's missing half was named in its *evidence* cell
+(`**Still open**: … nothing reads the topology to change packaging, egress, or the
+container boundary`) while its *verdict* cell read bare `**Implemented**`, so the row was
+Partly by what it said and Implemented by the one cell the rule's statement named. Two
+rows, not one, which is exactly the 2-row gap between the line and the table. Both are
+Partly now, the line and the table are one number, and that number is asserted against the
+119 row count rather than trusted. **FR-124's verdict cell was brought into line on
+2026-10-15**, in the refresh that found the rule's statement was narrower than the
+classifier behind it: it now reads `**Implemented for the ceiling half …; packaging and
+egress are not read from the topology**`, which is the shape FR-106 already had. The count
+did not move — the classifier had been counting the row Partly through the `**Still open**`
+marker all along, which is why the statement and the arithmetic disagreed while the
+arithmetic and the table agreed.
 
 **The 2026-10-14 B2 unit (ADR-0061) moved two rows, and the arithmetic is stated
 because it is the only way to check it.** FR-008–011 and FR-036 leave **Not built** for
@@ -201,7 +210,21 @@ and the rate are built, and what is absent is the two techniques that need a mod
 invent code. So Partly rises by one and Not built falls by one: `91/25/0/3` becomes
 **`91/26/0/2`**, re-derived by re-running the classifier over all 119 rows. Implemented is
 unchanged, which is the honest direction: a row that leaves Not built for a half-built state
-does not become Implemented. The two remaining Not built rows are FR-052–056 and FR-134.
+does not become Implemented.
+
+**The 2026-10-15 FR-053/FR-055/FR-134 unit (ADR-0064) moved the last two rows, and it is the
+refresh that empties the Not built column.** FR-052–056 and FR-134 both leave **Not built**
+for Partly — each names a half that is not built and says so in its own verdict cell, which is
+this document's counting rule rather than a judgement about how much was done. For FR-134 that
+half is the *identity* half: the closure is measured and the model is not in it, but FR-134 is
+about a **fine-tuned** model and this build holds no tuning capability, so the check can
+establish only that the authoring path cannot reach a model at all. For FR-052–056 it is three
+of six requirements — FR-052, FR-054 and FR-056 are deployment decisions and a staging
+sequence that no module here discharges. So Partly rises by two and Not built falls by two:
+`91/26/0/2` becomes **`91/28/0/0`**, re-derived by re-running the classifier over all 119 rows.
+Implemented is again unchanged, and the direction is worth stating once more: a row that names
+a missing half is Partly however much of it is built, which is why two rows leaving the last
+column does not move a single row into the first.
 
 **The FR-103 cell is deliberately left as Partly rather than promoted.** Its first draft
 led with "Implemented for ranks 1, 3 and 5", and the classifier caught it on the run
@@ -222,23 +245,58 @@ trusted.
 | Verdict | n |
 | --- | --- |
 | Implemented | 91 |
-| Partly | 26 |
+| Partly | 28 |
 | Deferred (ADR-0024) | 0 |
-| Not built | 2 |
+| Not built | 0 |
 | **Total rows** | **119** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
 this counts the classification units rather than the FR identifiers inside them.
 
-**The counting rule, stated because the last refresh did not state it.** A row is
-**Partly** when its verdict cell names an unbuilt half, *including* a cell that leads
-with "Implemented" and then names the half that is missing — the document's own
-definition of Partly is "the named half that is missing", so the most honest rows in the
-table would otherwise be the ones counted as complete. Making that rule explicit moves
-exactly one row: **FR-106** (ADR-0052) leads with "Implemented for the context-assembly
-half" and names the holdout-existence half as not built, and is Partly. The previous
-refresh counted it as Implemented, which is why its total read 87/25/0/7 rather than
-88/25/0/6 on the same tree minus this unit's two rows.
+**The counting rule, stated because the last refresh did not state it, and corrected on
+2026-10-15 because the statement was narrower than the classifier it described.** A row is
+**Partly** when **either** of two things holds:
+
+1. **its verdict cell names an unbuilt half**, *including* a cell that leads with
+   "Implemented" and then names the half that is missing; or
+2. **its evidence cell carries the `**Still open**` marker**, which is how a row that was
+   promoted to a bare `**Implemented**` verdict and later found to have a half left states
+   that half without disturbing its stamp.
+
+The document's own definition of Partly is "the named half that is missing", so the most
+honest rows in the table would otherwise be the ones counted as complete. **Both disjuncts
+are load-bearing and the second is the one the previous statement omitted.** Re-running the
+two-disjunct rule over every committed revision reproduces the table each refresh published
+— `91/22/0/6` at ADR-0060, `91/24/0/4` at ADR-0061, `91/25/0/3` at ADR-0062, `91/26/0/2` at
+ADR-0063 — and the one-disjunct statement reproduces none of them: it reads every one of
+those tables one Implemented too high, because **FR-124** is counted Partly by disjunct 2
+alone. That is the check a stated rule needs: run it against the tables the refreshes
+actually published, not only against the current tree, or a rule that has quietly narrowed
+agrees with itself and disagrees with every number beside it.
+
+The two rows the rule was written for are **FR-106** (ADR-0052), which leads with
+"Implemented for the context-assembly half" and names the holdout-existence half as not
+built, and **FR-124**, whose half sat in its evidence cell under `**Still open**` while its
+verdict cell read bare `**Implemented**`. FR-124's verdict cell was rewritten on 2026-10-15
+to name the half in the cell the first disjunct reads, which moved the count by nothing —
+the count had already read the row as Partly through the second disjunct. Both are Partly
+either way, and that is the point: the two disjuncts exist because a row can state its half
+in two places, and a rule that reads one of them is a rule that agrees with its own
+arithmetic and disagrees with the table.
+
+**One published table does not reproduce, and it is the one that predates the rule's
+first disjunct being applied.** Running the two-disjunct rule over the pre-A2 tree
+(`c3c2057`) gives `90/23/0/6` where that refresh published `91/22/0/6`, and the single row
+responsible is **FR-059**, whose verdict cell read a bare `**Partly**` there. The refresh
+states its own convention in the paragraph above its table — it "classifies on the cell's
+**leading** token" — so its own rule counts FR-059 as Partly, and the table it published
+did not. That is the same staleness its prose confesses for nine other rows, found by the
+same recount that wrote the rule; ADR-0060 then promoted FR-059's cell to "Implemented
+where a boundary holds", which is the honest form for a capability that holds only where a
+mechanism confines reads, and every table from ADR-0060 onward reproduces exactly. The
+discrepancy is recorded rather than smoothed over because a rule validated only against the
+current tree would have looked clean at every refresh while the two oldest numbers in the
+file disagreed with the rows beside them.
 
 Closed since the 2026-10-13 refresh: **FR-154** (Partly → Implemented) and **FR-155**
 (Not built → Implemented), both 2026-10-14, ADR-0056; **FR-157** (Partly → Implemented),
@@ -248,7 +306,10 @@ could not connect to anything; **FR-091** (Partly → Implemented), 2026-10-14, 
 the row the audit **downgraded on inspection** for want of a test, restored now that the
 minimisation, its rule and its tests exist. **FR-012–015** (Not built → Partly),
 2026-10-15, ADR-0063 — the loop is built and the two model-needing techniques are reported
-as not attempted. The two remaining Not built rows are FR-052–056 and FR-134.
+as not attempted. **FR-052–056 and FR-134** (Not built → Partly), 2026-10-15, ADR-0064 — the
+authoring surfaces are measured as unable to reach a model, and the halves that remain (a
+tuning target, a recipe, a staging sequence, and the identity of a tuned model that does not
+exist) are named in their cells. **No row remains Not built.**
 
 NFRs are not tabulated: NFR-001–024 are retained verbatim from v0.1 and are not
 restated, so there is nothing to check them against. Of the new ones, **NFR-025

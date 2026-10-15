@@ -378,7 +378,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1617 tests
+uv run pytest -vxs tests/ci          # 1656 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

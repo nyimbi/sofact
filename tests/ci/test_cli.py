@@ -2860,3 +2860,46 @@ class TestTheChangeCostSeam:
 		assert result.exit_code == 1, result.output
 		assert "not a change-unit field" in result.output
 		assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------- #
+# FR-053, FR-055, FR-134 — the authorship verb
+# --------------------------------------------------------------------------- #
+
+
+class TestTheAuthorshipVerb:
+	"""The instrument has to be *reachable*, which is the check FR-159's row taught.
+
+	A correct instrument with no call site is a capability nobody can reach, so this verb
+	is tested as a surface rather than trusted as a wiring.
+	"""
+
+	def test_the_verb_reports_both_surfaces_and_exits_zero(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "authorship"])
+
+		assert result.exit_code == 0, result.output
+		assert "FR-053/FR-055/FR-134 authorship" in result.output
+		assert "contract_authoring" in result.output
+		assert "oracle_authoring" in result.output
+		assert "cannot reach a model" in result.output
+
+	def test_the_verb_prints_the_structural_limit_beside_the_verdict(self, home: Path) -> None:
+		"""The identity half is not established, and the screen says so.
+
+		FR-053 and FR-134 are about a **fine-tuned** model, and this build holds no tuning
+		capability, so a clean verdict is a statement about reachability rather than about
+		a tuned model's behaviour. A screen that printed only the green line would let an
+		operator read the stronger claim.
+		"""
+		result = RUNNER.invoke(app, ["--home", str(home), "authorship"])
+
+		assert "no tuning capability" in result.output
+		assert "cannot reach a model at all" in result.output
+
+	def test_the_verb_records_the_check_in_the_ledger(self, home: Path) -> None:
+		RUNNER.invoke(app, ["--home", str(home), "authorship"])
+
+		result = RUNNER.invoke(app, ["--home", str(home), "ledger"])
+
+		assert result.exit_code == 0, result.output
+		assert "authorship.checked" in result.output

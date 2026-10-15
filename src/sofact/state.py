@@ -21,6 +21,7 @@ from collections.abc import Iterable
 
 from sofact.views import (
 	AdversarialAuditReport,
+	AuthorshipCheck,
 	CompletionClaim,
 	Contract,
 	Cut,
@@ -148,6 +149,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	gate_costs: list[GateCost] = []
 	oracle_audits: list[OracleAuditReport] = []
 	adversarial_audits: list[AdversarialAuditReport] = []
+	authorship_checks: list[AuthorshipCheck] = []
 	escapes: list[EscapeEvent] = []
 	escape_overrides: list[EscapeOverride] = []
 
@@ -241,6 +243,13 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# plateau FR-015 warns about unobservable, which is the one thing the rate
 				# exists to make visible.
 				adversarial_audits.append(AdversarialAuditReport.model_validate(payload["audit"]))
+			case LedgerKind.AUTHORSHIP_CHECKED:
+				# Appended, never keyed: FR-053 and FR-134 are claims about the *tree*, and
+				# the tree moves. A check keyed to the latest would report the current
+				# closure while the reader believes it is reading the one that was measured
+				# when the contract was authored -- which is the stale-evidence mistake
+				# FR-006 refuses one phase over.
+				authorship_checks.append(AuthorshipCheck.model_validate(payload["check"]))
 			case LedgerKind.GATE_COST_RECORDED:
 				# Appended for the same reason: FR-160 measures a human act, and two
 				# recordings of one gate are two measurements rather than an edit.
@@ -287,6 +296,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		gate_costs=tuple(gate_costs),
 		oracle_audits=tuple(oracle_audits),
 		adversarial_audits=tuple(adversarial_audits),
+		authorship_checks=tuple(authorship_checks),
 		escapes=tuple(escapes),
 		escape_overrides=tuple(escape_overrides),
 	)

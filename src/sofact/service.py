@@ -21,6 +21,11 @@ from typing import Any, Final, cast
 from sofact._uuid7 import uuid7str
 from sofact.adversarial import effective_sample_floor, run_adversarial_audit
 from sofact.audit import audit_oracles as run_oracle_audit
+from sofact.authorship import (
+	GOVERNANCE_ABSENT_REASON,
+	detect_authorship,
+	installed_package_root,
+)
 from sofact.boundary import TEMP_DIRNAME, detect_boundary
 from sofact.changecost import measure_change_costs
 from sofact.composition import composition_for
@@ -104,6 +109,9 @@ from sofact.views import (
 	Advice,
 	Assumption,
 	AttemptTelemetryReport,
+	AuthorshipCheck,
+	AuthorshipFinding,
+	AuthorshipSurface,
 	AutonomyLevel,
 	BoundaryMechanism,
 	ChainStatus,
@@ -2881,6 +2889,49 @@ class FactoryService:
 		)
 		self._commit(LedgerKind.ADVERSARIAL_AUDITED, {"audit": audit.model_dump(mode="json")})
 		return audit
+
+	async def check_authorship(self, *, package_root: Path | None = None) -> AuthorshipCheck:
+		"""Measure FR-053, FR-055 and FR-134 against the package's own import graph.
+
+		**The subject is this package, not the operator's tree.** FR-053 says a fine-tuned
+		model must never be an oracle and FR-134 says one must not author contracts; the
+		thing that would make either false is the *factory's* code gaining a path from the
+		authoring surfaces to a model. An operator's modules are the operator's business and
+		this check does not read them.
+
+		**A package root the caller may name, defaulting to the installed one.** The default
+		is derived from :mod:`sofact`'s own file rather than from the working directory, so
+		the check measures the code that is actually running: a factory pointed at a
+		checkout it is not executing would report that checkout's closures, which is a
+		statement about a tree nobody is using. The parameter exists because a test has to
+		be able to point it at a deliberately broken tree — that is the canary, and a canary
+		needs a door.
+		"""
+		root = installed_package_root() if package_root is None else package_root
+		findings, governance_absent = detect_authorship(package_root=root)
+		check = AuthorshipCheck(
+			id=uuid7str(),
+			checked_at=now(),
+			findings=tuple(
+				AuthorshipFinding(
+					surface=AuthorshipSurface(surface),
+					closure=closure,
+					reaching=reaching,
+				)
+				for surface, closure, reaching in findings
+			),
+			governance_absent=governance_absent,
+			governance_reason=GOVERNANCE_ABSENT_REASON
+			if governance_absent
+			else (
+				"a module in this tree reaches a commercial interface, or the ledger "
+				"carries a kind named for one of FR-055's five acts. The finding is "
+				"reported rather than repaired: what the factory may do is the operator's "
+				"decision, and this check's job is to say what the tree currently does"
+			),
+		)
+		self._commit(LedgerKind.AUTHORSHIP_CHECKED, {"check": check.model_dump(mode="json")})
+		return check
 
 	@staticmethod
 	def _worst_verdict_per_clause(state: ProjectState) -> dict[str, VerdictOutcome]:

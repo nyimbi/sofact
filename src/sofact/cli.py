@@ -45,11 +45,13 @@ from sofact.service import (
 	resolve_tools,
 )
 from sofact.views import (
+	AUTHORSHIP_READING,
 	L4_GATE_THETA,
 	PHASE_GATE,
 	PHASE_SEQUENCE,
 	TOPOLOGY_ISOLATION,
 	TOPOLOGY_MODIFIER,
+	TUNED_MODEL_UNREACHABLE,
 	UNPRODUCIBLE_KINDS,
 	AdversarialAuditReport,
 	Assumption,
@@ -2000,6 +2002,42 @@ async def _integrate(svc: FactoryService) -> None:
 			"to the platform (FR-114).",
 			fg="red",
 		)
+		raise typer.Exit(code=1)
+
+
+@app.command(name="authorship")
+def authorship_command(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+) -> None:
+	"""Check that no authoring path can reach a model (FR-053, FR-055, FR-134)."""
+	asyncio.run(_authorship(_service(_home_of(ctx, home))))
+
+
+async def _authorship(svc: FactoryService) -> None:
+	check = await svc.check_authorship()
+	typer.secho("\nFR-053/FR-055/FR-134 authorship", fg="cyan", bold=True)
+	typer.secho(f"  checked {check.checked_at.isoformat()}", fg="bright_black")
+	typer.secho(
+		"  " + AUTHORSHIP_READING,
+		fg="bright_black",
+	)
+	for line in check.rendered.splitlines():
+		typer.secho(f"  {line}", fg="green" if check.clean else "red")
+	typer.secho(
+		"\n  " + TUNED_MODEL_UNREACHABLE,
+		fg="bright_black",
+	)
+	if check.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(check.not_implemented)
+			+ ". This check measures two authoring surfaces and FR-055's absence; the "
+			"requirements it does not name are not claims about this build's code "
+			"(NFR-024).",
+			fg="yellow",
+		)
+	if not check.clean:
 		raise typer.Exit(code=1)
 
 
