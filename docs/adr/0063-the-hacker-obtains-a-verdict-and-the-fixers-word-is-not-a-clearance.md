@@ -169,8 +169,12 @@ Measured on 2026-10-15 against this tree:
    N it used beside every rate it prints, because a rate computed under 1-in-3 and one under
    1-in-30 are not comparable.
 5. **The instrument is reachable from the product**, so it does not repeat FR-159's defect —
-   a correct instrument with no call site is a capability nobody can reach. The same defect
-   is still live in `sofact.mutation`'s call graph and is not fixed here.
+   a correct instrument with no call site is a capability nobody can reach. `sofact.mutation`
+   was checked for the same defect while this record was written and **does not have it**:
+   `render_delivery(measured_strength=True)` reaches `_measured_strengths`, which calls
+   `measure_strength`, and `sofact deliver --measured-strength` exposes the flag. The first
+   draft of this record asserted otherwise; the claim was checked against the call graph
+   rather than against the roadmap's prose and was wrong.
 
 ## What this does not do
 

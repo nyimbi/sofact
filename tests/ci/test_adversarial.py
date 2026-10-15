@@ -765,10 +765,9 @@ class TestTheSampleRateRisesWhenAnExploitIsFound:
 class TestTheServiceRecordsThePass:
 	"""FR-012–015 reachable from the product, not only from this module's tests.
 
-	This is the failure FR-159 had and :mod:`sofact.mutation` still has: an instrument
-	with correct tests and no call site is a capability nobody can reach. These drive the
-	*service* method, so the ledger row, the fold and the ceiling default are held to the
-	same standard as the pure functions above.
+	This is the failure FR-159 had: an instrument with correct tests and no call site is a
+	capability nobody can reach. These drive the *service* method, so the ledger row, the
+	fold and the ceiling default are held to the same standard as the pure functions above.
 	"""
 
 	async def test_the_pass_lands_in_the_ledger_and_folds_back(
