@@ -20,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from sofact.views import (
+	AdversarialAuditReport,
 	CompletionClaim,
 	Contract,
 	Cut,
@@ -146,6 +147,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	deploys: list[DeployRecord] = []
 	gate_costs: list[GateCost] = []
 	oracle_audits: list[OracleAuditReport] = []
+	adversarial_audits: list[AdversarialAuditReport] = []
 	escapes: list[EscapeEvent] = []
 	escape_overrides: list[EscapeOverride] = []
 
@@ -233,6 +235,12 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				deploys.append(DeployRecord.model_validate(payload["deploy"]))
 			case LedgerKind.ORACLE_AUDITED:
 				oracle_audits.append(OracleAuditReport.model_validate(payload["audit"]))
+			case LedgerKind.ADVERSARIAL_AUDITED:
+				# Appended, never keyed, and for FR-015's reason: the rate is a *trend*, so
+				# every pass is a data point. Keying them to the latest would leave the
+				# plateau FR-015 warns about unobservable, which is the one thing the rate
+				# exists to make visible.
+				adversarial_audits.append(AdversarialAuditReport.model_validate(payload["audit"]))
 			case LedgerKind.GATE_COST_RECORDED:
 				# Appended for the same reason: FR-160 measures a human act, and two
 				# recordings of one gate are two measurements rather than an edit.
@@ -278,6 +286,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		deploys=tuple(deploys),
 		gate_costs=tuple(gate_costs),
 		oracle_audits=tuple(oracle_audits),
+		adversarial_audits=tuple(adversarial_audits),
 		escapes=tuple(escapes),
 		escape_overrides=tuple(escape_overrides),
 	)

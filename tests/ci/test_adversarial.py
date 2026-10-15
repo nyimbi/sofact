@@ -22,16 +22,20 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import answer_everything
 
 from sofact._uuid7 import uuid7str
 from sofact.adversarial import (
 	DEFAULT_SAMPLE_FLOOR,
+	ESCALATED_SAMPLE_FLOOR,
 	UNADDRESSED_TECHNIQUES,
 	attempt_techniques,
+	effective_sample_floor,
 	fix_exploit,
 	run_adversarial_audit,
 	sample_decision,
 )
+from sofact.service import FactoryService
 from sofact.views import (
 	AUDIT_REQUIREMENTS,
 	AdversarialAuditReport,
@@ -42,6 +46,7 @@ from sofact.views import (
 	HackAttempt,
 	HackOutcome,
 	HackTechnique,
+	LedgerKind,
 	ModuleClass,
 	OracleClass,
 	OracleDeclaration,
@@ -146,7 +151,11 @@ class TestTheSampleDecidesWhetherAnythingIsAttacked:
 			for ordinal in range(1, DEFAULT_SAMPLE_FLOOR * 3 + 1)
 			if sample_decision(ordinal=ordinal, ceiling=AutonomyLevel.L3)
 		]
-		assert attacked == [DEFAULT_SAMPLE_FLOOR, DEFAULT_SAMPLE_FLOOR * 2, DEFAULT_SAMPLE_FLOOR * 3]
+		assert attacked == [
+			DEFAULT_SAMPLE_FLOOR,
+			DEFAULT_SAMPLE_FLOOR * 2,
+			DEFAULT_SAMPLE_FLOOR * 3,
+		]
 
 	def test_the_stride_is_deterministic_so_the_rate_is_reproducible(self) -> None:
 		"""FR-015's trend is read from the log, so the same change must sample the same way
@@ -160,9 +169,9 @@ class TestTheSampleDecidesWhetherAnythingIsAttacked:
 		first = [sample_decision(ordinal=n, ceiling=AutonomyLevel.L2) for n in range(1, 20)]
 		second = [sample_decision(ordinal=n, ceiling=AutonomyLevel.L2) for n in range(1, 20)]
 		assert first == second
-		assert first == [
-			n % DEFAULT_SAMPLE_FLOOR == 0 for n in range(1, 20)
-		], "the stride is ordinal % N, not an arbitrary reproducible pattern"
+		assert first == [n % DEFAULT_SAMPLE_FLOOR == 0 for n in range(1, 20)], (
+			"the stride is ordinal % N, not an arbitrary reproducible pattern"
+		)
 		assert first == [
 			sample_decision(ordinal=n, lane=ModuleClass.G1, ceiling=AutonomyLevel.L2)
 			for n in range(1, 20)
@@ -603,7 +612,9 @@ class TestTheSampledOutPassIsNotAClearance:
 		assert after == before
 		assert "assert TOTAL == 12" in (tree / "check_total.py").read_text(encoding="utf-8")
 
-	async def test_a_contract_with_no_executable_oracle_audits_nothing(self, tmp_path: Path) -> None:
+	async def test_a_contract_with_no_executable_oracle_audits_nothing(
+		self, tmp_path: Path
+	) -> None:
 		"""A contract of intentions has nothing to attack, and the report says so rather
 		than printing a clean rate over nothing — the rule FR-107's audit states."""
 		tree = _tree(tmp_path)
@@ -634,3 +645,254 @@ class TestTheSampledOutPassIsNotAClearance:
 		assert report.sample_rate == DEFAULT_SAMPLE_FLOOR
 		assert len(report.contract_hash) == 64
 		assert report.changes_considered == 1
+
+
+# --------------------------------------------------------------------------- #
+# the seam — a control that exists is not a control that is applied
+# --------------------------------------------------------------------------- #
+
+
+def _attackable(service: FactoryService) -> tuple[Path, str]:
+	"""A workspace holding a check that fails, and the command that runs it.
+
+	Both halves are needed before the contract is built, because the *command* is what
+	``service.contract`` writes into the oracle declaration — so a test that built the
+	contract first could only attack a command naming no file, which is the
+	``NOT_ATTEMPTED`` path rather than the one these tests are about.
+	"""
+	tree = service.home / "workspace"
+	tree.mkdir(parents=True, exist_ok=True)
+	(tree / "check_total.py").write_text(_PLAIN_CHECK, encoding="utf-8")
+	return tree, f"{sys.executable} check_total.py 11"
+
+
+async def _contract_that_fails(service: FactoryService, command: str) -> Contract:
+	"""Drive P0 to a contract whose every oracle runs ``command``.
+
+	The real interrogation rather than a hand-built draft, for
+	:func:`test_audit.a_contract`'s reason: these tests are about what the *service*
+	records, and a contract injected past the log would leave the audit's own read of the
+	contract untested.
+	"""
+	goal = await service.start("Ship a reminder dashboard.")
+	await answer_everything(service, goal.id)
+	await service.draft(goal.id)
+	return await service.contract(goal.id, commands=command)
+
+
+class TestTheSampleRateRisesWhenAnExploitIsFound:
+	"""FR-014's third sentence: "The sample rate must increase automatically when an
+	exploit is found."
+
+	The rule is read off the log, so it is held here against reports built by hand — the
+	alternative would be two real audits, which measures the loop rather than the rule and
+	is :class:`TestTheSampledOutPassIsNotAClearance`'s job.
+	"""
+
+	def _report(
+		self, *outcomes: HackOutcome, contract_id: str | None = None
+	) -> AdversarialAuditReport:
+		attempts = tuple(
+			HackAttempt(
+				id=uuid7str(),
+				clause_id=uuid7str(),
+				statement="the check totals every row",
+				technique=HackTechnique.DISABLED_ASSERTION,
+				outcome=outcome,
+				detail="detail",
+				oracle_class=OracleClass.PROPERTY,
+			)
+			for outcome in outcomes
+		)
+		return AdversarialAuditReport(
+			id=uuid7str(),
+			plan_id=uuid7str(),
+			contract_id=contract_id or uuid7str(),
+			contract_hash="a" * 64,
+			rendered_at=now(),
+			attempts=attempts,
+		)
+
+	def test_no_history_leaves_the_floor_alone(self) -> None:
+		"""The control arm: an escalation that fired unconditionally would pass every test
+		below and sample the whole factory at full rate from the first pass."""
+		assert effective_sample_floor([]) == DEFAULT_SAMPLE_FLOOR
+
+	def test_an_exploit_raises_the_next_pass_to_full_rate(self) -> None:
+		prior = [self._report(HackOutcome.EXPLOITED, HackOutcome.HELD)]
+		assert effective_sample_floor(prior) == ESCALATED_SAMPLE_FLOOR == 1
+
+	def test_a_pass_that_held_relaxes_the_sample(self) -> None:
+		"""One pass, and the escalation is over. A rule that never relaxed would make the
+		first exploit a permanent full-rate tax on the lane, which is a throughput decision
+		FR-014 does not make."""
+		prior = [self._report(HackOutcome.EXPLOITED), self._report(HackOutcome.HELD)]
+		assert effective_sample_floor(prior) == DEFAULT_SAMPLE_FLOOR
+
+	def test_a_sampled_out_pass_neither_raises_nor_relaxes(self) -> None:
+		"""The clause this rule is easiest to get wrong on. A pass that attacked nothing
+		exploited nothing *because it attempted nothing*, so reading it as clean would
+		restore the sample on the strength of an audit that never ran — NFR-024's forbidden
+		reading, one level down. The escalation from the first pass must survive it.
+		"""
+		prior = [
+			self._report(HackOutcome.EXPLOITED),
+			self._report(HackOutcome.NOT_ATTEMPTED, HackOutcome.NOT_ATTEMPTED),
+		]
+		assert prior[-1].attempted == ()
+		assert effective_sample_floor(prior) == ESCALATED_SAMPLE_FLOOR
+
+	def test_the_floor_is_configurable_where_the_escalation_is_not(self) -> None:
+		"""FR-014 makes N configurable and supplies no number; it makes the *increase*
+		automatic and supplies no number either. So the relaxation target is a parameter
+		and the escalation destination is a constant — one is a deployment's throughput
+		choice and the other is what the requirement says must happen."""
+		assert effective_sample_floor([], floor=10) == 10
+		prior = [self._report(HackOutcome.EXPLOITED)]
+		assert effective_sample_floor(prior, floor=10) == 1
+
+	def test_the_escalated_floor_makes_the_rule_attack_every_change(self) -> None:
+		"""The two functions composed, which is how the service uses them: the floor the
+		history yields is the floor the sampler strides over. Canaried by passing the
+		default instead — ordinals 1 and 2 then fall out of the sample."""
+		prior = [self._report(HackOutcome.EXPLOITED)]
+		floor = effective_sample_floor(prior)
+		for ordinal in (1, 2, 3, 4, 5):
+			assert sample_decision(ordinal=ordinal, ceiling=AutonomyLevel.L2, floor=floor), ordinal
+		assert not sample_decision(ordinal=1, ceiling=AutonomyLevel.L2)
+
+
+class TestTheServiceRecordsThePass:
+	"""FR-012–015 reachable from the product, not only from this module's tests.
+
+	This is the failure FR-159 had and :mod:`sofact.mutation` still has: an instrument
+	with correct tests and no call site is a capability nobody can reach. These drive the
+	*service* method, so the ledger row, the fold and the ceiling default are held to the
+	same standard as the pure functions above.
+	"""
+
+	async def test_the_pass_lands_in_the_ledger_and_folds_back(
+		self, service: FactoryService
+	) -> None:
+		"""A measurement nobody wrote down is not a measurement.
+
+		Folded back out of the log rather than compared to the in-memory object, for
+		:meth:`test_audit.TestTheServiceRecordsTheAudit`'s reason: state is a pure fold, so
+		a report that survives the round trip is one a later reader can audit.
+		"""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+
+		report = await service.adversarial_audit(contract.id, workspace=tree)
+
+		state = await service.state()
+		stored = state.latest_adversarial_audit(contract.id)
+		assert stored is not None
+		assert stored == report, "the fold reproduces the report it recorded"
+		assert stored.contract_hash == contract.content_hash
+		assert LedgerKind.ADVERSARIAL_AUDITED in {
+			entry.kind for entry in service.ledger.entries()
+		}, "and the row is the one the fold reads"
+
+	async def test_the_ceiling_defaults_to_the_contracts_own(self, service: FactoryService) -> None:
+		"""FR-014's sample is a function of the ceiling, so a caller that had to supply the
+		level could supply L4 and attack everything the sampled rule says to leave alone.
+
+		The default is the contract's own ceiling — the rule FR-007 uses for the ceiling
+		itself — and the test holds *both* sides of it. At L3 the default samples ordinal 1
+		out, which is the control: a service method that ignored the ceiling and passed L4
+		unconditionally would pass the second assertion and fail the first. Then the same
+		contract at ordinal 3, where the stride lands, is attacked.
+		"""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+		assert contract.ceiling is AutonomyLevel.L3, "the control: this contract is at L3"
+
+		sampled_out = await service.adversarial_audit(contract.id, ordinal=1, workspace=tree)
+		attacked = await service.adversarial_audit(contract.id, ordinal=3, workspace=tree)
+
+		assert sampled_out.attempted == (), "1-in-3 at L3, so ordinal 1 is not attacked"
+		assert sampled_out.exploit_rate is None
+		assert attacked.attempted != (), "ordinal 3 is the one the stride lands on"
+		assert attacked.exploited != (), "and the check is defeated by the blunt rewrite"
+
+	async def test_a_second_pass_is_a_second_measurement(self, service: FactoryService) -> None:
+		"""Appended, never keyed — FR-015's subject is a *trend*, so the series is the
+		datum and a latest-wins field would destroy the plateau the requirement exists to
+		make visible."""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+
+		first = await service.adversarial_audit(contract.id, workspace=tree)
+		second = await service.adversarial_audit(contract.id, workspace=tree)
+
+		state = await service.state()
+		assert len(state.adversarial_audits) == 2
+		assert first.id != second.id
+		assert state.latest_adversarial_audit(contract.id) == second
+
+	async def test_the_lane_is_recorded_and_survives_the_fold(
+		self, service: FactoryService
+	) -> None:
+		"""FR-015 says the rate is *per lane*, so a report that did not carry one would make
+		the requirement's own sentence uncomputable from the log.
+
+		Both sides are held: a pass given a lane carries it through the fold, and a pass
+		with no lane says ``None`` rather than guessing one from the clauses it happened to
+		probe. The second is the control — a report that defaulted the lane to the first
+		clause's class would pass the first assertion and report a per-clause rate under a
+		per-lane name.
+		"""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+
+		attributed = await service.adversarial_audit(
+			contract.id, ordinal=3, lane=ModuleClass.G1, workspace=tree
+		)
+		unattributed = await service.adversarial_audit(contract.id, ordinal=3, workspace=tree)
+
+		state = await service.state()
+		assert state.latest_adversarial_audit(contract.id) is not None
+		assert attributed.lane is ModuleClass.G1
+		assert unattributed.lane is None
+		assert [a.lane for a in state.adversarial_audits] == [ModuleClass.G1, None]
+
+	async def test_an_exploit_escalates_the_next_pass_through_the_service(
+		self, service: FactoryService
+	) -> None:
+		"""FR-014's third sentence, driven end to end: the rule has to be *consulted*.
+
+		:class:`TestTheSampleRateRisesWhenAnExploitIsFound` holds the rule; this holds the
+		seam. Ordinal 1 in an L3 lane is sampled out under 1-in-3 and attacked under the
+		escalated floor, so the two passes differ only in what the first one found — which
+		is the whole of the requirement. Canaried by passing the default floor instead of
+		the derived one: the second pass then reports ``attempted == ()``.
+		"""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+
+		first = await service.adversarial_audit(contract.id, ordinal=3, workspace=tree)
+		assert first.exploited != (), "the control: this pass found an exploit"
+		assert first.sample_rate == DEFAULT_SAMPLE_FLOOR
+
+		second = await service.adversarial_audit(contract.id, ordinal=1, workspace=tree)
+
+		assert second.attempted != (), "ordinal 1 is attacked because the floor rose to 1"
+		assert second.sample_rate == ESCALATED_SAMPLE_FLOOR
+		assert "Not attacked is not the same as resisted" not in "".join(
+			a.detail for a in second.attempts
+		)
+
+	async def test_a_pass_for_another_contract_is_not_this_one(
+		self, service: FactoryService
+	) -> None:
+		"""Keyed by contract: an exploit is only actionable against the oracle set it
+		defeated, so a pass over a re-contracted goal says nothing about the other's."""
+		tree, command = _attackable(service)
+		contract = await _contract_that_fails(service, command)
+
+		await service.adversarial_audit(contract.id, workspace=tree)
+
+		state = await service.state()
+		assert state.latest_adversarial_audit(contract.id) is not None, "the control"
+		assert state.latest_adversarial_audit(uuid7str()) is None

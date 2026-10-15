@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Final, cast
 
 from sofact._uuid7 import uuid7str
+from sofact.adversarial import effective_sample_floor, run_adversarial_audit
 from sofact.audit import audit_oracles as run_oracle_audit
 from sofact.boundary import TEMP_DIRNAME, detect_boundary
 from sofact.changecost import measure_change_costs
@@ -99,9 +100,11 @@ from sofact.views import (
 	PHASE_GATE,
 	PHASE_GATE_INVERSE,
 	PHASE_SEQUENCE,
+	AdversarialAuditReport,
 	Advice,
 	Assumption,
 	AttemptTelemetryReport,
+	AutonomyLevel,
 	BoundaryMechanism,
 	ChainStatus,
 	ChangeUnit,
@@ -2820,6 +2823,63 @@ class FactoryService:
 		contract = await self.contract_by_id(contract_id)
 		audit = await run_oracle_audit(contract, timeout=timeout, workspace=workspace)
 		self._commit(LedgerKind.ORACLE_AUDITED, {"audit": audit.model_dump(mode="json")})
+		return audit
+
+	# ------------------------------------- FR-012-015: the adversarial audit
+
+	async def adversarial_audit(
+		self,
+		contract_id: str,
+		*,
+		ordinal: int = 1,
+		lane: ModuleClass | None = None,
+		ceiling: AutonomyLevel | None = None,
+		workspace: Path | None = None,
+		timeout: float = DEFAULT_ORACLE_TIMEOUT_SECONDS,
+	) -> AdversarialAuditReport:
+		"""Attack the contract's oracles and record what got through (FR-012–015).
+
+		The contract is re-read from the log rather than taken from the caller, for
+		:meth:`audit_oracles`'s reason: the thing attacked is the oracle set the log holds,
+		and a caller-supplied contract would be the audit grading its own input.
+
+		**``ceiling`` defaults to the measured one, and that default is FR-014.** The
+		sample is 1-in-N at or below L3 and 100% above it, so a caller that had to supply
+		the level could supply L2 and quietly sample the audit away — which is the same
+		shape as the producer declaring its own autonomy. The level comes from the
+		contract's own weakest oracle, and a caller that overrides it is doing so
+		deliberately and visibly.
+
+		``workspace`` is the tree the oracles are attacked in, and it defaults to the
+		factory's own work directory rather than the operator's checkout — :meth:`boundary`'s
+		rule, and here it matters twice over: this instrument *writes rewrites*, and a
+		rewrite that landed in the repository under test would be FR-139's integrity drift
+		performed by the auditor rather than found by it. (The rewrites go into a copy
+		regardless; the default is what keeps the copy's source off the operator's tree.)
+
+		**FR-014's escalation is read off the log, not configured.** The floor for this
+		pass is :func:`effective_sample_floor` over this contract's prior passes, so an
+		exploit found last time makes this pass full-rate with nobody setting a flag. It
+		is keyed to the contract for :meth:`latest_oracle_audit`'s reason: a different
+		contract's exploit says nothing about these oracles, and a shared escalation would
+		be one goal's defect taxing another goal's throughput.
+		"""
+		contract = await self.contract_by_id(contract_id)
+		tree = Path(workspace) if workspace is not None else (self.home / "workspace")
+		tree.mkdir(parents=True, exist_ok=True)
+		state = await self.state()
+		audit = await run_adversarial_audit(
+			contract,
+			workspace=tree,
+			ceiling=ceiling if ceiling is not None else contract.ceiling,
+			ordinal=ordinal,
+			lane=lane,
+			floor=effective_sample_floor(
+				[a for a in state.adversarial_audits if a.contract_id == contract.id]
+			),
+			timeout=timeout,
+		)
+		self._commit(LedgerKind.ADVERSARIAL_AUDITED, {"audit": audit.model_dump(mode="json")})
 		return audit
 
 	@staticmethod

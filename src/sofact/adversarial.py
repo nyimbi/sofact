@@ -86,6 +86,7 @@ from sofact.views import (
 __all__ = [
 	"DEFAULT_SAMPLE_FLOOR",
 	"attempt_techniques",
+	"effective_sample_floor",
 	"fix_exploit",
 	"run_adversarial_audit",
 	"sample_decision",
@@ -93,6 +94,18 @@ __all__ = [
 
 DEFAULT_SAMPLE_FLOOR: Final[int] = AUDIT_SAMPLE_FLOOR
 """Re-exported so a caller need not reach into :mod:`sofact.views` for the default N."""
+
+ESCALATED_SAMPLE_FLOOR: Final[int] = 1
+"""The N FR-014's third sentence drives the sample to, once an exploit has been found.
+
+``1`` is *every change*, which is the only value that sentence can mean: FR-014's own
+first clause is "1-in-N, N configurable", and "the sample rate must increase
+automatically when an exploit is found" raises N's denominator. The next value up from
+1-in-3 is 1-in-2, and stopping there would sample half the changes in the lane that has
+demonstrably produced an exploit — the lane the rule exists for. The bound is also what
+keeps this from being a knob: the escalation has one destination, so there is nothing to
+tune and nothing to get wrong.
+"""
 
 SAMPLED_ABOVE: Final[AutonomyLevel] = AutonomyLevel.L3
 """FR-014's threshold: sampled at or below L3, **100%** above it.
@@ -127,14 +140,60 @@ other two", which is the same defect as an unrun oracle reading as a satisfied o
 _ASSERT_RE: Final = re.compile(r"^(\s*)assert\s+(.*)$")
 
 
+def effective_sample_floor(
+	prior: Sequence[AdversarialAuditReport],
+	*,
+	floor: int = DEFAULT_SAMPLE_FLOOR,
+) -> int:
+	"""FR-014's N for the next pass, raised when a prior pass found an exploit.
+
+	The third sentence of FR-014 — "the sample rate must increase automatically when an
+	exploit is found" — and the rule is deliberately the smallest one that sentence
+	admits: **the most recent pass that attacked anything decides it.** An exploit found
+	there means this contract's oracles have demonstrably been defeated, so the next pass
+	is full; a pass that attacked and found nothing means they resisted a full attempt,
+	and the sample relaxes to ``floor``.
+
+	**A pass that attacked nothing is skipped, not read as clean.** A sampled-out pass
+	exploited nothing for the same reason it attempted nothing, and letting it de-escalate
+	would restore the sample on the strength of an audit that never ran — NFR-024's
+	forbidden reading, one level down. The walk therefore looks at
+	:attr:`AdversarialAuditReport.attempted`, never at ``exploited`` alone.
+
+	Sticky by exactly one pass, and that is the point: an escalation that never relaxed
+	would make the *first* exploit a permanent full-rate tax on the lane, which is a
+	throughput decision FR-014 does not make and §4.4's design note says must stay
+	explicit. One pass is what "increase automatically" costs, and a lane that keeps
+	producing exploits keeps paying it.
+
+	Pure, and separated from the loop for :func:`sample_decision`'s reason: the rule is
+	readable from the log alone, so a test can hold it without spawning a process.
+	"""
+	assert floor >= 1, f"a sample floor is 1-in-N with N at least 1, got {floor}"
+	for audit in reversed(prior):
+		if not audit.attempted:
+			continue
+		return ESCALATED_SAMPLE_FLOOR if audit.exploited else floor
+	return floor
+
+
 def sample_decision(
-	*, ordinal: int, lane: ModuleClass | None = None, ceiling: AutonomyLevel
+	*,
+	ordinal: int,
+	lane: ModuleClass | None = None,
+	ceiling: AutonomyLevel,
+	floor: int = AUDIT_SAMPLE_FLOOR,
 ) -> bool:
 	"""Whether FR-014's rule says to attack the change at ``ordinal`` in ``lane``.
 
 	Pure, and separated from the loop because the rule is the whole of FR-014 and a test
 	can hold it to the boundary — that a change above L3 is *always* attacked and one at or
 	below L3 is attacked 1-in-N — without spawning a process.
+
+	``floor`` is the N in force, and it is a parameter rather than the constant because
+	FR-014's third sentence raises it: :func:`effective_sample_floor` reads the prior
+	passes and returns 1 once an exploit has been found, so the rule and its escalation
+	compose here rather than being re-implemented at the call site.
 
 	``lane`` is accepted and unused by the rule, which is FR-014's own shape: the sample is
 	a function of the *ceiling* alone ("sampled … on lanes at or below L3, and run on 100%
@@ -149,9 +208,10 @@ def sample_decision(
 	irreproducible from the log, which is what FR-015's trend is read from.
 	"""
 	assert ordinal >= 1, f"a change ordinal is 1-based, got {ordinal}"
+	assert floor >= 1, f"a sample floor is 1-in-N with N at least 1, got {floor}"
 	if ceiling > SAMPLED_ABOVE:
 		return True
-	return ordinal % AUDIT_SAMPLE_FLOOR == 0
+	return ordinal % floor == 0
 
 
 @dataclass(frozen=True)
@@ -298,6 +358,7 @@ async def run_adversarial_audit(
 	ceiling: AutonomyLevel,
 	ordinal: int = 1,
 	lane: ModuleClass | None = None,
+	floor: int = AUDIT_SAMPLE_FLOOR,
 	timeout: float = DEFAULT_TIMEOUT_SECONDS,
 	max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
 ) -> AdversarialAuditReport:
@@ -319,6 +380,12 @@ async def run_adversarial_audit(
 	``ceiling`` is the lane's autonomy level and it drives FR-014's sample. A change the
 	sample skips produces one ``NOT_ATTEMPTED`` row per technique and no process is
 	launched, which is what keeps the sampling rule from being decorative.
+
+	``floor`` is FR-014's N as it stands *for this pass*, and the caller derives it from
+	the prior passes with :func:`effective_sample_floor`. It is an argument rather than a
+	read of the log inside this function because the log is the caller's to hold: this
+	module attacks a contract and a tree, and reaching for a ledger would make it
+	untestable without one.
 	"""
 	assert workspace.is_dir(), f"cannot audit in a tree that does not exist: {workspace}"
 	assert contract.clauses, "cannot audit a contract with no clauses"
@@ -326,6 +393,7 @@ async def run_adversarial_audit(
 		ordinal=ordinal,
 		lane=lane,
 		ceiling=ceiling,
+		floor=floor,
 	)
 	probeable = [c for c in contract.clauses if c.oracle.is_executable]
 	if not probeable:
@@ -335,7 +403,8 @@ async def run_adversarial_audit(
 			contract_id=contract.id,
 			contract_hash=contract.content_hash,
 			rendered_at=now(),
-			sample_rate=AUDIT_SAMPLE_FLOOR,
+			lane=lane,
+			sample_rate=floor,
 			changes_considered=0,
 		)
 	if not attacked:
@@ -345,6 +414,7 @@ async def run_adversarial_audit(
 			contract_id=contract.id,
 			contract_hash=contract.content_hash,
 			rendered_at=now(),
+			lane=lane,
 			attempts=tuple(
 				HackAttempt(
 					id=uuid7str(),
@@ -353,7 +423,7 @@ async def run_adversarial_audit(
 					technique=technique,
 					outcome=HackOutcome.NOT_ATTEMPTED,
 					detail=(
-						f"FR-014's sample is 1-in-{AUDIT_SAMPLE_FLOOR} at or below "
+						f"FR-014's sample is 1-in-{floor} at or below "
 						f"{SAMPLED_ABOVE.name} and this change is ordinal {ordinal} in a "
 						f"{ceiling.name} lane, so it was not attacked. Not attacked is not "
 						"the same as resisted."
@@ -364,7 +434,7 @@ async def run_adversarial_audit(
 				for clause in probeable
 				for technique in _HACKABLE_TECHNIQUES
 			),
-			sample_rate=AUDIT_SAMPLE_FLOOR,
+			sample_rate=floor,
 			changes_considered=len(probeable),
 		)
 
@@ -390,8 +460,9 @@ async def run_adversarial_audit(
 		contract_id=contract.id,
 		contract_hash=contract.content_hash,
 		rendered_at=now(),
+		lane=lane,
 		attempts=tuple(collected),
-		sample_rate=AUDIT_SAMPLE_FLOOR,
+		sample_rate=floor,
 		changes_considered=len(probeable),
 	)
 

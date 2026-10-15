@@ -3091,6 +3091,22 @@ class AdversarialAuditReport(View):
 	contract_id: UUID7
 	contract_hash: str
 	rendered_at: datetime
+	lane: ModuleClass | None = None
+	"""The lane this pass audited, which is FR-015's unit of measurement.
+
+	FR-015 says the rate is per lane and its plateau "means **the lane** is not actually
+	verified", so a report that did not name one would make the requirement's own sentence
+	uncomputable from the log. ``None`` is a real state and not a default: an audit driven
+	over a whole contract rather than a lane has no lane, and saying ``None`` is how it
+	declines to attribute its rate to one.
+
+	This is the *declared* lane the caller sampled for — the argument
+	:func:`sofact.adversarial.sample_decision` accepts and does not use — recorded rather
+	than derived, because deriving it from the attempts would pick the lanes of whatever
+	clauses happened to be probeable and report a per-lane rate that is really a per-clause
+	one.
+	"""
+
 	attempts: tuple[HackAttempt, ...] = ()
 	fixes: tuple[ExploitFix, ...] = ()
 	sample_rate: int = AUDIT_SAMPLE_FLOOR
@@ -3099,6 +3115,10 @@ class AdversarialAuditReport(View):
 	Carried rather than read from configuration at render time: a rate computed under
 	1-in-3 and one computed under 1-in-30 are not comparable, and a reader of the log
 	months later cannot recover which was in force.
+
+	This is the **effective** N, not the configured floor: FR-014's third sentence raises
+	it when a prior pass found an exploit, and a report carrying the configured value
+	would say 1-in-3 about a pass that attacked every change.
 	"""
 
 	changes_considered: int = 0
@@ -7408,6 +7428,7 @@ class LedgerKind(StrEnum):
 	DEPLOY_RECORDED = "deploy.recorded"
 	GATE_COST_RECORDED = "gate_cost.recorded"
 	ORACLE_AUDITED = "oracle.audited"
+	ADVERSARIAL_AUDITED = "adversarial.audited"
 	ESCAPE_RECORDED = "escape.recorded"
 	ESCAPE_OVERRIDE_RECORDED = "escape_override.recorded"
 
@@ -7675,6 +7696,15 @@ class ProjectState(View):
 	the most recent; the history is what shows FR-012's exploit-discovery rate over time.
 	"""
 
+	adversarial_audits: tuple[AdversarialAuditReport, ...] = ()
+	"""Every adversarial audit pass the log records, oldest first (FR-012–015).
+
+	Appended and never keyed, and the reason is FR-015's own shape: its subject is a
+	*trend* — a rate that should go to zero and stay there — so the series is the datum and
+	a latest-wins field would destroy exactly the plateau the requirement exists to make
+	visible. :meth:`latest_adversarial_audit` reads the most recent for a report.
+	"""
+
 	escapes: tuple[EscapeEvent, ...] = ()
 	"""Every escape the operator recorded, oldest first (FR-021).
 
@@ -7701,6 +7731,16 @@ class ProjectState(View):
 		other's oracles.
 		"""
 		matching = [a for a in self.oracle_audits if a.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def latest_adversarial_audit(self, contract_id: str) -> AdversarialAuditReport | None:
+		"""The most recent adversarial pass over one contract, if any ran (FR-012–015).
+
+		Keyed by contract for :meth:`latest_oracle_audit`'s reason: an exploit is only
+		actionable against the exact oracle set it defeated, and a pass over a re-contracted
+		goal says nothing about the other contract's oracles.
+		"""
+		matching = [a for a in self.adversarial_audits if a.contract_id == contract_id]
 		return matching[-1] if matching else None
 
 	def latest_escape_override(self, lane: ModuleClass) -> EscapeOverride | None:

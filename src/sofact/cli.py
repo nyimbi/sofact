@@ -51,6 +51,7 @@ from sofact.views import (
 	TOPOLOGY_ISOLATION,
 	TOPOLOGY_MODIFIER,
 	UNPRODUCIBLE_KINDS,
+	AdversarialAuditReport,
 	Assumption,
 	BoundaryMechanism,
 	ChangeUnit,
@@ -70,6 +71,7 @@ from sofact.views import (
 	EscapeReport,
 	GoalPlan,
 	GoalStyle,
+	HackOutcome,
 	HarnessProfile,
 	IntegrityOutcome,
 	InterfaceMember,
@@ -2005,14 +2007,132 @@ async def _integrate(svc: FactoryService) -> None:
 def audit(
 	ctx: typer.Context,
 	home: Path | None = _HOME_OPTION,
+	adversarial: bool = typer.Option(
+		False,
+		"--adversarial",
+		help=(
+			"Attack the oracles instead of probing them (FR-012-015): rewrite the file each "
+			"command runs and ask whether the verdict moved."
+		),
+	),
+	ordinal: int = typer.Option(
+		1,
+		"--ordinal",
+		help=(
+			"The 1-based index of this change in its lane, which is what FR-014's sample "
+			"strides over. At or below L3 only every Nth change is attacked."
+		),
+	),
 	timeout: float = typer.Option(
 		DEFAULT_ORACLE_TIMEOUT_SECONDS,
 		"--timeout",
 		help="Seconds to allow one oracle before its result is INSUFFICIENT.",
 	),
 ) -> None:
-	"""Audit the contract's oracles adversarially (FR-107)."""
-	asyncio.run(_audit(_service(_home_of(ctx, home)), timeout))
+	"""Audit the contract's oracles (FR-107), or attack them (FR-012-015)."""
+	svc = _service(_home_of(ctx, home))
+	if adversarial:
+		asyncio.run(_adversarial(svc, ordinal=ordinal, timeout=timeout))
+		return
+	asyncio.run(_audit(svc, timeout))
+
+
+async def _adversarial(svc: FactoryService, *, ordinal: int, timeout: float) -> None:
+	"""FR-012-015's pass, over the contract the log holds.
+
+	The same three-step preamble :func:`_audit` uses — goal, contract — and for the same
+	reason: the instrument attacks *the oracle set the log holds*, so a contract the
+	operator happens to have on disk is not what gets attacked.
+	"""
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	report = await svc.adversarial_audit(built.id, ordinal=ordinal, timeout=timeout)
+	_print_adversarial(report)
+	if not report.passed:
+		raise typer.Exit(code=1)
+
+
+def _print_adversarial(report: AdversarialAuditReport) -> None:
+	"""FR-015's rate, with the three states it must not collapse kept apart.
+
+	The exit code is ``passed``, which is *not* ``exploits_unclosed``: a fixer's "closed"
+	is a claim the next audit verifies, so a pass that found an exploit exits non-zero
+	however promptly it was answered. Printing the unclosed count beside it is what keeps
+	the operator from reading the non-zero exit as "nothing was done about it".
+	"""
+	typer.secho("\nFR-012-015 adversarial audit", fg="cyan", bold=True)
+	typer.secho(f"  contract {report.contract_id} @ {report.contract_hash[:12]}", fg="bright_black")
+	typer.secho(
+		f"  sample 1-in-{report.sample_rate} at or below L3, 100% above it (FR-014); "
+		f"{report.changes_considered} change(s) considered",
+		fg="bright_black",
+	)
+	if report.lane is not None:
+		typer.secho(
+			f"  lane {report.lane.value} — FR-015's rate is per lane, and this pass "
+			"measures that one",
+			fg="bright_black",
+		)
+	for attempt in report.attempts:
+		mark, colour = (
+			("[EXPLOIT]", "red")
+			if attempt.outcome is HackOutcome.EXPLOITED
+			else ("[held]   ", "green")
+			if attempt.outcome is HackOutcome.HELD
+			else ("[skip]   ", "bright_black")
+		)
+		typer.secho(f"  {mark} {attempt.technique.value} on {attempt.statement}", fg=colour)
+		typer.secho(f"           {attempt.detail}", fg="bright_black")
+	for fix in report.fixes:
+		typer.secho(
+			f"  [fix] {'closed' if fix.closed else 'OPEN  '} attempt {fix.attempt_id}",
+			fg="green" if fix.closed else "yellow",
+		)
+		typer.secho(f"        {fix.detail}", fg="bright_black")
+		if fix.regression_case is not None:
+			typer.secho(f"        retained: {fix.regression_case}", fg="bright_black")
+		else:
+			typer.secho(f"        not retained: {fix.regression_because}", fg="yellow")
+	if report.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(report.not_implemented)
+			+ ". A pass that attacked nothing cleared nothing, and a rate over no attempt "
+			"is undefined rather than zero (NFR-024).",
+			fg="yellow",
+		)
+	if report.exploit_rate is not None:
+		typer.secho(
+			f"\n  exploit discovery rate: {report.exploit_rate:.2f} "
+			f"({len(report.exploited)}/{len(report.attempted)} attempted) — FR-015's target is "
+			"zero, and a non-zero plateau means the lane is not actually verified",
+			fg="red" if report.exploited else "green",
+		)
+	if report.techniques_exploited:
+		typer.secho(
+			"  techniques that got through: "
+			+ ", ".join(t.value for t in report.techniques_exploited),
+			fg="red",
+		)
+	if report.exploited:
+		unclosed = len(report.exploits_unclosed)
+		typer.secho(
+			f"\n  {len(report.exploited)} exploit(s) demonstrated; {unclosed} still unclosed "
+			"(FR-013). The exit is non-zero either way: a fixer's word that an exploit is "
+			"closed is a claim, and the next audit is what verifies it.",
+			fg="red",
+		)
+	elif report.attempted:
+		typer.secho(
+			f"\n  {len(report.attempted)} attempt(s) ran and none obtained a passing verdict.",
+			fg="green",
+		)
 
 
 async def _audit(svc: FactoryService, timeout: float) -> None:
