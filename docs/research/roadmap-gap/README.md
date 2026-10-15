@@ -494,9 +494,13 @@ built for.
    ADR-0060/0061** and is corrected here rather than left standing: items 2, 4, 5 and 6b
    each have an instrument with tests — `sofact.mutation` (`test_mutation.py`, 6),
    `sofact.escape` (`test_escape.py`, 10), `sofact.boundary` (`test_boundary.py`, 30) and
-   the harness capability probe (`test_harness.py`, 55). What the row still states is
-   what remains **open**: items 1, 3, 6a and 7 have no instrument at all, item 5's
-   container half is written and never witnessed, and M1's `sofact init` does not exist.
+   the harness capability probe (`test_harness.py`, 55). Item 3 now has **both halves**:
+   ADR-0043's per-gate instrument and ADR-0068's per-diff one (`test_review.py`, 25), so
+   §1.4's claim is readable against the v0.1 alternative per project — though the
+   **baseline is still unmeasured**, because a rate needs a project somebody actually
+   reviewed and no project has been. What the row still states is what remains **open**:
+   items 1, 6a and 7 have no instrument at all, item 5's container half is written and
+   never witnessed, and M1's `sofact init` does not exist.
    Several M6 exit criteria (O8 conformance, integration failure attribution) are partly
    met, and M3's "all 8 oracle classes" is not. The row was right about the *shape* of
    the gap — an exit criterion measured by prose — and wrong about it being total, which

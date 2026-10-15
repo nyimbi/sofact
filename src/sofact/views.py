@@ -97,6 +97,7 @@ __all__ = [
 	"DeployRecord",
 	"DeploymentScope",
 	"DeploymentTopology",
+	"DiffReview",
 	"DimensionBound",
 	"DimensionStatus",
 	"DispatchMode",
@@ -2650,6 +2651,141 @@ class GateCost(View):
 				"nothing outside that range is a fraction of a slice (FR-160)"
 			)
 		return self
+
+
+class DiffReview(View):
+	"""What one human review of one sealed diff cost (§20.3 item 3).
+
+	FR-160 records what a *gate* cost, and §20.3 item 3 asks for the same number
+	**per diff** as well: "logged per gate *and* per diff, so §1.4's claim can be
+	compared directly against the v0.1 alternative." §1.4's claim is that human
+	attention is spent per platform rather than per module, and the alternative it
+	must beat is v0.1's per-diff review — whose rate §1.4 names as roughly four units
+	an hour, about fifteen minutes a diff. Gate-minutes alone cannot make that
+	comparison; only a per-diff number can, and it does not exist unless it is asked
+	for, for exactly the reason :class:`GateCost` gives: nothing in SoFact observes a
+	person reading.
+
+	**The diff is identified by its dispatch and its commit, never by its step.** A
+	step can be dispatched more than once — a repair, a re-dispatch after a stall —
+	and each dispatch seals its own commit. Keying a review by step would collapse two
+	reviewable diffs into one and *understate* review time, which is the one direction
+	a measurement of the binding constraint must not be able to move. ``sealed_commit``
+	is recorded rather than left implicit for :class:`ChangeUnit`'s reason: a review
+	whose number could later be read against a different diff is not a measurement of
+	a diff.
+
+	``human_minutes`` and ``rework_fraction`` are declared, like the gate pair and for
+	the same argument. ``rework_fraction`` is a share of the *diff* — how much of what
+	was sealed came back — and it is deliberately not comparable to the gate's
+	fraction of a *slice*: the denominators differ, so the two are reported as
+	separate means rather than pooled into one.
+	"""
+
+	dispatch_id: UUID7
+	step_id: UUID7
+	sealed_commit: NonEmptyStr
+	"""The commit this review read, as it stood when it was read.
+
+	Recorded rather than resolved at read time because a diff is a fixed comparison:
+	a number attached to "whatever the branch tip is now" would move under the review
+	that produced it, which is the failure :class:`ChangeUnit` refuses for its own
+	range.
+	"""
+
+	human_minutes: float
+	rework_fraction: float
+	reviewed_by: NonEmptyStr
+	reviewed_at: datetime
+
+	@model_validator(mode="after")
+	def _a_review_is_a_measurement(self) -> Self:
+		if self.human_minutes < 0:
+			raise ValueError(
+				f"a review cannot cost {self.human_minutes:g} human-minutes; a negative "
+				"cost would lower the per-diff total §1.4's claim is read against, which "
+				"is the one direction a measurement of the binding constraint must not be "
+				"able to move (§20.3 item 3)"
+			)
+		if not 0.0 <= self.rework_fraction <= 1.0:
+			raise ValueError(
+				f"the rework fraction of {self.rework_fraction:g} is not a share; 0.0 is "
+				"a diff the reviewer accepted whole and 1.0 is one returned entire, and "
+				"nothing outside that range is a fraction of a diff (§20.3 item 3)"
+			)
+		return self
+
+
+V01_REVIEW_MINUTES_PER_DIFF: Final[float] = 15.0
+"""§1.4's v0.1 alternative, as the number the per-diff measurement is read against.
+
+The spec states it twice in prose — "roughly four units an hour" (§1.4) and "about fifteen
+minutes a diff" (§20.3 item 3's comparison) — and the two are one rate. Held here so the
+sentence and the number cannot drift into two statements of one fact, which is what
+:data:`MAINTAINABILITY_NOT_VERIFIED` does for the debt term.
+
+It is a *reading*, not a ceiling: nothing in this build refuses a diff that cost more than
+this, for the reason :data:`THETA_GATE_BUILT` and :data:`MODE_M_CEILING` both give — a
+measured actual may not move a bound, and one project's log cannot state §1.4's claim,
+which is about a population.
+"""
+
+
+def diff_review_detail(
+	reviews: tuple[DiffReview, ...],
+	sealed_dispatches: int,
+	gate_minutes: float | None,
+) -> str:
+	"""The per-diff reading, stated once so the report, the document and the CLI agree.
+
+	Three surfaces state these figures, and a mean computed at three call sites is three
+	numbers that agree only until one of them is edited. This is the one implementation;
+	:meth:`DeliveryReport.diff_review_detail` and the CLI both call it.
+
+	**Two comparisons, both stated.** §20.3 item 3 asks for the per-diff number so §1.4's
+	claim can be read against v0.1's ~15 minutes a diff; §21 R13 asks for the comparison
+	*the other way*, gate-minutes against diff-minutes, because R13's failure mode is
+	integration risk growing as n² while human attention stays flat. A check that named
+	only the diff total would leave R13 readable from the `sofact deliver` screen, where
+	the two headings happen to be adjacent, and not from the report a deploy gate
+	approves — which is where it has to be readable.
+
+	The coverage clause is unconditional when diffs exist, because the mean is over the
+	reviewed subset: a reader who takes it for the project's whole per-diff cost has been
+	misled in §1.4's favour, which is the failure this instrument was built around.
+	"""
+	total = sum(r.human_minutes for r in reviews)
+	coverage = len(reviews), sealed_dispatches
+	if not reviews:
+		return (
+			"no diff review has been recorded, so the per-diff half of §20.3 item 3 is "
+			"unmeasured rather than zero — and §1.4's claim cannot be read against the "
+			"v0.1 alternative until it is. `sofact review` records one, and "
+			"`sofact review --list` names the sealed diffs to read"
+		)
+	mean = total / len(reviews)
+	rework = sum(r.rework_fraction for r in reviews) / len(reviews)
+	gate_clause = (
+		f"Gate-minutes {gate_minutes:g} against diff-minutes {total:g} is §21 R13's "
+		"comparison, and the two are printed rather than divided: a ratio of a declared "
+		"pair is a derived claim, and a verdict on it would be a ceiling raised on an "
+		"unmeasured number. "
+		if gate_minutes is not None
+		else "No gate has recorded a cost, so §21 R13's gate-against-diff comparison "
+		"cannot be read yet. "
+	)
+	return (
+		f"{len(reviews)} diff(s) reviewed, {total:g} human-minute(s) total, "
+		f"mean {mean:.1f} human-minute(s) per reviewed diff, mean rework fraction "
+		f"{rework:.3f}. Coverage: {coverage[0]} of {coverage[1]} sealed diff(s). "
+		+ gate_clause
+		+ "§1.4 names v0.1's review rate as roughly four units an hour, about "
+		f"{V01_REVIEW_MINUTES_PER_DIFF:g} minutes a diff, and this is the number to read "
+		"against it. The mean is over the diffs that were reviewed, not over the "
+		"project, so it is not the whole review cost — the coverage count beside it is "
+		"what says so. A single project's log cannot settle §1.4 either way: "
+		"sub-linearity is an observation about a population, not about one log"
+	)
 
 
 # --------------------------------------------------------------------------- #
@@ -5645,6 +5781,97 @@ class DeliveryReport(View):
 			return None
 		return sum(c.rework_fraction for c in self.gate_costs) / len(self.gate_costs)
 
+	diff_reviews: tuple[DiffReview, ...] = ()
+	"""§20.3 item 3's per-diff half: what each reviewed diff cost, one row per dispatch.
+
+	FR-160's per-gate measurement is :attr:`gate_costs`; this is the number §20.3 puts
+	beside it so §1.4's claim — attention is spent per platform rather than per module —
+	can be read against the v0.1 alternative, which reviewed every diff at roughly four
+	units an hour. Empty means *unmeasured*, not *free to review*.
+
+	One row per dispatch rather than every recorded sitting, because a diff reviewed
+	twice is one diff: :attr:`diff_rework_fraction` and the coverage pair would both be
+	wrong if the denominator counted sittings.
+	"""
+
+	sealed_dispatches: int = 0
+	"""How many dispatches sealed a commit, so the review mean has a denominator.
+
+	Carried beside :attr:`diff_reviews` rather than derived here, because the count
+	comes from the dispatch log and a report that carried only the reviewed rows would
+	be unable to say what fraction of the project's diffs anyone read — which is the
+	number that keeps the per-diff mean from flattering §1.4's claim.
+	"""
+
+	@property
+	def reviewed_minutes(self) -> float | None:
+		"""What the reviewed diffs cost in total, or ``None`` when none was reviewed.
+
+		``None`` rather than ``0.0`` for :attr:`rework_fraction`'s reason: zero would be
+		the claim that the project's diffs were free to read, which is a different and
+		flattering statement (§20.3 item 3, NFR-024).
+
+		This is the per-diff half of what :attr:`sofact.views.ProjectState.total_human_minutes`
+		is for gates, and the two are **not** summed: a gate's minutes are spent per
+		platform and a diff's per module, so one total over both would average §1.4's two
+		populations and answer neither question. Both are printed and read separately.
+		"""
+		if not self.diff_reviews:
+			return None
+		return sum(r.human_minutes for r in self.diff_reviews)
+
+	@property
+	def mean_diff_minutes(self) -> float | None:
+		"""The mean human-minutes one reviewed diff took, or ``None`` when none was.
+
+		The number §20.3 item 3 exists to produce: §1.4's claim is read by putting this
+		beside v0.1's roughly four units an hour, about fifteen minutes a diff.
+
+		The denominator is the *reviewed* diffs, not the project's diffs, so this figure
+		on its own flatters §1.4's claim in exactly the direction the claim wants —
+		which is why :attr:`review_coverage` is never printed without it.
+		"""
+		if not self.diff_reviews:
+			return None
+		return sum(r.human_minutes for r in self.diff_reviews) / len(self.diff_reviews)
+
+	@property
+	def diff_rework_fraction(self) -> float | None:
+		"""The mean share of each reviewed diff returned to the producer (§20.3 item 3).
+
+		``None`` when no diff was reviewed, for the reason :attr:`rework_fraction` gives.
+		Deliberately separate from :attr:`rework_fraction` rather than pooled with it: a
+		gate's fraction is of a *slice* and a diff's is of a *diff*, so the denominators
+		differ and one mean over both would average two quantities.
+		"""
+		if not self.diff_reviews:
+			return None
+		return sum(r.rework_fraction for r in self.diff_reviews) / len(self.diff_reviews)
+
+	@property
+	def review_coverage(self) -> tuple[int, int] | None:
+		"""Reviewed diffs against sealed diffs, or ``None`` when none sealed (§20.3 item 3).
+
+		The pair travels with the mean because §1.4's claim wants per-module attention to
+		look small, and a mean over the diffs somebody chose to review reports exactly
+		that while the rest were read by nobody.
+		"""
+		if not self.sealed_dispatches:
+			return None
+		return (len(self.diff_reviews), self.sealed_dispatches)
+
+	def _diff_review_detail(self) -> str:
+		"""The per-diff reading for this report (:func:`diff_review_detail`).
+
+		A method rather than a property because the module-level function is the one
+		implementation and three surfaces call it; this is the report's door to it.
+		"""
+		return diff_review_detail(
+			self.diff_reviews,
+			self.sealed_dispatches,
+			sum(c.human_minutes for c in self.gate_costs) if self.gate_costs else None,
+		)
+
 	autonomy: AutonomyLevel
 	"""The lowest ceiling anything in the delivery carries (FR-122), capped at L2 (FR-123).
 
@@ -7672,6 +7899,7 @@ class LedgerKind(StrEnum):
 	DELIVERY_RENDERED = "delivery.rendered"
 	DEPLOY_RECORDED = "deploy.recorded"
 	GATE_COST_RECORDED = "gate_cost.recorded"
+	DIFF_REVIEWED = "diff.reviewed"
 	ORACLE_AUDITED = "oracle.audited"
 	ADVERSARIAL_AUDITED = "adversarial.audited"
 	AUTHORSHIP_CHECKED = "authorship.checked"
@@ -7933,6 +8161,15 @@ class ProjectState(View):
 	the accessor is the only intended reader.
 	"""
 
+	reviews: tuple[DiffReview, ...] = ()
+	"""What each human review of a sealed diff cost, oldest first (§20.3 item 3).
+
+	Appended and never keyed, by ``gate_costs``' rule: a second sitting on one diff is
+	a second measurement rather than an edit, and the history of what was first claimed
+	is itself part of what §20.3 is measuring. :meth:`latest_reviews` reads the latest
+	per dispatch, so ``reviewed_minutes`` cannot double-count a diff reviewed twice.
+	"""
+
 	oracle_audits: tuple[OracleAuditReport, ...] = ()
 	"""Every adversarial oracle audit the log records, oldest first (FR-107).
 
@@ -8052,6 +8289,101 @@ class ProjectState(View):
 		if not latest:
 			return None
 		return sum(c.human_minutes for c in latest)
+
+	def review_for(self, dispatch_id: str) -> DiffReview | None:
+		"""The most recent review of one dispatch's diff, if any (§20.3 item 3).
+
+		Keyed by dispatch rather than by step, because a step can be dispatched more
+		than once and each dispatch seals its own commit — keying by step would collapse
+		two reviewable diffs into one and understate the per-diff total.
+		"""
+		matching = [r for r in self.reviews if r.dispatch_id == dispatch_id]
+		return matching[-1] if matching else None
+
+	@property
+	def latest_reviews(self) -> tuple[DiffReview, ...]:
+		"""One review per reviewed dispatch, the most recent (§20.3 item 3).
+
+		The reader every per-diff aggregate goes through, because ``reviews`` is
+		appended and never keyed: summing the rows would count a diff reviewed twice as
+		two diffs, which inflates the denominator of the very comparison §1.4's claim
+		rests on.
+		"""
+		seen: dict[str, DiffReview] = {}
+		for review in self.reviews:
+			seen[review.dispatch_id] = review
+		return tuple(seen.values())
+
+	@property
+	def reviewed_minutes(self) -> float | None:
+		"""Total human-minutes spent reviewing sealed diffs (§20.3 item 3).
+
+		``None`` when no diff has been reviewed, which is a different statement from
+		zero — the same three-state shape :attr:`total_human_minutes` draws, and for the
+		same reason: a factory reporting 0 here would be reporting that its diffs were
+		free to read.
+		"""
+		latest = self.latest_reviews
+		if not latest:
+			return None
+		return sum(r.human_minutes for r in latest)
+
+	@property
+	def mean_diff_rework(self) -> float | None:
+		"""The mean share of each reviewed diff returned to the producer (§20.3 item 3).
+
+		A mean rather than a sum because a fraction of a diff does not add across diffs,
+		and kept separate from :attr:`DeliveryReport.rework_fraction` because the
+		denominators differ: a gate's fraction is of a *slice*, a diff's is of a *diff*.
+		Pooling them would average two different quantities.
+		"""
+		latest = self.latest_reviews
+		if not latest:
+			return None
+		return sum(r.rework_fraction for r in latest) / len(latest)
+
+	@property
+	def sealed_dispatches(self) -> tuple[DispatchRecord, ...]:
+		"""The dispatches that sealed a commit — the diffs a human could have read.
+
+		**One definition, because two would drift.** The coverage denominator and the
+		delivery report's ``sealed_dispatches`` count are the same set, and a
+		comprehension repeated at each site is two answers to one question that agree
+		only until one of them is edited.
+
+		``sealed_commit is None`` covers two facts that ``head_commit`` distinguishes: a
+		session that changed nothing, and a session whose producer committed its own
+		work. For *this* question they are one fact — SoFact sealed no diff, so there is
+		nothing a review could attach to — and the consequence is an accepted limit
+		rather than a defect: a producer that commits its own work is unreviewable
+		through ``sofact review``, because the alternative is letting an operator
+		hand-type a commit sha and attach a number to a diff that may have moved.
+		"""
+		return tuple(
+			d
+			for d in self.dispatches
+			if d.checkout is not None and d.checkout.sealed_commit is not None
+		)
+
+	@property
+	def review_coverage(self) -> tuple[int, int] | None:
+		"""How many sealed diffs were reviewed, and how many sealed one (§20.3 item 3).
+
+		**The number that keeps the per-diff mean honest.** §1.4's claim wants human
+		attention per module to be small, so a mean taken over only the diffs somebody
+		chose to review flatters it — 3 reviewed of 40 sealed would report a tidy
+		per-diff cost while 37 diffs were read by nobody. The mean is a fact about the
+		reviewed subset; this pair is what says so, and the two travel together.
+
+		``None`` when no dispatch sealed a commit, which is not ``(0, 0)``: no diff
+		existed to review, and a zero pair would read as a project that reviewed nothing
+		when it is a project that produced nothing to review (NFR-024).
+		"""
+		sealed = {d.id for d in self.sealed_dispatches}
+		if not sealed:
+			return None
+		reviewed = {r.dispatch_id for r in self.latest_reviews}
+		return (len(sealed & reviewed), len(sealed))
 
 	@property
 	def delivery(self) -> DeliveryReport | None:

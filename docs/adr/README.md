@@ -80,6 +80,8 @@ than argued. Numbering is sequential and never reused.
 | [0065](0065-the-roadmap-tally-is-counted-from-its-rows.md) | The roadmap tally is counted from its rows, and the rule has two disjuncts | Accepted |
 | [0066](0066-the-egress-half-of-the-boundary-is-measured.md) | The egress half of the boundary is measured, and an open network is not credited | Accepted |
 | [0067](0067-the-boundary-is-two-modules-because-one-of-them-opens-a-socket.md) | The boundary is two modules, because one of them opens a socket | Accepted |
+| [0068](0068-a-diff-review-is-asked-for-and-the-diffs-nobody-read-are-part-of-the-number.md) | §20.3 M0 item 3 asks for human review time **per gate *and* per diff** so §1.4's claim — attention is spent per platform, not per module — can be compared against the v0.1 alternative's ~15 minutes a diff. ADR-0043 built the per-gate half; this is the per-diff half, and §21 **R13** makes it load-bearing: "M0 item 3 compares gate-minutes to diff-minutes directly", naming the failure it would refute as fatal to the business case. The diff is keyed by **dispatch, not step** — a step can be dispatched twice and each dispatch seals its own commit, so keying by step would collapse two reviewable diffs into one and *understate* the one number §1.4's claim rests on — with `sealed_commit` pinned beside it for `ChangeUnit`'s reason: a review whose figure could later be read against a different diff is not a measurement of a diff. `record_diff_review` **refuses a dispatch that sealed nothing**, ADR-0043's gate refusal one requirement along. The trap the instrument is built around is that §1.4 *wants* per-module attention to look small, so a mean over the three diffs somebody chose to review reports exactly that while thirty-seven were read by nobody: **coverage is therefore a first-class number beside the mean**, and `None` when nothing sealed rather than `(0, 0)` — ADR-0054's and ADR-0062's rule that a number readable only one way is a number nobody checked. Both spec comparisons are printed and **neither is divided**: a ratio of two declared numbers is the derived claim ADR-0043 refused, and `THETA_GATE_BUILT`/`MODE_M_CEILING` stay put because a measured actual may not move a bound. The diff's rework fraction is a share of the diff and is never pooled with the gate's share of a slice. **Six canaries, five caught**; the one that missed is recorded because the miss is the finding — `X and tuple(self.dispatches)` short-circuits to the empty tuple when nothing sealed, so the mutation changed the code without changing the observation, and only the unconditional form failed. |
+| [0068](0068-a-diff-review-is-asked-for-and-the-diffs-nobody-read-are-part-of-the-number.md) | A diff review is asked for, and the diffs nobody read are part of the number | Accepted |
 
 ## Mapping to the specification's open decisions
 
@@ -102,7 +104,7 @@ refers to an entry in the [source ledger](../sources/README.md).
 
 ## Records that are not resolutions of an open decision
 
-Not every decision resolves a `D`. Forty-seven records here answer questions the specification
+Not every decision resolves a `D`. Forty-eight records here answer questions the specification
 never had to ask — a few because they are about this repository's own tooling rather than
 about the factory's behaviour, and the rest because the rule each replaces was never written
 down at all and so had no `D` to resolve:

@@ -29,6 +29,7 @@ from sofact.views import (
 	DecompositionGate,
 	DeliveryReport,
 	DeployRecord,
+	DiffReview,
 	DispatchRecord,
 	ElicitationAnswer,
 	EscapeEvent,
@@ -147,6 +148,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	deliveries: list[DeliveryReport] = []
 	deploys: list[DeployRecord] = []
 	gate_costs: list[GateCost] = []
+	reviews: list[DiffReview] = []
 	oracle_audits: list[OracleAuditReport] = []
 	adversarial_audits: list[AdversarialAuditReport] = []
 	authorship_checks: list[AuthorshipCheck] = []
@@ -256,6 +258,13 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# `ProjectState.gate_cost` reads the latest per gate, so the sum cannot
 				# double-count a gate that was measured twice.
 				gate_costs.append(GateCost.model_validate(payload["cost"]))
+			case LedgerKind.DIFF_REVIEWED:
+				# Appended, `gate_costs`' rule one requirement along: §20.3 item 3
+				# measures a human act, and two sittings on one diff are two
+				# measurements rather than an edit. `ProjectState.latest_reviews` reads
+				# the latest per dispatch, so the total cannot double-count a diff that
+				# was reviewed twice.
+				reviews.append(DiffReview.model_validate(payload["review"]))
 			case LedgerKind.ESCAPE_RECORDED:
 				# Appended and never keyed: an escape is an event that happened, so two
 				# rows are two events — a revert and then a hotfix. FR-022's numerator
@@ -294,6 +303,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		deliveries=tuple(deliveries),
 		deploys=tuple(deploys),
 		gate_costs=tuple(gate_costs),
+		reviews=tuple(reviews),
 		oracle_audits=tuple(oracle_audits),
 		adversarial_audits=tuple(adversarial_audits),
 		authorship_checks=tuple(authorship_checks),

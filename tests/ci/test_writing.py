@@ -37,6 +37,7 @@ from synthetic import (
 from sofact.delivery import DELIVERY_ARTIFACT_PATHS
 from sofact.service import FactoryService
 from sofact.views import (
+	V01_REVIEW_MINUTES_PER_DIFF,
 	DeliveryArtifactKind,
 	DeliveryEnvelope,
 	DeliveryReport,
@@ -369,6 +370,49 @@ class TestTheGateCostAndEnvelopeReachTheDocument:
 
 		document = render_delivery_document(report)
 
+		assert "unmeasured rather than zero" in document
+
+	async def test_a_recorded_diff_review_is_in_the_document(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""§20.3 item 3 puts the per-diff number beside the per-gate one, and the
+		document is what a human reads — a number that reached the type and not the file
+		reached nobody."""
+		from synthetic import plan_and_service
+
+		service, plan = await plan_and_service(
+			home, tmp_path, "writes-work-complete-writes-module", commands="true"
+		)
+		await service.dispatch_plan(plan.id, max_steps=1)
+		state = await service.state()
+		sealed = [
+			d.id
+			for d in state.dispatches
+			if d.checkout is not None and d.checkout.sealed_commit is not None
+		]
+		assert sealed, "the fixture sealed no diff, so the section is not under test"
+		await service.record_diff_review(
+			sealed[0], human_minutes=24.0, rework_fraction=0.2, by="operator"
+		)
+
+		report = await service.render_delivery(plan.id, root=a_written_root(tmp_path))
+		document = render_delivery_document(report)
+
+		assert "## Diff review" in document
+		assert "24 human-minute(s)" in document
+		assert "20% of the diff returned to the producer" in document
+		assert f"{V01_REVIEW_MINUTES_PER_DIFF:g} minutes a diff" in document
+		assert "Coverage:" in document
+
+	async def test_an_unreviewed_project_reads_unmeasured_not_free(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		_, report = await a_rendered_report(home, tmp_path)
+		assert report.diff_reviews == ()
+
+		document = render_delivery_document(report)
+
+		assert "## Diff review" in document
 		assert "unmeasured rather than zero" in document
 
 	async def test_the_human_minutes_dimension_is_the_one_that_moved(

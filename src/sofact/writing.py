@@ -31,6 +31,7 @@ from sofact.views import (
 	DELIVERY_REQUIREMENTS,
 	TOPOLOGY_ISOLATION,
 	TOPOLOGY_MODIFIER,
+	V01_REVIEW_MINUTES_PER_DIFF,
 	DeliveryArtifactKind,
 	DeliveryReport,
 	DeploymentTopology,
@@ -218,6 +219,42 @@ def render_delivery_document(report: DeliveryReport) -> str:
 		lines.append(
 			"No gate has recorded what it cost, so the reviewer's budget is unmeasured "
 			"rather than zero (FR-160)."
+		)
+
+	lines += ["", "## Diff review", ""]
+	if report.diff_reviews:
+		for row in report.diff_reviews:
+			lines.append(
+				f"- **{row.dispatch_id[:8]}** at `{row.sealed_commit[:7]}`: "
+				f"{row.human_minutes:g} human-minute(s), "
+				f"{row.rework_fraction:.0%} of the diff returned to the producer "
+				f"(reviewed by {row.reviewed_by})"
+			)
+		lines.append(
+			f"- **Total**: {report.reviewed_minutes:g} human-minute(s) over "
+			f"{len(report.diff_reviews)} reviewed diff(s); mean "
+			f"{report.mean_diff_minutes:.1f} per reviewed diff; mean rework fraction "
+			f"{report.diff_rework_fraction:.3f}"
+			+ (
+				f". Coverage: {report.review_coverage[0]} of "
+				f"{report.review_coverage[1]} sealed diff(s)"
+				if report.review_coverage is not None
+				else ""
+			)
+		)
+		lines.append(
+			"\n§1.4 names v0.1's review rate as roughly four units an hour — about "
+			f"{V01_REVIEW_MINUTES_PER_DIFF:g} minutes a diff. The mean above is over the "
+			"diffs that were reviewed, so the coverage count beside it is what says how "
+			"much of the project it describes. §21 R13's comparison — gate-minutes "
+			"against diff-minutes — is stated in the delivery report's "
+			"`diff_review_reported` check, where both totals are printed and neither is "
+			"divided by the other."
+		)
+	else:
+		lines.append(
+			"No diff review has been recorded, so the per-diff half of §20.3 item 3 is "
+			"unmeasured rather than zero (§20.3 item 3)."
 		)
 
 	lines += [

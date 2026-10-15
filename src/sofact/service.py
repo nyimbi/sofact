@@ -132,6 +132,7 @@ from sofact.views import (
 	DeploymentScope,
 	DeploymentTopology,
 	DeployRecord,
+	DiffReview,
 	DispatchRecord,
 	ElicitationAnswer,
 	ElicitationDimension,
@@ -845,6 +846,66 @@ class FactoryService:
 		values stay readable from the log for §20.3's baseline work.
 		"""
 		return (await self.state()).gate_costs
+
+	async def record_diff_review(
+		self,
+		dispatch_id: str,
+		*,
+		human_minutes: float,
+		rework_fraction: float,
+		by: str,
+	) -> DiffReview:
+		"""Record what one human review of one sealed diff cost (§20.3 item 3).
+
+		FR-160's per-gate half is :meth:`record_gate_cost`; this is the per-diff half
+		§20.3 item 3 names beside it, and the requirement exists so §1.4's claim —
+		attention is spent per platform rather than per module — can be read against the
+		v0.1 alternative, which reviewed every diff at roughly four units an hour.
+
+		It refuses a dispatch that sealed nothing. A session that changed nothing is not
+		a diff a human could have read, and allowing one would let the per-diff total be
+		assembled from diffs that never existed — the same defect as a gate cost for a
+		gate nobody sat at, which :meth:`record_gate_cost` refuses one requirement over.
+		``seal_branch`` already records the fact: a dispatch that had nothing to commit
+		carries a null ``sealed_commit``.
+
+		The reviewed commit is taken from the dispatch rather than asked for, so a review
+		cannot name a diff the factory did not seal.
+		"""
+		assert by.strip(), "a recorded review names who reviewed it"
+		state = await self.state()
+		dispatched = state.dispatch(dispatch_id)
+		if dispatched is None:
+			raise ValueError(
+				f"no dispatch {dispatch_id!r} in the log, so there is no diff to review"
+			)
+		sealed = dispatched.checkout.sealed_commit if dispatched.checkout else None
+		if sealed is None:
+			raise ValueError(
+				f"dispatch {dispatch_id!r} sealed no commit, so there is no diff a human "
+				"could have reviewed (§20.3 item 3). A session that changed nothing "
+				"produced nothing to read, and a review recorded against it would be a "
+				"measurement of a sitting that never happened"
+			)
+		review = DiffReview(
+			dispatch_id=dispatched.id,
+			step_id=dispatched.step_id,
+			sealed_commit=sealed,
+			human_minutes=human_minutes,
+			rework_fraction=rework_fraction,
+			reviewed_by=by,
+			reviewed_at=now(),
+		)
+		self._commit(LedgerKind.DIFF_REVIEWED, {"review": review.model_dump(mode="json")})
+		return review
+
+	async def diff_reviews(self) -> tuple[DiffReview, ...]:
+		"""One review per reviewed dispatch, most recent (§20.3 item 3).
+
+		The latest per dispatch rather than every row, because a diff reviewed twice is
+		one diff reviewed twice and summing the rows would inflate the denominator.
+		"""
+		return (await self.state()).latest_reviews
 
 	# --------------------------------------------------------------- P0: goals
 
@@ -3189,6 +3250,10 @@ class FactoryService:
 				verdicts=self._worst_verdict_per_clause(state),
 				envelope_actuals=actuals,
 				gate_costs=state.gate_costs,
+				# The latest review per dispatch rather than every row: a diff reviewed
+				# twice is one diff, and the mean's denominator is diffs (ADR-0068).
+				diff_reviews=state.latest_reviews,
+				sealed_dispatches=len(state.sealed_dispatches),
 				root=root,
 				system=system or (goal.statement[:80] if goal is not None else contract.id),
 				entry_point=entry_point or str(root or self.home),

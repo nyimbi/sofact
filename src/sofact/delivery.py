@@ -63,6 +63,7 @@ from sofact.views import (
 	DeliveryReport,
 	DeploymentBoundary,
 	DeploymentTopology,
+	DiffReview,
 	EnvelopeActuals,
 	EscapeEvent,
 	EscapeReport,
@@ -79,6 +80,7 @@ from sofact.views import (
 	UnverifiedClause,
 	VerdictOutcome,
 	VerifiedClause,
+	diff_review_detail,
 	now,
 	topology_ceiling,
 	topology_refusal,
@@ -591,6 +593,8 @@ def report(
 	verdicts: Mapping[str, VerdictOutcome],
 	envelope_actuals: EnvelopeActuals | None,
 	gate_costs: tuple[GateCost, ...] = (),
+	diff_reviews: tuple[DiffReview, ...] = (),
+	sealed_dispatches: int = 0,
 	root: Path | None = None,
 	system: str,
 	entry_point: str,
@@ -838,6 +842,18 @@ def report(
 			),
 		),
 		GateCheck(
+			name="diff_review_reported",
+			passed=True,
+			detail=(
+				"§20.3 item 3's per-diff half, read against the v0.1 alternative: "
+				+ diff_review_detail(
+					diff_reviews,
+					sealed_dispatches,
+					sum(c.human_minutes for c in gate_costs) if gate_costs else None,
+				)
+			),
+		),
+		GateCheck(
 			name="autonomy_capped_for_mode_g",
 			passed=delivered_autonomy <= MODE_G_CEILING,
 			detail=(
@@ -985,6 +1001,8 @@ def report(
 		unvalidated_assumptions=specification.assumptions if specification is not None else (),
 		envelope_actuals=envelope_actuals,
 		gate_costs=gate_costs,
+		diff_reviews=diff_reviews,
+		sealed_dispatches=sealed_dispatches,
 		autonomy=delivered_autonomy,
 		module_autonomy=modules_autonomy,
 		topology=topology,

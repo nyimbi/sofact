@@ -814,9 +814,10 @@ async def plan_and_service(
 	mode: str,
 	*,
 	commands: str | None = None,
+	envelope: DeliveryEnvelope | None = None,
 ) -> tuple[FactoryService, GoalPlan]:
 	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
-	registered = synthetic_service(home, tmp_path, mode)
+	registered = synthetic_service(home, tmp_path, mode, envelope=envelope)
 	await registered.probe_harness(None)
 	_, contract_id = await gated_contract(registered, commands=commands)
 	return registered, await registered.compile_plan(contract_id)

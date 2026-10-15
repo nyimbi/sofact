@@ -53,6 +53,7 @@ from sofact.views import (
 	TOPOLOGY_MODIFIER,
 	TUNED_MODEL_UNREACHABLE,
 	UNPRODUCIBLE_KINDS,
+	V01_REVIEW_MINUTES_PER_DIFF,
 	AdversarialAuditReport,
 	Assumption,
 	BoundaryMechanism,
@@ -1068,6 +1069,129 @@ async def _gate(
 		f"\n{named.value} approved by {approved.approved_by} at {approved.approved_at}. "
 		f"Pipeline is now in {await svc.current_phase()}.",
 		fg="green",
+	)
+
+
+@app.command()
+def review(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	dispatch: str | None = typer.Argument(
+		None, help="The dispatch whose sealed diff was reviewed. A unique id prefix is enough."
+	),
+	list_sealed: bool = typer.Option(
+		False, "--list", help="List sealed diffs and whether each has been reviewed."
+	),
+	minutes: float | None = typer.Option(
+		None, "--minutes", help="Human-minutes the review took (§20.3 item 3)."
+	),
+	rework: float = typer.Option(
+		0.0, "--rework", help="Share of the diff returned to the producer, 0.0-1.0."
+	),
+	by: str = typer.Option("operator", help="Who reviewed it. Recorded, not verified."),
+) -> None:
+	"""Record what reviewing one sealed diff cost, or list the diffs to review (§20.3).
+
+	§20.3 item 3 asks for review time "logged per gate *and* per diff, so §1.4's claim
+	can be compared directly against the v0.1 alternative" — whose rate §1.4 names as
+	roughly four units an hour, about fifteen minutes a diff. ``--list`` is how an
+	operator finds a diff: it names every dispatch that sealed a commit, with the
+	commit, the paths it sealed and whether anyone has reviewed it.
+	"""
+	asyncio.run(_review(_service(_home_of(ctx, home)), dispatch, list_sealed, minutes, rework, by))
+
+
+def _resolve_dispatch(dispatches: tuple[DispatchRecord, ...], wanted: str) -> DispatchRecord:
+	"""The one sealed dispatch ``wanted`` names, by full id or unique prefix.
+
+	UUID7 strings are long enough that typing one is a chore, and a verb that is a chore
+	is one an operator stops using — which would leave §20.3 item 3 unmeasured for the
+	reason the measurement is inconvenient. An ambiguous prefix is refused by naming the
+	candidates rather than resolved by taking the first, because silently picking one
+	would record a review against a diff the operator did not read.
+	"""
+	sealed = [d for d in dispatches if d.checkout is not None and d.checkout.sealed_commit]
+	matches = [d for d in sealed if d.id == wanted] or [
+		d for d in sealed if d.id.startswith(wanted)
+	]
+	if not matches:
+		if not sealed:
+			raise ValueError(
+				"no dispatch has sealed a diff, so there is nothing to review. A review "
+				"attaches to a sealed commit (§20.3 item 3), and none exists yet"
+			)
+		raise ValueError(f"no sealed diff {wanted!r}. Run `sofact review --list` to see them")
+	if len(matches) > 1:
+		raise ValueError(
+			f"{wanted!r} names {len(matches)} sealed diffs: "
+			+ ", ".join(d.id for d in matches)
+			+ ". Name more of the id"
+		)
+	return matches[0]
+
+
+async def _review(
+	svc: FactoryService,
+	dispatch: str | None,
+	list_sealed: bool,
+	minutes: float | None,
+	rework: float,
+	by: str,
+) -> None:
+	state = await svc.state()
+	if list_sealed or dispatch is None:
+		sealed = [
+			d for d in state.dispatches if d.checkout is not None and d.checkout.sealed_commit
+		]
+		if not sealed:
+			typer.secho(
+				"no dispatch has sealed a diff, so there is nothing to review yet. A "
+				"review attaches to a sealed commit (§20.3 item 3).",
+				fg="yellow",
+			)
+			raise typer.Exit(code=1)
+		coverage = state.review_coverage
+		head = (
+			f"{coverage[0]} of {coverage[1]} sealed diff(s) reviewed"
+			if coverage is not None
+			else "no sealed diffs"
+		)
+		typer.secho(f"\nsealed diffs — {head}", fg="cyan", bold=True)
+		for record in sealed:
+			assert record.checkout is not None and record.checkout.sealed_commit
+			sha = record.checkout.sealed_commit[:7]
+			module = record.checkout.module or f"step {record.step_ordinal}"
+			paths = f"{record.checkout.sealed_paths} path(s)"
+			own = state.review_for(record.id)
+			spend = f"{own.human_minutes:g} min" if own is not None else "unreviewed"
+			typer.secho(
+				f"  {record.id[:8]}  {sha}  {module:<12} {paths:<10} {spend}",
+				fg="bright_black" if own is None else "green",
+			)
+		typer.secho(
+			"\n`sofact review <id> --minutes N [--rework F]` records one. §1.4 names "
+			f"v0.1's per-diff review rate as about {V01_REVIEW_MINUTES_PER_DIFF:g} "
+			"minutes a diff.",
+			fg="cyan",
+		)
+		return
+
+	if minutes is None:
+		typer.secho("--minutes is required to record a review (§20.3 item 3).", fg="yellow")
+		raise typer.Exit(code=1)
+	try:
+		chosen = _resolve_dispatch(state.dispatches, dispatch)
+		recorded = await svc.record_diff_review(
+			chosen.id, human_minutes=minutes, rework_fraction=rework, by=by
+		)
+	except ValueError as exc:
+		typer.secho(f"cannot record review: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(
+		f"\n{recorded.dispatch_id[:8]} reviewed: {recorded.human_minutes:g} human-minute(s), "
+		f"{recorded.rework_fraction:.0%} of the diff returned to the producer, against "
+		f"commit {recorded.sealed_commit[:7]} (§20.3 item 3).",
+		fg="cyan",
 	)
 
 
@@ -3820,6 +3944,42 @@ async def _deliver(
 			f"across {len(report.gate_costs)} measured gate(s); mean rework fraction "
 			f"{report.rework_fraction:.3f}. §1.3's 180-600 is the budget this is measured "
 			"against.",
+			fg="cyan",
+		)
+
+	typer.secho("\n  diff review (§20.3 item 3)", fg="cyan")
+	if not report.diff_reviews:
+		typer.secho(
+			"    no diff review has been recorded, so the per-diff half of §20.3 item 3 "
+			"is unmeasured rather than zero. `sofact review --list` names the sealed "
+			"diffs; `sofact review <id> --minutes N` records one.",
+			fg="yellow",
+		)
+	else:
+		for row in report.diff_reviews:
+			typer.secho(
+				f"    {row.dispatch_id[:8]} @ {row.sealed_commit[:7]}: "
+				f"{row.human_minutes:g} human-minute(s), "
+				f"{row.rework_fraction:.0%} of the diff returned (reviewed by "
+				f"{row.reviewed_by})",
+				fg="bright_black",
+			)
+		coverage = report.review_coverage
+		typer.secho(
+			f"    total {report.reviewed_minutes:g} human-minute(s) over "
+			f"{len(report.diff_reviews)} reviewed diff(s), mean "
+			f"{report.mean_diff_minutes:.1f} human-minute(s) per reviewed diff"
+			+ (
+				f"; coverage {coverage[0]} of {coverage[1]} sealed diff(s)."
+				if coverage is not None
+				else "."
+			),
+			fg="cyan",
+		)
+		typer.secho(
+			"    §1.4 names v0.1's review rate as about "
+			f"{V01_REVIEW_MINUTES_PER_DIFF:g} minutes a diff; the mean is over the diffs "
+			"that were reviewed, so read the coverage beside it.",
 			fg="cyan",
 		)
 

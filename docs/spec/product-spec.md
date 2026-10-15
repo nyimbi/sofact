@@ -2181,7 +2181,15 @@ tested, not assumed.
 2. **Oracle strength baseline** — mutation score per module on a real repo (Mode M)
    *and* measured strength of manufactured oracles on one real contract (Mode G).
 3. **Human review time** — logged per gate *and* per diff, so §1.4's claim can be
-   compared directly against the v0.1 alternative.
+   compared directly against the v0.1 alternative. **Both halves now exist
+   (2026-10-15, ADR-0043 and ADR-0068):** FR-160 records what each gate cost, and
+   `sofact review` records what each *sealed diff* cost, one row per dispatch with the
+   reviewed commit pinned. The report states diff-minutes beside gate-minutes — §21
+   R13's comparison — and beside v0.1's ~15 minutes a diff, dividing neither, and it
+   prints the **coverage** (diffs reviewed against diffs sealed) so a mean over the
+   reviewed subset cannot be read as the project's whole review cost. The *baseline*
+   is unchanged: a rate needs a project somebody actually reviewed, and a project with
+   no reviews reports unmeasured rather than zero (NFR-024).
 4. **Escape baseline** — requires a deployment. Until then all ceilings are
    hypotheses. **The instrument now exists (2026-10-13, ADR-0054):** FR-021–023 are
    built, so `sofact escapes` folds the ledger into a per-lane escape rate with the
