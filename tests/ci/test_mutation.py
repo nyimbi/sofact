@@ -371,7 +371,7 @@ class TestTheGateStaysShut:
 		from sofact.views import L4_GATE_THETA, THETA_GATE_BUILT
 
 		assert THETA_GATE_BUILT is False
-		assert L4_GATE_THETA == pytest.approx(0.80)
+		assert pytest.approx(0.80) == L4_GATE_THETA
 
 
 def _splice_unparseable(tree: ast.Module) -> ast.Module | None:

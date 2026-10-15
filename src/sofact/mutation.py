@@ -62,10 +62,10 @@ __all__ = [
 	"DEFAULT_MUTANT_TIMEOUT_SECONDS",
 	"MINIMUM_MUTANTS_FOR_A_NUMBER",
 	"OPERATORS",
+	"MutantResult",
 	"MutationOperator",
 	"MutationOutcome",
 	"MutationReport",
-	"MutantResult",
 	"StrengthRefusal",
 	"measure_strength",
 ]

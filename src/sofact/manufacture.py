@@ -51,9 +51,9 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import shlex
 import tempfile
-import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -62,11 +62,11 @@ from typing import Final, Protocol, TypeGuard, cast
 from sofact.boundary import boundary_env, wrap_argv
 from sofact.views import (
 	ClauseKind,
-	ManufactureRefusal,
-	ManufactureRefusalReason,
 	DeploymentBoundary,
 	EvidenceKind,
 	InterfaceMember,
+	ManufactureRefusal,
+	ManufactureRefusalReason,
 	OracleClass,
 	OracleDeclaration,
 )

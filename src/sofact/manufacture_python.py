@@ -39,13 +39,13 @@ from pathlib import Path
 from typing import Final
 
 from sofact.manufacture import (
-	ManufactureRefusal,
-	refusal,
-	ManufactureRefusalReason,
 	ManufacturedOracle,
+	ManufactureRefusal,
+	ManufactureRefusalReason,
 	ManufactureRequest,
 	ManufactureSpec,
 	artefact_index,
+	refusal,
 	render_argv,
 	slug,
 )

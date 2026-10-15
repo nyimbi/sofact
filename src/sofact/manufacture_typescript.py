@@ -36,13 +36,13 @@ from pathlib import Path
 from typing import Final
 
 from sofact.manufacture import (
-	ManufactureRefusal,
-	refusal,
-	ManufactureRefusalReason,
 	ManufacturedOracle,
+	ManufactureRefusal,
+	ManufactureRefusalReason,
 	ManufactureRequest,
 	ManufactureSpec,
 	artefact_index,
+	refusal,
 	render_argv,
 	slug,
 )
@@ -101,10 +101,10 @@ class TypeScriptManufactureBackend:
 				request,
 				ManufactureRefusalReason.UNSUPPORTED_RANK,
 				(
-					f"the typescript backend builds ranks 3 and 5. A rank-1 property over a "
+					"the typescript backend builds ranks 3 and 5. A rank-1 property over a "
 					"TypeScript module needs mapped-type machinery whose own correctness "
-					f"would then need checking, and a check that needs a check is not an "
-					f"oracle (FR-103)"
+					"would then need checking, and a check that needs a check is not an "
+					"oracle (FR-103)"
 				),
 			)
 		declared = request.surface

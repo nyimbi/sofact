@@ -402,7 +402,7 @@ class TestADispatchOwnsTwoWritableDirectories:
 			# `subprocess` rather than the module's own `_run`: a test that reached for
 			# the private helper would be asserting against the same wrapper it is
 			# checking, and the point here is what the *kernel* does with the profile.
-			completed = subprocess.run(  # noqa: S603
+			completed = subprocess.run(
 				[
 					SEATBELT,
 					"-p",
