@@ -73,6 +73,7 @@ from sofact.views import (
 	InheritedOracle,
 	MaintenanceLane,
 	ModuleClass,
+	ProbeOutcome,
 	Specification,
 	TraceLink,
 	UnverifiedClause,
@@ -288,7 +289,7 @@ def topology_statement(
 				"is in use even though the isolation was measured"
 			)
 			+ f". Declared isolation for {topology.value} is "
-			f"{TOPOLOGY_ISOLATION[topology]!r}; the measurement governs"
+			f"{TOPOLOGY_ISOLATION[topology]!r}; the measurement governs" + _egress_clause(boundary)
 		)
 	modifier = TOPOLOGY_MODIFIER[topology]
 	sign = f"{modifier:+d}" if modifier else "0"
@@ -300,6 +301,50 @@ def topology_statement(
 			if boundary is None
 			else f" — a probe measured **no** boundary that held: {boundary.observed}"
 		)
+		+ ("" if boundary is None else _egress_clause(boundary))
+	)
+
+
+def _egress_clause(boundary: DeploymentBoundary) -> str:
+	"""The egress half, said beside the isolation it qualifies (FR-019, FR-124, FR-152).
+
+	FR-030 requires the isolation guarantees reported beside the modifier, and the egress
+	half is the one a reader is most likely to assume: ``--offline`` reads like a network
+	boundary and FR-152 says in terms that it is not one. A sentence that reported
+	"seatbelt confined a probe child" and stopped there would let a reader supply the
+	network half from the word "confined" — which is the class of claim this whole
+	subsystem exists to refuse.
+
+	Every state is printed, including the unmeasured one, because the three are different
+	facts and the *absence* of a clause would read as the good case. ``INCONCLUSIVE``
+	names what was not measured rather than staying silent, which is the same direction
+	:attr:`~sofact.views.DeploymentBoundary.deny_read`'s empty tuple takes.
+
+	The credit is conditioned on ``enforced``, and that is not a formality. This function
+	is reachable from the *degraded* branch of :func:`topology_statement`, where the
+	ceiling modifier is the declared topology's negative one — and a record whose
+	filesystem half failed while its egress half measured denied would otherwise print
+	"the network half of FR-019 holds by measurement" beside a modifier that says nothing
+	confined the child. Two claims about one deployment that contradict each other, in one
+	sentence, is worse than either alone.
+	"""
+	if boundary.egress is ProbeOutcome.CONFIRMED:
+		if not boundary.enforced:
+			return (
+				". Egress was measured **denied** on its own — a child was refused a TCP "
+				"connect to a listener the measuring process had bound — but the boundary "
+				"is **not credited**: the filesystem half did not hold, so no ceiling "
+				"follows from the network half"
+			)
+		return (
+			". Egress is **measured denied**: a child under the same profile was refused a "
+			"TCP connect to a listener the measuring process had bound on 127.0.0.1, so "
+			"the network half of FR-019 holds by measurement rather than by configuration"
+		)
+	if boundary.egress is ProbeOutcome.ABSENT:
+		return ". Egress is **measured open** — " + boundary.egress_observed
+	return ". Egress was **not measured** on this deployment, which is not the same as denied: " + (
+		boundary.egress_observed or "no egress probe ran"
 	)
 
 

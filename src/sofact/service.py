@@ -26,7 +26,8 @@ from sofact.authorship import (
 	detect_authorship,
 	installed_package_root,
 )
-from sofact.boundary import TEMP_DIRNAME, detect_boundary
+from sofact.boundary import TEMP_DIRNAME
+from sofact.boundary_probe import detect_boundary
 from sofact.changecost import measure_change_costs
 from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle

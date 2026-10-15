@@ -11,29 +11,33 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import subprocess
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-from sofact.boundary import (
+from sofact.boundary import SEATBELT, seatbelt_profile, wrap_argv
+from sofact.boundary_probe import (
+	EGRESS_ALLOWED,
 	ESCAPE_MARKER,
 	INSIDE_MARKER,
 	READ_MARKER,
 	READ_REPORT,
-	SEATBELT,
 	detect_boundary,
-	seatbelt_profile,
-	wrap_argv,
+	egress_probe,
 )
+from sofact.delivery import topology_statement
 from sofact.views import (
 	TOPOLOGY_MODIFIER,
 	AutonomyLevel,
 	BoundaryMechanism,
 	DeploymentBoundary,
 	DeploymentTopology,
+	ProbeOutcome,
 	topology_ceiling,
 )
 
@@ -466,3 +470,191 @@ class TestADispatchOwnsTwoWritableDirectories:
 			assert f'(allow file-write* (subpath "{sessions.resolve()}"))' in wrapped[2], (
 				"the enforcement profile dropped the store grant the measurement recorded"
 			)
+
+
+class TestTheEgressHalfIsMeasured:
+	"""FR-019's isolation is two properties, and the second is the network (FR-124, FR-152).
+
+	M0 item 5 makes it an exit criterion in the spec's own words — "container boundary and
+	egress denial actually hold" — and FR-124's missing half names it: "packaging and
+	egress are not read from the topology". Nothing measured it, so a delivery reported a
+	boundary as enforced on the strength of the filesystem half alone.
+	"""
+
+	def test_a_confined_child_is_refused_a_loopback_connect(self) -> None:
+		"""The measurement itself, against a listener this process owns.
+
+		The port is bound and listening before the child runs, so a refusal is the
+		boundary and not an absent service. The control is in
+		:meth:`test_the_probe_reports_an_open_network_rather_than_guessing`, which runs the
+		same source without the profile.
+		"""
+		if not Path(SEATBELT).exists():
+			pytest.skip("this host offers no Seatbelt, so there is no mechanism to measure")
+
+		async def measure() -> DeploymentBoundary:
+			with tempfile.TemporaryDirectory() as home:
+				workspace = Path(home) / "ws"
+				workspace.mkdir()
+				return await detect_boundary(workspace)
+
+		measured = asyncio.run(measure())
+		assert measured.enforced, measured.observed
+		assert measured.egress is ProbeOutcome.CONFIRMED, measured.egress_observed
+		assert measured.egress_confined
+
+	def test_the_probe_reports_an_open_network_rather_than_guessing(self) -> None:
+		"""The control, and it is the half that makes the other one evidence.
+
+		A probe that reported ``CONFIRMED`` unconditionally would pass the test above. This
+		runs the *same* source with no profile and requires it to say the connect
+		succeeded — so the two tests together show the instrument discriminating rather
+		than agreeing with whatever it was asked.
+		"""
+		source, listener = egress_probe()
+		assert listener is not None, "a loopback listener must bind for the probe to run"
+		try:
+			completed = subprocess.run(
+				[sys.executable, "-c", source],
+				capture_output=True,
+				text=True,
+				timeout=30,
+				check=False,
+			)
+		finally:
+			listener.close()
+		assert EGRESS_ALLOWED in completed.stdout, (
+			f"an unconfined child could not reach a listener bound in this process, so the "
+			f"probe cannot distinguish a denied connect from an absent one: "
+			f"{completed.stdout!r} {completed.stderr!r}"
+		)
+
+	def test_the_detector_refuses_to_credit_a_boundary_whose_egress_is_open(self) -> None:
+		"""The fold, driven by a **real child**, which is what the canary found missing.
+
+		Blinding ``enforced = egress is not ProbeOutcome.ABSENT`` to ``enforced = True``
+		was **not caught** by the suite: the negative case existed only as a
+		``model_copy`` on a finished record, so it exercised the renderer and never the
+		detector. ``egress_unwrapped`` runs the same source against the same listener with
+		no profile, so the child genuinely connects and the verdict must be ``ABSENT`` —
+		and the boundary must then be ``enforced=False`` even though the filesystem half
+		held.
+		"""
+		if not Path(SEATBELT).exists():
+			pytest.skip("this host offers no Seatbelt, so there is no mechanism to measure")
+
+		async def measure() -> DeploymentBoundary:
+			with tempfile.TemporaryDirectory() as home:
+				workspace = Path(home) / "ws"
+				workspace.mkdir()
+				return await detect_boundary(workspace, egress_unwrapped=True)
+
+		measured = asyncio.run(measure())
+		assert measured.egress is ProbeOutcome.ABSENT, measured.egress_observed
+		assert measured.writes_confined, (
+			"the filesystem half must still hold; this probe unwraps only the egress child"
+		)
+		assert not measured.enforced, (
+			"a child that reached the network is not confined, whatever it could write"
+		)
+		assert measured.egress_observed
+
+	def test_an_open_egress_is_not_credited_as_a_boundary(self) -> None:
+		"""``ABSENT`` must make the boundary ``enforced=False``, not merely annotate it.
+
+		FR-019's ceiling is priced against what a producer can *do*, and a producer that
+		can reach the network has an exfiltration path whatever it can write. Crediting the
+		filesystem half while the network stood open is the same defect as crediting write
+		confinement while the answer key stayed legible.
+		"""
+		measured = _boundary(enforced=True).model_copy(
+			update={
+				"egress": ProbeOutcome.ABSENT,
+				"egress_observed": "the child connected, so egress is open",
+			}
+		)
+		assert not measured.egress_confined
+		statement = topology_statement(DeploymentTopology.T1, configured=True, boundary=measured)
+		assert "measured open" in statement
+		assert "not measured" not in statement, (
+			"an open network must not be reported with the wording for an unmeasured one"
+		)
+
+	def test_an_unmeasured_egress_says_so_and_does_not_read_as_denied(self) -> None:
+		"""The three states are different facts and the wording has to separate them.
+
+		The default is ``INCONCLUSIVE`` so a record written before the probe existed reads
+		as *not measured* rather than *measured and open* — and the sentence must say which
+		of the two it is, because a silent clause reads as the good case.
+		"""
+		measured = _boundary(enforced=True)
+		assert measured.egress is ProbeOutcome.INCONCLUSIVE
+		assert not measured.egress_confined
+		statement = topology_statement(DeploymentTopology.T1, configured=True, boundary=measured)
+		assert "not measured" in statement
+		assert "measured open" not in statement
+		assert "measured denied" not in statement
+
+	def test_the_denied_wording_does_not_appear_on_a_degraded_boundary(self) -> None:
+		"""A boundary that did not hold must not acquire the egress half's credit.
+
+		``_egress_clause`` is reachable from both branches of ``topology_statement``, and a
+		degraded record whose egress happened to measure ``CONFIRMED`` would otherwise
+		print "the network half of FR-019 holds by measurement" beside a modifier that
+		says nothing confined the child.
+		"""
+		degraded = _boundary(enforced=False).model_copy(
+			update={"egress": ProbeOutcome.CONFIRMED, "egress_observed": "denied"}
+		)
+		statement = topology_statement(DeploymentTopology.T1, configured=True, boundary=degraded)
+		assert "ceiling modifier -1" in statement
+		assert "holds by measurement" not in statement, (
+			"a boundary that confined nothing must not carry the egress credit"
+		)
+
+	def test_the_egress_probe_leaves_no_socket_and_no_file(self) -> None:
+		"""The listener is really listening, it is released, and the probe writes nothing.
+
+		A leaked bound port per measurement is a probe that eventually changes what it
+		measures on a long-lived service.
+
+		**The residue check is scoped to a directory this test owns, and the first draft
+		was not.** It diffed ``tempfile.gettempdir()`` before and after and failed on
+		``mat-debug-34174.log`` — another process's JVM log, written while the test ran.
+		A check whose jurisdiction is the whole shared temp directory fails for reasons
+		its operator cannot act on, and the fix an operator reaches for is to delete the
+		check. The workspace is the probe's jurisdiction; the host's temp directory is
+		not.
+		"""
+		with tempfile.TemporaryDirectory() as home:
+			workspace = Path(home) / "ws"
+			workspace.mkdir()
+			source, listener = egress_probe()
+			assert listener is not None and source
+			port = int(listener.getsockname()[1])
+			# It is really listening, which is what makes a refused connect a
+			# *measurement* rather than a service that was simply absent.
+			client = socket.create_connection(("127.0.0.1", port), 2.0)
+			accepted, _ = listener.accept()
+			accepted.close()
+			client.close()
+			listener.close()
+			# The port is released rather than leaked, so measuring once per run does not
+			# accumulate bound ports. `SO_REUSEADDR` permits a rebind over `TIME_WAIT` but
+			# not over a live listener, so this distinguishes closed from still-bound.
+			with socket.socket() as rebind:
+				rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+				rebind.bind(("127.0.0.1", port))
+			# And the probe's own source writes nothing: run it in a directory this test
+			# owns and assert the directory is untouched. The child prints its verdict to
+			# stdout rather than to a file, so there is no residue for the write half's
+			# marker check to read later. Run against the listener, which is now closed —
+			# the point is the *file* residue, not the verdict.
+			completed = subprocess.run(
+				[sys.executable, "-c", source],
+				cwd=workspace,
+				capture_output=True,
+				check=False,
+			)
+			assert completed.returncode == 0, completed.stderr.decode()
+			assert list(workspace.iterdir()) == [], "the egress probe child wrote into its cwd"

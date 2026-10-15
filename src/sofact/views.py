@@ -750,6 +750,25 @@ for T4 would be the direction a ceiling must never move on an unmeasured premise
 """
 
 
+class ProbeOutcome(StrEnum):
+	"""What a probe actually observed, for a capability (FR-148) or a boundary (FR-019).
+
+	``INCONCLUSIVE`` is first-class for the same reason ``INSUFFICIENT`` is on the
+	verdict side: a probe that could not decide must not be rounded to either verdict.
+	Rounding it to ``ABSENT`` would condemn a harness or a boundary that may well hold;
+	rounding it to ``CONFIRMED`` would be a fabricated capability.
+
+	It lives above :class:`BoundaryMechanism` rather than beside the harness types it was
+	written for, because :class:`DeploymentBoundary` defaults a field to it and a pydantic
+	model resolves its annotations and defaults at class-build time — a forward reference
+	to a later class in the same module is a ``NameError``, not a lazy lookup.
+	"""
+
+	CONFIRMED = "confirmed"
+	ABSENT = "absent"
+	INCONCLUSIVE = "inconclusive"
+
+
 class BoundaryMechanism(StrEnum):
 	"""What actually confines a child process, as *measured* rather than declared (FR-019).
 
@@ -836,6 +855,48 @@ class DeploymentBoundary(View):
 	would run the dispatch under a *narrower* profile than the one measured — reporting
 	confinement a session never had, which is the mirror of the defect this field fixes.
 	"""
+
+	egress: ProbeOutcome = ProbeOutcome.INCONCLUSIVE
+	"""Whether the probe measured network egress to be denied (FR-019, FR-124, FR-152).
+
+	FR-019's isolation is two properties, not one: the blast radius a child can *write* to
+	and the network it can *reach*. FR-124's missing half names the second by hand —
+	"packaging and egress are not read from the topology" — and M0 item 5 makes it an exit
+	criterion: "container boundary and egress denial actually hold". Neither was measured
+	before this field existed, so the delivery reported a boundary as enforced on the
+	strength of the filesystem half alone.
+
+	It is a :class:`ProbeOutcome` rather than a ``bool`` for the reason that enum exists:
+	``INCONCLUSIVE`` is a probe that could not decide, and it must not be rounded to
+	``ABSENT`` (which would condemn a boundary that may well hold) or to ``CONFIRMED``
+	(which would be a fabricated capability). The default is ``INCONCLUSIVE`` so a record
+	written before the probe existed reads as *not measured* rather than as *measured and
+	open* — the same direction ``deny_read``'s empty tuple takes, and the only direction
+	that cannot over-claim.
+
+	``CONFIRMED`` means the child's connect was **refused**, which is the counter-intuitive
+	reading: the outcome names the *boundary holding*, not the operation succeeding.
+	"""
+
+	egress_observed: str = ""
+	"""What the egress probe saw, in the probe's own words (FR-030, FR-148).
+
+	Separate from :attr:`observed` because the two halves can disagree, and a single
+	sentence would have to pick one to lead with. A reader asking "could a producer reach
+	the network from inside the lane" needs the answer to *that* question, and it is not
+	always the answer to the write question.
+	"""
+
+	@property
+	def egress_confined(self) -> bool:
+		"""Whether network egress was *measured* denied, distinct from not measured.
+
+		``enforced`` folds the two halves together, and this is the half a reader needs
+		alone when the question is FR-152's — ``--offline`` is not an egress boundary, so
+		the only thing that bounds egress is a boundary that was watched refusing a
+		connection.
+		"""
+		return self.egress is ProbeOutcome.CONFIRMED
 
 	@property
 	def degraded(self) -> bool:
@@ -5961,20 +6022,6 @@ class HarnessCapability(StrEnum):
 	CONTEXT_FILES_DISABLED = "context_files_disabled"
 	MODEL_RESOLVED = "model_resolved"
 	STORE_ISOLATED = "store_isolated"
-
-
-class ProbeOutcome(StrEnum):
-	"""What a capability probe actually observed (FR-148).
-
-	``INCONCLUSIVE`` is first-class for the same reason ``INSUFFICIENT`` is on the
-	verdict side: a probe that could not decide must not be rounded to either verdict.
-	Rounding it to ``ABSENT`` would condemn a harness; rounding it to ``CONFIRMED``
-	would be a fabricated capability.
-	"""
-
-	CONFIRMED = "confirmed"
-	ABSENT = "absent"
-	INCONCLUSIVE = "inconclusive"
 
 
 class CapabilityFinding(View):

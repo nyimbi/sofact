@@ -82,7 +82,7 @@ project, which is the failure mode that teaches an operator to disable the gate.
 
 Measured against the shipped tree on 2026-10-15:
 
-```
+```text
 contract_authoring     closure=  4  reaching=()
     ('sofact._uuid7', 'sofact.contract', 'sofact.elicitation', 'sofact.views')
 oracle_authoring       closure=  5  reaching=()
