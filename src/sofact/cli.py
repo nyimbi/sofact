@@ -5029,7 +5029,7 @@ async def _spec_doc(
 	if root is not None:
 		typer.secho(f"\nwrote {root / PRODUCT_SPEC_FILENAME}", fg="green")
 	if approve:
-		approved = await svc.approve_specification_document(document.id, by=by)
+		approved = await svc.approve_specification_document(document.id, by=by, root=root)
 		typer.secho(f"approved by {approved.approved_by}", fg="green")
 		if approved.unattested:
 			typer.secho(

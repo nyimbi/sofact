@@ -222,7 +222,13 @@ url is refused outright, and a query that failed is recorded as failed rather th
 domain with nothing in it, because those two call for opposite responses.
 
 **A specification document is a rendering of a fact.** `SPECIFICATION.md` is written at P2 —
-the artefact the first gate is a gate *on* — and every requirement carries its provenance:
+the artefact the first gate is a gate *on* — **and written before the approval, not after it**:
+the annotation exists to be read in order to decide, so the requirement is that the
+specification has been *gated*, not that it was approved. The gate as it stood is carried on
+the document as `gate_failures`, recorded rather than looked up afterwards, because the gate is
+recomputed on every approval and a document that re-derived it would report the gate that was
+finally passed instead of the one the approver was shown. Every requirement carries its
+provenance:
 the clause stem it descends from, that stem's elicitation answer and **whether a human read
 it**, the research verdict and its evidence, the competitor capabilities it is positioned
 against, the exceedance it belongs to, and its oracle's class. A requirement whose answer a
@@ -501,7 +507,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1972 tests
+uv run pytest -vxs tests/ci          # 1976 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

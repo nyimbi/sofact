@@ -249,6 +249,13 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 			if document.approved_by is not None and document.approved_at is not None
 			else "- Approved: not yet — this is a proposal, and the P2 gate is what approves it"
 		),
+		(
+			f"- P2 gate: {len(document.gate_failures)} machine check(s) outstanding when this "
+			"was rendered — listed under Machine checks, and open because they depend on the "
+			"operator having supplied something"
+			if document.gate_failures
+			else "- P2 gate: every machine check passed when this was rendered"
+		),
 		"",
 		"## What this is",
 		"",
@@ -390,6 +397,9 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 	lines.append(
 		f"- Declared exceedances: {len(document.exceeds)}, of which 0 are verified by oracle."
 	)
+	lines.append(f"- P2 machine checks outstanding at render: {len(document.gate_failures)}.")
+	for check in document.gate_failures:
+		lines.append(f"  - `{check.name}`: {check.detail}")
 	lines.append(
 		"- This document is a rendering. The record it renders is `"
 		f"{document.id}` and the contract it describes is `{document.contract_id}`."

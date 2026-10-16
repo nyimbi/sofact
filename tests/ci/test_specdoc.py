@@ -319,14 +319,20 @@ async def test_the_document_is_recorded_in_the_log(tmp_path: Path) -> None:
 	assert current.id == document.id
 
 
-async def test_rendering_without_an_approved_specification_is_refused(tmp_path: Path) -> None:
-	"""P2 is a gate, and the document is what the gate is a gate *on*: rendering it over an
-	unapproved specification would put a page in front of a human for a structure no gate has
-	passed.
+async def test_rendering_without_a_gated_specification_is_refused(tmp_path: Path) -> None:
+	"""The document is what P2's gate is a gate *on*, so it requires a specification that has
+	been gated — and **not** one that has been approved.
 
-	Both halves of "unapproved": no specification at all, and one proposed and never signed.
-	The second is the one worth asserting, because the first is refused by the lookup and
-	would pass even if the approval check were deleted.
+	This test is the correction of its own predecessor, which asserted the opposite and was
+	wrong in a way no other test could see. The old version required
+	``require_approved_specification``, so the only way to render the annotated document was
+	to pass the gate first: the operator was asked to approve a structure, and the prose that
+	qualified it — the unattested markers, the oracle ranks, the open checks — could only be
+	produced to someone who had already decided. ``spec-doc --approve`` was therefore
+	unreachable, because the render it approves refused before the approval it needs.
+
+	What is still refused is a contract with *no* specification: there is no checklist to
+	render against, and a document over nothing is not a document.
 	"""
 	service = a_spec_service(tmp_path / "home", tmp_path)
 	_, contract_id = await elicitation_to_contract(service)
@@ -335,9 +341,46 @@ async def test_rendering_without_an_approved_specification_is_refused(tmp_path: 
 
 	contract = await service.contract_by_id(contract_id)
 	proposal = await service.specify(contract_id, system_model=a_model_for(contract))
-	with pytest.raises(ValueError, match="the operator has not approved it"):
-		await service.write_specification(contract_id)
-	assert proposal.id  # the proposal exists; the refusal is about the approval, not it
+	document = await service.write_specification(contract_id)
+	assert document.specification_id == proposal.id
+	assert document.approved_by is None, "rendering is not approving (FR-080)"
+	assert document.gate_open, (
+		"the machine checks that were outstanding are carried on the document, so a reader "
+		"can see what P2 is still asking for rather than inferring it from a blank line"
+	)
+
+
+async def test_the_document_carries_the_gate_the_reader_is_deciding_against(
+	tmp_path: Path,
+) -> None:
+	"""``gate_failures`` is a reading of a moment, and the moment is before the decision.
+
+	A document that looked the gate up afterwards would report the gate that was finally
+	passed instead of the one the approver was shown, and the two differ by exactly the
+	operator's own answers — which is the state the document exists to make visible.
+	"""
+	service = a_spec_service(tmp_path / "home", tmp_path)
+	_, contract_id = await elicitation_to_contract(service)
+	contract = await service.contract_by_id(contract_id)
+	proposal = await service.specify(contract_id, system_model=a_model_for(contract))
+	before = await service.write_specification(contract_id)
+	assert {c.name for c in before.gate_failures} == {
+		"assumptions_declared_and_falsifiable",
+		"value_hypothesis_is_falsifiable",
+	}, "the operator-supplied checks are the ones open before the operator has supplied them"
+
+	assert proposal.id  # the incomplete proposal is the one that was rendered
+	# The operator supplies what the open checks were asking for, and the gate is recomputed
+	# against the new proposal — ``approve_specification`` re-runs the checks rather than
+	# reading the row back, which is what makes the second render a reading of a *different*
+	# gate rather than a re-reading of the same one.
+	await specify_and_approve(service, contract_id)
+	after = await service.write_specification(contract_id)
+	assert after.gate_failures == (), "the gate it is rendered against is now clear"
+	assert before.gate_failures != after.gate_failures, (
+		"the same contract rendered at two moments must not report the same gate; if it "
+		"does, the field is being derived at read time rather than recorded"
+	)
 
 
 async def test_an_unknown_contract_is_refused(tmp_path: Path) -> None:

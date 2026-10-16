@@ -590,10 +590,22 @@ async def _perform(
 		return f"contracted {len(contract.clauses)} clause(s)"
 	if action.name == "specify":
 		proposal = await service.specify(contract.id)
+		# The document is rendered *before* the gate is presented, because it is what the
+		# gate is a gate *on*: ADR-0071 makes P2's artefact the annotated specification, and
+		# a driver that opened the gate without writing it would ask a person to approve a
+		# structure while the prose that qualifies it was still nowhere on disk. Rendered
+		# rather than required, so a run whose ``--root`` is not writable still reaches its
+		# gate — with the document recorded in the ledger and the write named as the thing
+		# that failed, which is the honest order.
+		document = await service.write_specification(contract.id, root=root)
 		await _present(
 			service, Phase.SPECIFY, (await service.specification_gate(proposal.id)).checks
 		)
-		return f"proposed specification {proposal.id}; its gate is now open"
+		open_checks = len(document.gate_failures)
+		return (
+			f"proposed specification {proposal.id} and rendered {document.id}; its gate is "
+			f"now open with {open_checks} machine check(s) outstanding"
+		)
 	if action.name == "decompose":
 		proposal = await service.decompose(contract.id)
 		await _present(

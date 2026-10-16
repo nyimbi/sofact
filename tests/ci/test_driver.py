@@ -35,6 +35,7 @@ from sofact._uuid7 import uuid7str
 from sofact.driver import DRIVER_ACTIONS, DriverRefusal, run_goal
 from sofact.notify import render_subject
 from sofact.service import FactoryService
+from sofact.specdoc import PRODUCT_SPEC_FILENAME
 from sofact.views import (
 	PHASE_GATE,
 	Assumption,
@@ -176,6 +177,45 @@ class TestTheDriverStopsAtEveryGate:
 		assert first.terminal is DriverTerminal.GATE_OPEN
 		assert first.open_gate is Phase.SPECIFY
 		assert not first.claims_built
+
+	async def test_p2_opens_with_the_document_it_is_a_gate_on(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The gate a person is asked to pass must have its artefact on disk when they look.
+
+		The driver presented P2 and rendered nothing, so the operator was asked to approve a
+		specification they had no document for: ``SPECIFICATION.md`` was reachable only by
+		remembering to run ``sofact spec-doc`` afterwards, and afterwards is after the
+		decision it was built to inform. ADR-0071 makes the annotated document P2's artefact,
+		so the driver that opens P2's gate is the thing that has to write it.
+
+		Asserted on the *file*, not on the ledger row, because the ledger row was already
+		being written by ``sofact spec-doc`` in the tests that passed while this was broken —
+		a run that recorded a document and left the operator with nothing to read is exactly
+		the defect, and a check on the record cannot see it.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await a_goal(service)
+		root = deliver_root(tmp_path)
+
+		first = await run(service, root)
+
+		assert first.open_gate is Phase.SPECIFY
+		written = root / PRODUCT_SPEC_FILENAME
+		assert written.exists(), (
+			"P2 is open and the document the gate is a gate on is not on disk; the operator "
+			"has a checklist for an artefact they cannot read (FR-171)"
+		)
+		text = written.read_text(encoding="utf-8")
+		assert "## Requirements" in text
+		assert "P2 machine checks outstanding at render:" in text, (
+			"the gate the reader is deciding against is carried on the document, so what P2 "
+			"is still asking for is visible rather than inferred"
+		)
+		document = await service.current_product_spec()
+		assert document is not None
+		assert document.approved_by is None, "the driver may not approve the gate it opens"
 
 	async def test_the_halting_step_is_the_one_that_opened_the_gate(
 		self, home: Path, tmp_path: Path

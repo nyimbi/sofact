@@ -43,6 +43,29 @@ rather than being dropped. **Nothing may print an exceedance as a verified capab
 at delivery would mean the gate approved a structure while the prose arrived four phases
 later.
 
+**And rendered *before* the approval, not after it — which the first version got wrong.**
+`write_specification` called `require_approved_specification`, so the only way to render the
+annotated document was to have passed the gate already. The document could therefore only
+ever be shown to someone who had decided, and `sofact spec-doc --approve` was unreachable:
+the render it performs refused before the approval it needs. The ordering is the feature —
+the annotation exists to be *read in order to decide* — so the requirement is now that the
+specification has been **gated** (there is a checklist to render against) and not that it was
+approved.
+
+The gate as it stood is carried on the document as `gate_failures`, and it is a field rather
+than a derivation because it is a reading of a *moment*: the gate is recomputed on every
+approval, so a document that looked the state up afterwards would report the gate that was
+finally passed instead of the one the approver was shown. The two differ by exactly the
+operator's own answers, which is the state the document exists to make visible.
+
+Three ordering defects followed from the same root and are fixed together: the driver opened
+P2's gate without rendering its artefact, so an operator driven by `sofact build` was asked
+to approve a specification with no document on disk; `approve_specification_document` set
+`approved_by` in the ledger and left the file it had already written saying "not yet", so the
+artefact a person holds contradicted the record; and the CLI test that should have caught the
+first ran `specify --approve` before `spec-doc`, which is exactly the sequence the defect
+forced on anyone using the product.
+
 **"Annotated" is the whole content of the feature.** Every requirement carries its
 provenance as a `RequirementAnnotation`, which *holds* its `Requirement` rather than naming
 one — pyright found the original design gap: the document carried annotations but not the

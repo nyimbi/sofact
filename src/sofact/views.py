@@ -1706,6 +1706,13 @@ class ProductSpecificationDocument(View):
 	``attested`` is a property and not a field. A stored flag would let a caller render a
 	document as approved without an approval, and the approval is exactly what the first
 	gate is.
+
+	``gate_failures`` is the P2 gate as it stood when this was rendered, and it is a field
+	because it is a *reading of a moment* rather than a derivable fact: the gate is
+	recomputed on every approval, so a document that looked the state up afterwards would
+	report the gate that was finally passed instead of the one the reader is deciding
+	against. It is empty on an approved document and non-empty on the one a human is
+	actually reading, which is the distinction this field exists to make visible.
 	"""
 
 	id: UUID7
@@ -1716,8 +1723,21 @@ class ProductSpecificationDocument(View):
 	rendered_at: datetime
 	requirements: tuple[RequirementAnnotation, ...] = ()
 	exceeds: tuple[ExceedsClaim, ...] = ()
+	gate_failures: tuple[GateCheck, ...] = ()
+	"""The machine checks that had not passed when this document was rendered (FR-076–FR-086).
+
+	Not a defect and not a refusal: the document is rendered *at* P2, before the operator
+	decides, so a check that depends on the operator having supplied something is open by
+	construction. Carrying them makes "this is the artefact the gate is a gate on" a fact
+	about the document rather than a claim about the order two verbs were typed in.
+	"""
 	approved_by: NonEmptyStr | None = None
 	approved_at: datetime | None = None
+
+	@property
+	def gate_open(self) -> bool:
+		"""Whether the P2 gate had machine checks outstanding when this was rendered."""
+		return bool(self.gate_failures)
 
 	@property
 	def unattested(self) -> tuple[RequirementAnnotation, ...]:

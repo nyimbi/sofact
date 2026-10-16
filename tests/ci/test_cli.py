@@ -3238,6 +3238,59 @@ class TestTheFrontDoorVerbs:
 		assert (root / "SPECIFICATION.md").exists(), "the document is the feature (FR-171)"
 		assert "product specification" in result.output
 
+	def test_spec_doc_renders_before_the_gate_is_passed(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The document is what P2's gate is a gate *on*, so it must exist while P2 is open.
+
+		This is the ordering the verb's own ``--approve`` depends on and it was impossible:
+		``write_specification`` required the gate to have been passed, so the document could
+		only be rendered to someone who had already approved — and ``spec-doc --approve``
+		refused before the approval it performs. The test above did not catch it because it
+		runs ``specify --approve`` first, which is exactly the sequence the defect forced.
+		"""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert (
+			RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"]).exit_code
+			== 0
+		)
+		assert RUNNER.invoke(app, ["--home", str(home), "specify", *SPECIFY_ARGS]).exit_code == 0, (
+			"a specification proposed and not approved leaves P2 open"
+		)
+		root = tmp_path / "out"
+		result = RUNNER.invoke(app, ["--home", str(home), "spec-doc", "--root", str(root)])
+		assert result.exit_code == 0, result.output
+		assert (root / "SPECIFICATION.md").exists()
+		assert "not yet" in (root / "SPECIFICATION.md").read_text(encoding="utf-8"), (
+			"the document rendered before the decision must say the decision is outstanding"
+		)
+
+	def test_spec_doc_approve_records_the_document_the_operator_read(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``--approve`` is one verb because the approval names the document that was rendered.
+
+		Rendering and approving in one invocation is what makes "the approver read *this*"
+		checkable: the row's ``approved_by`` is set on the very document whose text was just
+		written, not on a re-render that happened to agree.
+		"""
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert (
+			RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"]).exit_code
+			== 0
+		)
+		assert RUNNER.invoke(app, ["--home", str(home), "specify", *SPECIFY_ARGS]).exit_code == 0
+		root = tmp_path / "out"
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "spec-doc", "--root", str(root), "--approve", "--by", "ada"],
+		)
+		assert result.exit_code == 0, result.output
+		assert "approved by ada" in result.output
+		assert "Approved by 'ada'" in (root / "SPECIFICATION.md").read_text(encoding="utf-8")
+
 	# notify ---------------------------------------------------------------- #
 
 	def test_notify_without_a_notifier_is_a_named_refusal(

@@ -2191,6 +2191,19 @@ in, so the document cannot be rendered clean over a specification whose answers 
 read — and an **unoracled requirement prints as unverified**, so the document cannot read
 as stronger than the contract it renders.
 
+**Rendered before the approval, not after it.** The first version required the gate to
+have been passed, which made the document reachable only by someone who had already
+decided and left `sofact spec-doc --approve` refusing before the approval it performs.
+The ordering *is* the feature: the annotation exists to be read in order to decide. So
+the requirement is that the specification has been **gated** — there is a checklist to
+render against — and not that it was approved, and `ProductSpecificationDocument.
+gate_failures` carries the gate as it stood. That field is recorded rather than derived,
+because the gate is recomputed on every approval and a document that looked it up
+afterwards would report the gate that was finally passed instead of the one the approver
+was shown. `sofact build` renders the document when it opens P2's gate, and
+`approve_specification_document` re-writes the file it just changed, so the page a person
+holds never contradicts the ledger row behind it.
+
 **FR-172** *(one verb drives the pipeline, stops at every gate, and a notification that
 was not sent is not a notification)* `sofact build` is a **loop over the ledger**, not a
 held process, so `--resume` is the same code path as a cold start and a run killed

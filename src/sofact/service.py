@@ -3393,6 +3393,16 @@ class FactoryService:
 		it at delivery would mean the gate approved a structure while the prose arrived
 		four phases later.
 
+		**And rendered *before* the approval, not after it.** This is the whole reason the
+		method exists: the document is what the operator reads in order to decide, so a
+		version that refused until P2 had been passed could only ever be rendered to
+		someone who had already decided — the annotation would arrive one step too late to
+		be the thing it was built to be. It therefore requires the specification to have
+		been *gated* (there is a checklist to render against) and not that it was approved,
+		and it carries the gate as it stood: :attr:`ProductSpecificationDocument.
+		gate_failures`. ``approve_specification_document`` then records the human's half
+		against the very document they read.
+
 		Every requirement carries its provenance. Two facts are **derived from the ledger
 		and not passed in**: whether an answer was operator-written or a model's proposal,
 		and whether a person attested it. A marker a caller supplies is a marker that can
@@ -3403,7 +3413,16 @@ class FactoryService:
 		contract = state.contract(contract_id)
 		if contract is None:
 			raise KeyError(f"no such contract: {contract_id}")
-		specification = await self.require_approved_specification(contract_id)
+		specification = state.latest_specification(contract_id)
+		if specification is None:
+			raise ValueError(
+				f"contract {contract_id} has no specification; P2 is a gate and must be "
+				"proposed before the document the gate is a gate on can be rendered "
+				"(FR-080, FR-171)"
+			)
+		gate = state.latest_specification_gate(specification.id)
+		if gate is None:
+			raise ValueError(f"specification {specification.id} was never gated")
 		goal_id = contract.goal_id
 		draft = await self.latest_draft(goal_id)
 		answers = state.answers_for(goal_id)
@@ -3431,6 +3450,7 @@ class FactoryService:
 			rendered_at=now(),
 			requirements=annotations,
 			exceeds=exceeds,
+			gate_failures=gate.failed,
 		)
 		self._commit(
 			LedgerKind.PRODUCT_SPEC_RENDERED,
@@ -3500,6 +3520,7 @@ class FactoryService:
 		document_id: str,
 		*,
 		by: str,
+		root: Path | None = None,
 	) -> ProductSpecificationDocument:
 		"""Record that a person approved the rendered specification (FR-171).
 
@@ -3508,6 +3529,13 @@ class FactoryService:
 		whose requirements include a model proposal nobody read stays unattested
 		(FR-173), and that is the distinction the whole feature rests on — a signature on
 		a page is not a reading of the page.
+
+		``root`` re-writes the file the approval just changed. Without it the ledger and
+		the document on disk disagree from the moment of approval: the row says who signed
+		and the file the operator is holding still says "not yet", which is the worst
+		version of the drift because the file is the artefact a person reads and the row is
+		the one they do not. It is optional rather than required because a caller that only
+		wants the record — the API, a test — is not holding a page.
 		"""
 		assert by.strip(), "an approval names who approved it"
 		state = await self.state()
@@ -3519,6 +3547,10 @@ class FactoryService:
 			LedgerKind.PRODUCT_SPEC_RENDERED,
 			{"document": approved.model_dump(mode="json")},
 		)
+		if root is not None:
+			target = root / PRODUCT_SPEC_FILENAME
+			target.parent.mkdir(parents=True, exist_ok=True)
+			target.write_text(render_product_specification(approved))
 		return approved
 
 	# --------------------------------------------------- FR-172: the notification
