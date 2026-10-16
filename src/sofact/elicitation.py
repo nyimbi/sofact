@@ -330,7 +330,18 @@ def draft_stems(
 	if not stems:  # pragma: no cover - reachable only if every answer is one fragment
 		raise ValueError("answers resolved but produced no clause stems at all")
 
-	draft = SpecificationDraft(id=uuid7str(), goal_id=goal_id, created_at=now(), stems=tuple(stems))
+	# The answers this draft was built from, recorded so "is this draft current" is a
+	# question the log answers (FR-068). ``latest`` holds one answer per dimension and
+	# its iteration order is the dimension order, so the tuple is deterministic — two
+	# drafts of the same answers name the same ids in the same order.
+	used = tuple(latest[spec.dimension].id for spec in DIMENSIONS if spec.dimension in latest)
+	draft = SpecificationDraft(
+		id=uuid7str(),
+		goal_id=goal_id,
+		created_at=now(),
+		stems=tuple(stems),
+		answer_ids=used,
+	)
 	assert draft.stems, "draft must carry at least one stem"
 	return draft
 

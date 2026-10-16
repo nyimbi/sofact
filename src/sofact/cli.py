@@ -4853,6 +4853,81 @@ async def _attest(
 				typer.secho(f"    {reason}", fg="bright_black")
 
 
+@app.command(name="elicit")
+def elicit(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	dimension: str | None = typer.Option(
+		None, "--dimension", help="Revise one dimension. Default: every dimension in turn."
+	),
+	by: str = typer.Option("operator", "--by", help="Who is answering. Recorded (FR-087)."),
+) -> None:
+	"""Revise a resolved answer, which is FR-068's recovery half (FR-068, FR-173).
+
+	**A different verb from the questionnaire, and it has to be.** ``sofact`` bare asks
+	the *open* dimensions, and after a return to P0 there are none: every dimension is
+	resolved, and what is wrong is the premise one of them states. Running the
+	questionnaire there prints "every dimension resolved" and changes nothing, so the one
+	command the pipeline's own stop names would have done nothing at all.
+
+	Re-answering supersedes the earlier answer for that dimension
+	(:func:`sofact.elicitation.assess`), and the next run drafts fresh clause stems from
+	it — so the contradicted clause is gone rather than argued with, and P1 classifies the
+	new set.
+	"""
+	asyncio.run(_elicit(_service(_home_of(ctx, home)), dimension, by))
+
+
+async def _elicit(svc: FactoryService, dimension: str | None, by: str) -> None:
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet; `sofact build --statement <text>` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	targets = list(DIMENSIONS)
+	if dimension is not None:
+		matching = [spec for spec in DIMENSIONS if spec.dimension.value == dimension]
+		if not matching:
+			known = ", ".join(spec.dimension.value for spec in DIMENSIONS)
+			typer.secho(f"unknown dimension {dimension!r}; known: {known}", fg="red")
+			raise typer.Exit(code=1)
+		targets = matching
+
+	state = await svc.state()
+	for spec in targets:
+		current = [a for a in state.answers_for(goal.id) if a.dimension == spec.dimension]
+		typer.secho(f"\n[{spec.dimension.value}]", fg="cyan", bold=True)
+		typer.echo(f"  {spec.question}")
+		if current:
+			# Printed because revising without reading is how an operator replaces a good
+			# answer with a worse one: the clause FR-068 stopped on descends from this text.
+			typer.secho(f"  now: {current[-1].text}", fg="bright_black")
+		try:
+			# ``default=""`` is what makes an empty line *declining a dimension* rather
+			# than aborting the verb. Typer reads an empty answer with no default as
+			# ``Abort``, so the branch below that says "unchanged" was unreachable: the
+			# first newline ended the walk, and an operator could not reach the second
+			# dimension at all. With the default, enter means "leave this one alone" and
+			# the walk continues to the dimensions after it.
+			text = await asyncio.to_thread(typer.prompt, "  ", default="")
+		except (EOFError, KeyboardInterrupt, typer.Abort):
+			typer.secho("\nstopped. Answers recorded so far are in the log.", fg="yellow")
+			return
+		if not text.strip():
+			typer.secho("  unchanged", fg="bright_black")
+			continue
+		await svc.answer(goal.id, spec.dimension, text, by=by)
+		typer.secho("  recorded; the next run drafts from this answer", fg="green")
+
+	readiness = await svc.readiness(goal.id)
+	done, total = readiness.progress
+	typer.secho(f"\nelicitation {done}/{total} dimension(s) resolved", fg="bright_black")
+	typer.secho(
+		"the previous draft is superseded: `sofact build --resume` drafts and researches "
+		"the new one (FR-068)",
+		fg="bright_black",
+	)
+
+
 @app.command(name="competitors")
 def competitors(
 	ctx: typer.Context,

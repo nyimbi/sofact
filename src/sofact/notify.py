@@ -227,6 +227,12 @@ def render_subject(run: DriverRun, goal_statement: str) -> str:
 	if run.terminal is DriverTerminal.GATE_OPEN:
 		gate = run.open_gate.value.upper() if run.open_gate is not None else "a gate"
 		return f"sofact: {head} — awaiting {gate} approval, not built"
+	if run.terminal is DriverTerminal.RETURNED_TO_P0:
+		# FR-068's stop, and it is not a failure: the evidence withdrew a premise, so the
+		# system is not built and the reason is a *finding* rather than a fault. Worded as
+		# the requirement words its action, because the operator's next move is a revision
+		# and a subject reading "failed" would send them looking for a broken thing.
+		return f"sofact: {head} — returned to P0: the evidence contradicted a premise, not built"
 	return f"sofact: {head} — {run.terminal.value}: {run.terminal_detail[:80]}"
 
 

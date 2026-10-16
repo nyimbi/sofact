@@ -618,6 +618,400 @@ class TestTerminalStateIsReported:
 		assert not second.gate_failures
 		assert second.next_human_verb == "sofact gate --approve P2 --by <you>"
 
+	async def test_a_clause_the_evidence_invalidated_stops_the_run_as_its_own_state(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-068's "return to P0" is a finding, not a fault, and the run must say so.
+
+		``advance_phase`` refuses to complete P1 when a clause's verdict is Invalidated or
+		Deepened — "do not build" — and that arrives at the loop as a ``ValueError`` like
+		any other. Reported as ``FAILED``, it read as a broken run, and ``next_human_verb``
+		named ``build --resume``: a command that re-selects the same action, hits the same
+		refusal and prints the same sentence forever. Nothing was broken; the evidence had
+		withdrawn a premise, and the operator's move is to revise an answer, which no
+		resume performs.
+
+		Asserted on the *terminal state* rather than on the message, because the terminal
+		state is what ``next_human_verb`` and the notification subject both read. The
+		classification is the discriminator and it is data — a driver that decided the kind
+		of stop by matching the refusal's sentence would break the day somebody reworded it.
+
+		**And asserted on the steps, which is the half that was wrong.** The stop used to be
+		read only in the loop's exception handler, so it arrived from ``_present``: the run
+		contracted and specified over the contradicted clause first, and the operator was
+		shown a P2 gate for a specification resting on a premise SoFact's own research had
+		withdrawn. "Do not build" is a constraint on the work, not only on the exit.
+		"""
+		service = synthetic_service(home, tmp_path, "research-classify-invalidated")
+		await service.probe_harness(None)
+		await a_goal(service)
+
+		result = await run(service, deliver_root(tmp_path))
+		taken = [step.action for step in result.steps]
+
+		assert result.terminal is DriverTerminal.RETURNED_TO_P0, (
+			f"an invalidated premise is FR-068's stop, not a failure: {result.terminal_detail}"
+		)
+		assert not result.claims_built
+		assert result.open_gate is None, "the stop is not a gate and must not read as one"
+		assert "specify" not in taken, (
+			f"a specification over a clause the evidence invalidated is the work FR-068 "
+			f"forbids, and the run did it before noticing: {taken}"
+		)
+		assert "contract" not in taken, f"no contract over an unbuildable premise: {taken}"
+		assert taken == ["draft", "research"], (
+			f"the run stops at the finding, having done only the work that produced it: {taken}"
+		)
+		assert result.next_human_verb is not None
+		assert result.next_human_verb.startswith("sofact elicit"), (
+			f"the operator's move is to revise an answer, and this names a resume first: "
+			f"{result.next_human_verb}"
+		)
+		assert "revise" in result.next_human_verb, (
+			f"the verb has to say what the revision is *of*, or the operator is sent to a "
+			f"questionnaire with six open questions and no indication which one moved: "
+			f"{result.next_human_verb}"
+		)
+
+	async def test_the_subject_of_a_return_to_p0_does_not_say_failed(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The other half: the operator reads the subject, and "failed" sends them hunting.
+
+		A notification reading "failed" for a run that stopped because the evidence
+		contradicted a premise points the operator at a broken thing that is not there.
+		"""
+		service = synthetic_service(home, tmp_path, "research-classify-deepened")
+		await service.probe_harness(None)
+		goal_id = await a_goal(service)
+
+		result = await run(service, deliver_root(tmp_path))
+		statement = (await service.state()).goal(goal_id)
+		assert statement is not None
+		subject = render_subject(result, statement.statement)
+
+		assert result.terminal is DriverTerminal.RETURNED_TO_P0
+		assert subject == (
+			"sofact: Ship a reminder dashboard. — returned to P0: the evidence contradicted "
+			"a premise, not built"
+		)
+
+
+async def cut_before_phase_presentation(service: FactoryService, phase: Phase) -> None:
+	"""Leave ``phase``'s artefact on the log and its presentation off it (FR-061).
+
+	The state a process killed between ``_perform``'s commit and its ``_present`` leaves:
+	every row the phase's own work wrote is there, and the ``phase.advanced`` row that
+	would have shown a human the gate is not. Built by cutting to just before that row
+	rather than by calling the service's proposal methods by hand, because the hand-built
+	version is a *different* state — it omits the rows ``_close_predecessors`` writes —
+	and a test of the orphan has to be a test of the orphan the driver actually meets.
+	"""
+	presented = [
+		entry.index
+		for entry in service.ledger.entries()
+		if entry.kind.value == "phase.advanced"
+		and entry.payload.get("advance", {}).get("phase") == phase.value
+	]
+	assert presented, f"nothing presented {phase.value}, so there is no orphan to build"
+	await service.cut(presented[0] - 1, by="test", reason=f"simulate a kill before {phase.value}")
+	state = await service.state()
+	assert state.phase_status(phase) is PhaseStatus.PENDING, (
+		f"the cut left {phase.value} at {state.phase_status(phase).value}, not PENDING: "
+		"this is not the orphan state the test means to exercise"
+	)
+	assert state.open_gate is None, "the cut left a gate open; that is a different state"
+
+
+class TestAnOrphanArtefactDoesNotDischargeItsPhase:
+	"""An artefact whose gate was never presented is not work the phase did (FR-061, FR-172).
+
+	A phase's proposal path commits its artefact and *then* presents its gate, so a process
+	killed between the two appends leaves an orphan: the artefact is on the log and the
+	phase is still ``PENDING``. Every one of these tests builds that state the way the kill
+	builds it, and asserts the driver does not read the orphan as a discharged phase.
+
+	The defect this class exists for is one shape in five places: **the driver decided
+	"what next" from the existence of an artefact rather than from the phase having been
+	presented.** Each instance failed differently — a repeating wrong refusal, a step
+	selected past a gate nobody saw, and (worst) a ``DELIVERED`` run claiming a build whose
+	deploy gate had never been shown.
+	"""
+
+	async def test_a_delivery_with_its_gate_unpresented_does_not_claim_a_build(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The module's own stated property, and the state that violated it.
+
+		``_perform``'s deliver branch renders the report and then presents P8. Killed
+		between the two, the log holds a delivery and P8 is ``PENDING`` with no open gate.
+		``_next_action`` read ``state.delivery is None`` alone, returned ``None``, the loop
+		broke with **zero steps**, and the terminal branch reported ``DELIVERED`` with
+		``claims_built=True`` — a notification reading "built and verified" for a system
+		whose deploy gate nobody had been shown. The plan file states the property this
+		refutes in one line: "no branch returns DELIVERED with a gate open."
+
+		Built by cutting the log to just before the row that presented P8, which is exactly
+		what the kill leaves: everything the delivery needs is present, and the presentation
+		is not.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await a_goal(service)
+		root = deliver_root(tmp_path)
+
+		final, _ = await walk(service, root)
+		assert final.terminal is DriverTerminal.DELIVERED
+
+		presented = [
+			entry.index
+			for entry in service.ledger.entries()
+			if entry.kind.value == "phase.advanced"
+			and entry.payload.get("advance", {}).get("phase") == Phase.DELIVER.value
+		]
+		assert presented, "the walk presented P8, or there is nothing to cut before"
+		await service.cut(presented[0] - 1, by="test", reason="simulate a kill before _present")
+
+		orphaned = await service.state()
+		assert orphaned.delivery is not None, "the cut left no delivery to be an orphan"
+		assert orphaned.phase_status(Phase.DELIVER) is PhaseStatus.PENDING
+		assert orphaned.open_gate is None, "this is the orphan state, not an open gate"
+
+		resumed = await run(service, root)
+
+		assert resumed.terminal is not DriverTerminal.DELIVERED, (
+			"a delivery whose deploy gate was never presented is not a finished build"
+		)
+		assert not resumed.claims_built
+		assert resumed.stopped_on == "deliver", (
+			"the run must re-select deliver and present the gate it never showed"
+		)
+		after = await service.state()
+		assert after.open_gate is not None, "the resumed run presented P8"
+		assert after.open_gate.phase is Phase.DELIVER
+
+	async def test_an_orphan_specification_is_not_read_as_a_discharged_p2(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""``latest_specification`` was read without consulting the phase status.
+
+		With an orphan specification committed and P2 never presented, ``_next_action``
+		selected ``decompose`` — a step downstream of a gate nobody was shown — and the run
+		failed with P2's approval message. The operator's repair is to re-run ``specify``,
+		which proposes a revision and presents the gate.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		goal_id = await a_goal(service)
+		root = deliver_root(tmp_path)
+
+		first = await run(service, root)
+		assert first.open_gate is Phase.SPECIFY, (
+			f"the run stopped on {first.open_gate}, so P2 is not the gate to orphan"
+		)
+
+		# The orphan, built the way the kill builds it: every row the phase's work wrote is
+		# on the log, and the presentation is not.
+		await cut_before_phase_presentation(service, Phase.SPECIFY)
+
+		orphaned = await service.state()
+		contract = orphaned.latest_contract(goal_id)
+		assert contract is not None, "the cut removed the contract, not just the presentation"
+		assert orphaned.latest_specification(contract.id) is not None, (
+			"the cut removed the specification, so there is no orphan to test"
+		)
+
+		resumed = await run(service, root)
+
+		assert resumed.terminal is not DriverTerminal.FAILED, (
+			f"an orphan specification must not send the run past its own gate: "
+			f"{resumed.terminal_detail}"
+		)
+		assert resumed.stopped_on == "specify", (
+			"the run must present P2 rather than decompose past it"
+		)
+		assert resumed.open_gate is Phase.SPECIFY
+
+	async def test_a_phase_that_is_merely_active_is_not_discharged(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The predicate itself, on the state it has to refuse.
+
+		``ACTIVE`` is a phase mid-flight: work has started and nobody has been shown
+		anything. Collapsing it into "discharged" is the same defect as the orphan, one
+		transition earlier.
+
+		P2 is reached and then unwound rather than advanced from a standing start, because
+		``advance_phase`` refuses a phase whose predecessors are incomplete — P0 has to have
+		finished before P2 can be in flight at all, and the run is what finishes it.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await a_goal(service)
+		await run(service, deliver_root(tmp_path))
+		await cut_before_phase_presentation(service, Phase.SPECIFY)
+
+		before = await service.state()
+		assert before.phase_status(Phase.SPECIFY) is PhaseStatus.PENDING
+		assert not before.phase_is_discharged(Phase.SPECIFY), "P2 is untouched"
+
+		await service.advance_phase(Phase.SPECIFY, PhaseStatus.ACTIVE, by="test")
+		active = await service.state()
+		assert active.phase_status(Phase.SPECIFY) is PhaseStatus.ACTIVE
+		assert not active.phase_is_discharged(Phase.SPECIFY), (
+			"an active phase has not been presented to anyone"
+		)
+
+	async def test_an_ungated_phase_is_discharged_by_completion(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The other direction, so the predicate cannot be tightened into a deadlock.
+
+		P0, P1 and the build phases have no gate to present, and ``_close_predecessors``
+		completes them as the work lands. A predicate that demanded a presentation for a
+		phase that has none would make the driver refuse at its own gate.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await a_goal(service)
+
+		await service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE, by="test")
+
+		state = await service.state()
+		assert state.phase_is_discharged(Phase.ELICIT)
+		assert Phase.ELICIT not in PHASE_GATE, "P0 has no gate, which is why completion suffices"
+
+
+class TestResearchCoversTheDraftItWasRunAgainst:
+	"""``has_research`` was "research has ever run", which stays true under a new draft."""
+
+	async def test_a_draft_revised_after_p1_is_researched_again(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The fact the old predicate got wrong, and the contract it produced over it.
+
+		``has_research`` was ``any(r.goal_id == goal_id for r in state.research)`` — "a
+		research run exists for this goal". That stays true when the draft is revised
+		underneath it, and a revised draft is the whole point of returning to P0: the
+		operator restates an answer, ``draft_stems`` writes **fresh** stem ids, and the
+		classification on the log names clause ids no draft holds any more. The driver then
+		selected ``contract`` over clauses the evidence never reached — and FR-068 exists
+		precisely because a contract is written over *classified* premises.
+
+		Built by cutting the log to just before the contract row, which is the state a
+		process killed between P1 and P2 leaves: the draft, the research and the
+		classification are all present and no contract exists yet. Revising an answer then
+		makes the draft stale, and the run has to notice both that it needs a new draft and
+		that the old classification is about a clause set that no longer exists.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		goal_id = await a_goal(service)
+		root = deliver_root(tmp_path)
+
+		await run(service, root)
+		contracts = [
+			entry.index
+			for entry in service.ledger.entries()
+			if entry.kind.value == "contract.created"
+		]
+		assert contracts, "the first run reached a contract, or there is nothing to cut before"
+		await service.cut(contracts[0] - 1, by="test", reason="stop between P1 and the contract")
+
+		before = await service.state()
+		assert before.latest_contract(goal_id) is None, "the cut left a contract behind"
+		first_draft = before.latest_draft(goal_id)
+		first_classification = before.classification
+		assert first_draft is not None, "the cut removed the draft P1 was run against"
+		assert first_classification is not None, "the cut removed the classification"
+
+		# The operator revises one answer, which is FR-068's action for a premise the
+		# evidence withdrew — and the only thing a revision does downstream is make the
+		# draft it fed stale.
+		await service.answer(
+			goal_id,
+			ElicitationDimension.OUTCOME,
+			"Every scheduled reminder appears in the user dashboard within two seconds of "
+			"its scheduled time, measured by the dashboard's own poll clock.",
+		)
+
+		result = await run(service, root)
+		after = await service.state()
+
+		assert result.steps[0].action == "draft", (
+			f"a draft built from superseded answers is not current: {result.steps[0]}"
+		)
+		assert "research" in [step.action for step in result.steps], (
+			"the classification names a clause set this draft no longer holds, so P1 has to "
+			"run again before anything is contracted over those clauses"
+		)
+		assert len(after.research) > len(before.research), "a second research run is recorded"
+
+		second_draft = after.latest_draft(goal_id)
+		second_classification = after.classification
+		assert second_draft is not None, "the run left no draft"
+		assert second_classification is not None, "the run left no classification"
+		assert second_draft.id != first_draft.id, "the revision produced a new draft"
+		assert {c.clause_id for c in second_classification.classifications} != {
+			c.clause_id for c in first_classification.classifications
+		}, "the re-classification is about the new draft's clauses, not the old ones"
+		assert not second_classification.unclassified(frozenset(s.id for s in second_draft.stems)), (
+			"the classification the run contracted over names every clause of the draft it "
+			"was run against (FR-068)"
+		)
+
+
+	async def test_revising_the_answer_lets_the_run_past_the_stop(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The stop must not be a deadlock, and the operator's repair must be the exit.
+
+		FR-068's action is "revise the clauses and return to P0", so the run has to *get*
+		back to P0 — re-draft from the revised answer and research the new clause set. The
+		first version of this check read the classification without asking whether the
+		draft it was a verdict on was still the goal's, so the run after a revision reported
+		``RETURNED_TO_P0`` with **zero steps**: the one command the stop names led back to
+		the same stop, and the only exit was a hand-edited ledger.
+
+		The fixture invalidates the first clause by position on every classification, so a
+		second stop is correct and not the thing under test. What is under test is that the
+		run re-drafts and re-researches first — it acts on the revision rather than
+		refusing against a premise the operator has already restated.
+		"""
+		service = synthetic_service(home, tmp_path, "research-classify-invalidated")
+		await service.probe_harness(None)
+		goal_id = await a_goal(service)
+		root = deliver_root(tmp_path)
+
+		first = await run(service, root)
+		assert first.terminal is DriverTerminal.RETURNED_TO_P0
+		before = await service.state()
+		stale_draft = before.latest_draft(goal_id)
+		assert stale_draft is not None, "the run drafted before it researched"
+
+		await service.answer(
+			goal_id,
+			ElicitationDimension.OUTCOME,
+			"Every scheduled reminder appears in the user dashboard within two seconds of "
+			"its scheduled time, measured by the dashboard's own poll clock.",
+		)
+
+		second = await run(service, root)
+		taken = [step.action for step in second.steps]
+
+		assert taken[:2] == ["draft", "research"], (
+			f"the run has to re-draft from the revised answer and re-classify the new "
+			f"clauses before it can stop on a verdict again: {taken}"
+		)
+		after = await service.state()
+		fresh = after.latest_draft(goal_id)
+		assert fresh is not None, "the run left no draft"
+		assert fresh.id != stale_draft.id, "the revision produced a new draft, not a re-read"
+		assert fresh.descends_from(after.answers_for(goal_id)), (
+			"the new draft is built from the answers the operator has now, which is what "
+			"makes the old verdict moot (FR-068)"
+		)
+
 
 class TestTheActionTable:
 	"""What the driver can do is readable in one place, and each action says which it is."""

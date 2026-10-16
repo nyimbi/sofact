@@ -1771,10 +1771,18 @@ class DriverTerminal(StrEnum):
 	The driver is a loop over the ledger rather than a held process, so every run ends and
 	ends in one of these. ``GATE_OPEN`` is the ordinary case and not an error: FR-061 makes
 	a gate a hard stop, so a run that reaches one has done all the machine work there is.
+
+	``RETURNED_TO_P0`` is the second ordinary case, and it is a member of its own rather
+	than an ``EXHAUSTED`` or a ``FAILED`` because it is neither. FR-068's action for an
+	invalidated or deepened clause is "return to P0" — a *stop the evidence imposed*, not
+	a machine that ran out of work and not a fault. Reporting it as ``EXHAUSTED`` said
+	"every machine action is discharged", which is false: the actions are not discharged,
+	they are forbidden, and the operator's move is a revision rather than a resume.
 	"""
 
 	GATE_OPEN = "gate_open"
 	DELIVERED = "delivered"
+	RETURNED_TO_P0 = "returned_to_p0"
 	REFUSED = "refused"
 	EXHAUSTED = "exhausted"
 	FAILED = "failed"
@@ -1874,6 +1882,13 @@ class DriverRun(View):
 		"""
 		if self.terminal is DriverTerminal.DELIVERED:
 			return None
+		if self.terminal is DriverTerminal.RETURNED_TO_P0:
+			# FR-068's stop has a human move and it is not a resume: the evidence withdrew
+			# a premise, so the clause has to be revised before anything downstream of it
+			# is worth doing. ``build --resume`` re-selects the action that refused and
+			# prints the same sentence forever — which is what this branch used to say,
+			# because the stop arrived as a ``FAILED`` and the fallback below is a resume.
+			return "sofact elicit   (revise the answer the clause came from, then `sofact build --resume`)"
 		if self.open_gate is not None:
 			if self.gate_failures:
 				producer = PHASE_PRODUCER_VERB.get(self.open_gate)
@@ -2101,12 +2116,44 @@ class SpecificationDraft(View):
 	goal_id: UUID7
 	created_at: datetime
 	stems: tuple[ClauseStem, ...]
+	answer_ids: tuple[UUID7, ...] = ()
+	"""The answers this draft was built from, one per dimension, in log order (FR-068).
+
+	Recorded rather than inferred, because "is this draft current" is otherwise
+	unanswerable: a clause id is a stem id, so a re-draft after a revised answer produces
+	stems nothing can distinguish from the ones before them except their ids, and nothing
+	links a stem back to the answer it came from. A driver that could not tell held a
+	draft built from answers that had since been superseded, and contracted over clauses
+	FR-068's verdicts were about — which is the premise the return to P0 exists to stop.
+
+	Empty on a draft written before this field existed, or built by hand. That reading is
+	the refusing one: a draft that names no answers is not evidence that it reflects the
+	answers on the log now, and the caller re-drafts rather than trusting it.
+	"""
 
 	@model_validator(mode="after")
 	def _require_stems(self) -> Self:
 		if not self.stems:
 			raise ValueError("a draft with no clause stems asserts nothing")
 		return self
+
+	def descends_from(self, answers: tuple[ElicitationAnswer, ...]) -> bool:
+		"""Whether this draft was built from the answers that are current now (FR-068).
+
+		The question FR-068's "return to P0" makes load-bearing: a revised answer
+		supersedes the one this draft was made of, so the draft's clauses are about a
+		premise the operator has since restated. Nothing else in the log can see that —
+		a re-draft produces *fresh* stem ids, so a reader comparing clause ids against
+		each other finds two disjoint sets and no way to say which is current.
+
+		A draft naming no answers is **not** current. That is the refusing reading, and
+		the one that matters: an empty ``answer_ids`` is a draft written before the field
+		existed or built by hand, and neither is evidence that it reflects the log.
+		"""
+		if not self.answer_ids:
+			return False
+		latest = {a.dimension: a.id for a in answers if a.goal_id == self.goal_id}
+		return set(self.answer_ids) == set(latest.values())
 
 
 class Contract(View):
@@ -10378,6 +10425,36 @@ class ProjectState(View):
 		matching = [p for p in self.phases if p.phase is phase]
 		return matching[-1] if matching else None
 
+	def phase_is_discharged(self, phase: Phase) -> bool:
+		"""Whether ``phase`` has been *presented* — awaiting a gate, or past one (FR-061).
+
+		The predicate the driver must read instead of "an artefact exists", and the
+		difference is a defect rather than a nicety. An artefact is committed by the phase's
+		proposal path and the gate is presented by the *next* call in that same path, so a
+		process killed between the two appends leaves a specification, a decomposition or a
+		plan on the log with its phase still ``PENDING``. Read as "the artefact exists, so
+		the phase is done", every later run skipped the phase that was never shown to
+		anyone, selected the next action, and was refused by ``advance_phase`` for a
+		predecessor it had itself declined to close — a repeating failure naming a phase
+		whose work was already on disk.
+
+		``AWAITING_GATE`` and ``COMPLETE`` are the two discharged states and they are
+		discharged for different reasons: the first has been shown and is waiting on a
+		person, the second has been passed. ``ACTIVE`` is **not** discharged — a phase
+		mid-flight has not been shown to anyone either.
+
+		An ungated phase is discharged by completion alone, because there is no gate to
+		present: ``_close_predecessors`` completes those as the work lands, and requiring
+		a presentation for a phase that has none would make the driver refuse at its own
+		gate.
+		"""
+		status = self.phase_status(phase)
+		if status is PhaseStatus.COMPLETE:
+			return True
+		if phase in PHASE_GATE:
+			return status is PhaseStatus.AWAITING_GATE
+		return False
+
 	@property
 	def open_gate(self) -> PhaseAdvance | None:
 		"""The gate the pipeline is stopped at, or ``None`` if it is not stopped.
@@ -10415,6 +10492,18 @@ class ProjectState(View):
 	def latest_contract(self, goal_id: str) -> Contract | None:
 		"""Most recent contract for a goal, if one exists."""
 		matching = [c for c in self.contracts if c.goal_id == goal_id]
+		return matching[-1] if matching else None
+
+	def latest_draft(self, goal_id: str) -> SpecificationDraft | None:
+		"""Most recent draft for a goal, if one exists (FR-068).
+
+		Beside :meth:`latest_contract` rather than only on the service, because the
+		driver decides *what to do next* off the folded state and "which draft is
+		current" is now one of the facts that decision reads. A driver calling the
+		service for it would re-read the log for something the state it already holds
+		carries, and the two reads could disagree across an append.
+		"""
+		matching = [d for d in self.drafts if d.goal_id == goal_id]
 		return matching[-1] if matching else None
 
 	def contract(self, contract_id: str) -> Contract | None:

@@ -195,15 +195,27 @@ def _next_action(
 	no cursor, no in-memory position and no session file, and a run resumed in a new
 	process computes the same answer from the same log.
 
-	The first action whose work the log does not already hold wins. Each check is against
-	a *recorded artefact* rather than against a phase status, because a phase can be
-	active with its artefact already produced — a run interrupted between two appends —
-	and re-doing work that is done is the defect idempotency exists to prevent.
+	The first action whose work the log does not already hold wins, and **"the log holds
+	it" means the phase it belongs to has been presented** — not merely that an artefact
+	exists. That distinction is the whole of what this function used to get wrong. A
+	phase's proposal path commits its artefact and *then* presents its gate, so a process
+	killed between the two appends leaves an orphan: a specification, decomposition or
+	plan on the log whose phase is still ``PENDING``. Read as "the artefact exists, so the
+	phase is done", the driver skipped the phase nobody was ever shown, selected the next
+	action, and ``_present``'s predecessor closure refused it — a run that failed forever
+	against a phase whose work was already on disk, naming a different phase each time
+	because the orphan let it step one further.
+
+	``state.phase_is_discharged`` is that predicate. Where a phase has no artefact of its
+	own — P0, P1 — the currency facts below answer the same question for the thing the
+	phase produces, because "there is a draft" and "the draft is the one the current
+	answers produced" are different claims and only the second discharges P0.
 
 	``has_draft`` and ``has_research`` are the two facts the folded state does not expose
-	as one field, and both are read from the log rather than from a phase status for that
-	reason: a phase that is complete with no artefact behind it is exactly the state this
-	function must not treat as discharged.
+	as one field. Both are read from the log rather than from a phase status, and both
+	are *currency* facts rather than existence facts: a phase that is complete with no
+	artefact behind it, and an artefact behind a phase that has been superseded, are the
+	two states this function must not treat as discharged.
 	"""
 	if state.open_gate is not None:
 		# A gate is open, so no action downstream of it may run. The loop reports this
@@ -241,13 +253,23 @@ def _next_action(
 			return _ACTION["research"]
 		return _ACTION["contract"]
 	specification = state.latest_specification(contract.id)
-	if specification is None:
+	if specification is None or not state.phase_is_discharged(Phase.SPECIFY):
+		# The artefact *and* its presentation. An orphan specification — committed, never
+		# shown — leaves P2 ``PENDING``, and selecting ``decompose`` over it sent the run
+		# to a refusal naming P2's approval. Re-running ``specify`` is the right answer:
+		# it proposes a revision and presents the gate, and ``approve_specification``
+		# already refuses to approve a superseded revision, so the orphan cannot be passed
+		# by accident either.
 		return _ACTION["specify"]
 	decomposition = state.latest_decomposition(contract.id)
-	if decomposition is None:
+	if decomposition is None or not state.phase_is_discharged(Phase.DECOMPOSE):
 		return _ACTION["decompose"]
 	plan = state.latest_plan(contract.id)
-	if plan is None or state.latest_oracle_audit(contract.id) is None:
+	if (
+		plan is None
+		or state.latest_oracle_audit(contract.id) is None
+		or not state.phase_is_discharged(Phase.CONTRACT)
+	):
 		# FR-107's audit is what P4's sampled gate presents: "this oracle measures the
 		# right thing" is the thing no oracle can decide, and the machine half that gets
 		# as close as it can is an oracle run against an empty workspace. The two are one
@@ -270,7 +292,18 @@ def _next_action(
 		return _ACTION["verify"]
 	if state.latest_integration(plan.id) is None:
 		return _ACTION["integrate"]
-	if state.delivery is None:
+	if state.delivery is None or not state.phase_is_discharged(Phase.DELIVER):
+		# **P8 is a gate, and a rendered report is not a presented one.** This branch
+		# used to read ``state.delivery is None`` alone, so a delivery rendered by a run
+		# killed before ``_present`` made every later run return ``None`` here, break the
+		# loop with zero steps, and take the terminal branch — reporting ``DELIVERED``
+		# and ``claims_built=True`` while the deploy gate had never been shown to anyone
+		# and was still ``PENDING``. That is the one state the module's own contract
+		# forbids ("no branch returns DELIVERED with a gate open"), and it was reachable
+		# by killing the process at an ordinary point in an ordinary run. Selecting
+		# ``deliver`` again re-renders the report and presents the gate, which is
+		# idempotent in the ledger's own terms: ``deliveries`` is a collection and the
+		# latest is the operative one.
 		return _ACTION["deliver"]
 	return None
 
@@ -293,6 +326,112 @@ def _proposals_waiting(state: ProjectState, goal_id: str) -> bool:
 	return any(
 		a.goal_id == goal_id and a.is_model_proposed and a.id not in attested for a in state.answers
 	)
+
+
+def _returned_to_p0(state: ProjectState, goal_id: str) -> tuple[str, ...]:
+	"""The clauses whose FR-068 verdict sends the pipeline back to P0 (FR-068, FR-172).
+
+	Read off the classification rather than off the refusal's message, and that is the
+	difference between a control decision and parsing prose: ``advance_phase`` raises a
+	``ValueError`` whose text names the clauses, and a driver that decided the *kind* of
+	stop by matching that sentence would break the day somebody reworded it. The
+	classification is on the folded state, the verdicts are an enum, and
+	``returns_to_p0`` is the property that already states which of them stop the pipeline.
+
+	**The verdict has to be about the draft the goal holds now**, and that is what stops
+	this from being a deadlock. The operator's move for a return to P0 is to revise an
+	answer, and a revision does not retract the old classification — it sits on the log
+	until the next P1 run replaces it. Read without this check, the stop fired again on
+	the very state the operator had just repaired: measured, the run after a revision
+	reported ``RETURNED_TO_P0`` with **zero steps** and refused to re-draft, so the one
+	command the stop names led back to the same stop. The exit was a hand-edited ledger.
+
+	The fact that clears it is **both** of the two currency facts, and needing both is the
+	part that is not obvious. After a revision the latest draft is still the old draft, so
+	"the classification names every clause of the latest draft" is true and the verdict
+	stays binding — that is the deadlock. Once the run re-drafts, the draft is current and
+	that check passes again, this time because the classification is stale relative to the
+	*new* clauses. Only the conjunction covers both: the draft must descend from the
+	answers on the log now, and the classification must name the clauses that draft holds.
+	Measured with one check and then the other, each left a run stopping against a premise
+	the operator had already restated.
+
+	Returns the clause ids, so the caller can name them. Empty means the evidence did not
+	stop the pipeline — either nothing was contradicted, or what was contradicted has
+	since been restated, or P1 has not yet classified the draft that restatement produced.
+	"""
+	classification = state.classification
+	if classification is None or classification.goal_id != goal_id:
+		return ()
+	if not _draft_is_current(state, goal_id):
+		return ()
+	draft = state.latest_draft(goal_id)
+	assert draft is not None, "_draft_is_current is true with no draft"
+	if classification.unclassified(frozenset(s.id for s in draft.stems)):
+		return ()
+	return tuple(c.clause_id for c in classification.returns_to_p0)
+
+
+def _returned_to_p0_detail(stopped: tuple[str, ...]) -> str:
+	"""The sentence both readers of FR-068's stop report, written once (FR-068, FR-172).
+
+	Two call sites reach this terminal — the loop, which reads the classification between
+	actions, and the exception handler, which reads it when an action refused — and they
+	must say the same thing. Two copies of a sentence are two things to edit, and the one
+	that gets missed is the one an operator reads.
+	"""
+	names = ", ".join(stopped)
+	return (
+		f"{len(stopped)} clause(s) return the pipeline to P0 ({names}): FR-068's action "
+		"for an invalidated or deepened premise is to revise the clauses and re-elicit, "
+		"not to build on them. Revise the answer the clause came from, re-run, and the "
+		"new draft is researched afresh"
+	)
+
+
+def _draft_is_current(state: ProjectState, goal_id: str) -> bool:
+	"""Whether the goal's draft was built from the answers that are current now (FR-068).
+
+	Not "a draft exists". A revised answer supersedes the one the draft was made of, so
+	the draft's clauses are about a premise the operator has since restated — and the
+	re-draft that would fix it produces *fresh* stem ids, so no reader can tell the two
+	apart by comparing clause sets. The draft records the answers it came from, and this
+	is that record read against the log.
+
+	A draft naming no answers reads as **not** current, which is the refusing direction:
+	an empty ``answer_ids`` is a draft written before the field existed or built by hand,
+	and neither is evidence that it reflects the answers on the log today.
+	"""
+	draft = state.latest_draft(goal_id)
+	if draft is None:
+		return False
+	return draft.descends_from(state.answers_for(goal_id))
+
+
+def _research_covers_the_draft(state: ProjectState, goal_id: str) -> bool:
+	"""Whether P1 has run against the clause set the current draft holds (FR-068).
+
+	The fact ``has_research`` was standing in for and getting wrong. It was
+	``any(r.goal_id == goal_id for r in state.research)`` — "research has ever run for
+	this goal" — which stays true after the draft changes underneath it. The driver then
+	selected ``contract`` over clauses the research never classified, and FR-068's whole
+	point is that a contract is written over *classified* premises: an unclassified
+	clause is one the evidence never reached.
+
+	Answered from the classification rather than from the draft, because the
+	classification is the artefact that names clause ids — it holds one verdict per
+	clause, and ``unclassified`` is the two-way rule FR-068 already states. A research
+	run that left no classification, or one that classified a clause set this draft no
+	longer holds, both read as **not covering**, and the driver re-runs P1 rather than
+	contracting over premises nothing tested.
+	"""
+	classification = state.classification
+	if classification is None or classification.goal_id != goal_id:
+		return False
+	draft = state.latest_draft(goal_id)
+	if draft is None:
+		return False
+	return not classification.unclassified(frozenset(s.id for s in draft.stems))
 
 
 async def run_goal(
@@ -344,6 +483,34 @@ async def run_goal(
 		)
 	for _ in range(_MAX_ITERATIONS):
 		state = await service.state()
+		stopped = _returned_to_p0(state, goal.id)
+		if stopped:
+			# FR-068's "return to P0. Do not build." — read *before* the work it forbids
+			# rather than after it. ``advance_phase`` already refuses to complete P1 over
+			# an invalidated or deepened clause, so the pipeline cannot pass the verdict;
+			# but it can act *up to* it. This check used to live only in the loop's
+			# exception handler, so the refusal arrived from ``_present`` — after the run
+			# had contracted and specified over the contradicted clause, four machine
+			# actions downstream of the finding. The operator was then shown a P2 gate for
+			# a specification resting on a premise SoFact's own research had withdrawn.
+			# The stop is the same terminal state either way; where it is read is the
+			# difference between a factory that stops at the finding and one that stops
+			# when its own gate machinery notices.
+			# No step is recorded, because no action was attempted: the stop is read
+			# between actions, and the last step on the list is the work that *succeeded*
+			# and produced the finding. Recording it again as REFUSED would name a step
+			# that ran cleanly as the one that refused — the same mistake the gate branch
+			# avoids by reading ``opened_by`` off the step that actually halted.
+			return await _finish(
+				service,
+				goal_id=goal.id,
+				started=started,
+				steps=steps,
+				terminal=DriverTerminal.RETURNED_TO_P0,
+				detail=_returned_to_p0_detail(stopped),
+				open_gate=None,
+				notify=notify,
+			)
 		gate = state.open_gate
 		if gate is not None:
 			# The step that *opened* the gate is the one that halted, and it was recorded
@@ -373,7 +540,6 @@ async def run_goal(
 					DRIVER_ACTIONS[0],
 				),
 			)
-			# FR-061: a gate whose machine half *failed* is not passed with `gate --approve`
 			# — that verb refuses a failed check, and correctly, since approval cannot make
 			# an unsound artefact sound. Reporting the stop without saying so sent the
 			# operator to a command that could only refuse them, which turns a hard stop
@@ -433,8 +599,8 @@ async def run_goal(
 			)
 		action = _next_action(
 			state,
-			has_draft=await service.latest_draft(goal.id) is not None,
-			has_research=any(r.goal_id == goal.id for r in state.research),
+			has_draft=_draft_is_current(state, goal.id),
+			has_research=_research_covers_the_draft(state, goal.id),
 			ready=(await service.readiness(goal.id)).is_ready,
 		)
 		if action is None:
@@ -455,6 +621,31 @@ async def run_goal(
 			# catch is broad on purpose: the operator asked to be told when the build
 			# finishes, and a traceback on their terminal is not being told. The
 			# message is the harness's or the validator's own words, not a summary.
+			#
+			# **FR-068's stop is not a failure, and reporting it as one was the defect.**
+			# ``advance_phase`` refuses to complete P1 when a clause's verdict is
+			# Invalidated or Deepened — "return to P0, do not build" — and that arrives
+			# here as a ``ValueError`` like any other. Reported as ``FAILED``, it read as a
+			# fault in the run, and ``next_human_verb`` sent the operator to
+			# ``build --resume``: a command that re-selects the same action, hits the same
+			# refusal, and prints the same sentence forever. Nothing was broken — the
+			# evidence had withdrawn a premise, and the operator's move is to revise an
+			# answer, which no resume performs. The stop is therefore read off the
+			# *classification* (data, not the message text) and reported as the terminal
+			# state it is.
+			stopped = _returned_to_p0(state, goal.id)
+			if stopped:
+				steps.record(action, DriverOutcome.REFUSED, f"{action.name}: {exc}")
+				return await _finish(
+					service,
+					goal_id=goal.id,
+					started=started,
+					steps=steps,
+					terminal=DriverTerminal.RETURNED_TO_P0,
+					detail=_returned_to_p0_detail(stopped),
+					open_gate=None,
+					notify=notify,
+				)
 			steps.record(action, DriverOutcome.REFUSED, f"{type(exc).__name__}: {exc}")
 			return await _finish(
 				service,
@@ -520,6 +711,19 @@ async def run_goal(
 			open_gate=None,
 			notify=notify,
 		)
+	# The module's central property, stated where it is claimed. This is reachable only
+	# if ``_next_action`` returns ``None`` with P8 undischarged, which its own branch
+	# forbids — so it cannot fire today, and that is the point: the property is asserted
+	# rather than left to the exhaustiveness of a function somebody may later edit. A
+	# delivery on the log with its gate never presented is precisely the state that made
+	# a run report ``DELIVERED``/``claims_built=True`` with the deploy gate still
+	# ``PENDING``, and a build claim nobody was shown a gate for is the one thing this
+	# module may not produce.
+	assert state.phase_is_discharged(Phase.DELIVER), (
+		f"a delivery report exists ({delivered.id}) and P8 has not been presented: "
+		f"reporting DELIVERED here would claim a build whose deploy gate was never "
+		f"shown to anyone (FR-061, FR-172)"
+	)
 	return await _finish(
 		service,
 		goal_id=goal.id,

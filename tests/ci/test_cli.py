@@ -30,7 +30,7 @@ from sofact.cli import app
 from sofact.elicitation import DIMENSIONS
 from sofact.harness import SPECS, HarnessSpec, load_specs
 from sofact.service import FactoryService
-from sofact.views import GateCheck, Phase, PhaseGate, PhaseStatus
+from sofact.views import ElicitationDimension, GateCheck, Phase, PhaseGate, PhaseStatus
 
 RUNNER = CliRunner()
 
@@ -3256,6 +3256,76 @@ class TestTheFrontDoorVerbs:
 		result = RUNNER.invoke(app, ["--home", str(home), "speak", str(audio)])
 		assert result.exit_code == 1, result.output
 		assert "no goal was opened" in result.output
+		assert "Traceback" not in result.output
+
+	# elicit ---------------------------------------------------------------- #
+
+	def test_elicit_without_a_goal_says_so(self, home: Path) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "elicit"])
+		assert result.exit_code == 1, result.output
+		assert "no goal yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_elicit_revises_a_resolved_dimension_the_questionnaire_cannot_reach(
+		self, home: Path
+	) -> None:
+		"""The reason this verb exists rather than a flag on the questionnaire.
+
+		After a return to P0 every dimension is resolved and the premise one of them states
+		is what the evidence contradicted — so ``sofact`` bare prints "every dimension
+		resolved" and changes nothing. The one command FR-068's stop names would have done
+		nothing at all. This test drives the questionnaire first, asserts it has nothing
+		left to ask, and then revises through the verb that can.
+		"""
+		conversation(home)
+		before = RUNNER.invoke(app, ["--home", str(home)], input="\n")
+		assert before.exit_code == 0, before.output
+		assert "every dimension resolved" in before.output, (
+			"the questionnaire is the dead end this verb exists to route around"
+		)
+
+		revised = "Every reminder appears in the dashboard within two seconds, poll-measured."
+		result = RUNNER.invoke(
+			app, ["--home", str(home), "elicit", "--dimension", "outcome"], input=f"{revised}\n"
+		)
+
+		assert result.exit_code == 0, result.output
+		assert revised in result.output, (
+			"the current answer is printed before the prompt, so a revision is made against "
+			"what is there rather than blind"
+		)
+		assert "the previous draft is superseded" in result.output
+		ledger = (home / "ledger.jsonl").read_text(encoding="utf-8")
+		assert revised in ledger, "the revision is what the next draft is made of (FR-068)"
+
+	def test_elicit_with_an_empty_answer_revises_nothing(self, home: Path) -> None:
+		"""Entering nothing is how the operator declines a dimension, and it must be free.
+
+		The verb walks every dimension in turn, so a stray newline on a dimension the
+		operator does not want to touch would otherwise record an empty answer — and an
+		empty answer supersedes a good one.
+		"""
+		conversation(home)
+		original = GOOD_ANSWERS[ElicitationDimension.OUTCOME]
+
+		result = RUNNER.invoke(app, ["--home", str(home), "elicit"], input="\n" * len(DIMENSIONS))
+
+		assert result.exit_code == 0, result.output
+		assert "unchanged" in result.output
+		state = asyncio.run(FactoryService(home).state())
+		goal = state.latest_goal()
+		assert goal is not None, "the conversation opened a goal"
+		answers = [a for a in state.answers_for(goal.id) if a.dimension is ElicitationDimension.OUTCOME]
+		assert [a.text for a in answers] == [original], (
+			"a declined dimension holds exactly the answer it held before"
+		)
+
+	def test_elicit_refuses_an_unknown_dimension_by_name(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "elicit", "--dimension", "vibes"])
+		assert result.exit_code == 1, result.output
+		assert "unknown dimension" in result.output
+		assert "outcome" in result.output, "the refusal names the ones that do exist"
 		assert "Traceback" not in result.output
 
 	# attest ----------------------------------------------------------------- #

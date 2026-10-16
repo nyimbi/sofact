@@ -230,6 +230,28 @@ def test_every_non_delivered_terminal_avoids_the_word_built() -> None:
 		assert "built and verified" not in subject, terminal
 
 
+def test_a_run_returned_to_p0_says_so_rather_than_failed() -> None:
+	"""FR-068's stop is a finding about a premise, not a fault in the run.
+
+	The class-level loop above covers the "does not claim built" half for every terminal.
+	What it cannot see is the direction this test is about: a subject reading "failed"
+	sends the operator looking for a broken thing, and nothing was broken — the evidence
+	withdrew a premise, and their move is to revise an answer. ``RETURNED_TO_P0`` reached
+	the fallback branch before this, which prints ``terminal.value`` — the enum's own
+	spelling, ``returned_to_p0``, with an underscore in the middle of a sentence a person
+	reads on a phone.
+	"""
+	run = a_run(terminal=DriverTerminal.RETURNED_TO_P0)
+	subject = render_subject(run, "Ship a meter service.")
+
+	assert subject == (
+		"sofact: Ship a meter service. — returned to P0: the evidence contradicted a "
+		"premise, not built"
+	)
+	assert "failed" not in subject
+	assert "returned_to_p0" not in subject, "the enum's spelling is not a sentence"
+
+
 def test_the_subject_carries_the_operators_own_words() -> None:
 	"""Truncated rather than paraphrased, and only the first line."""
 	run = a_run(terminal=DriverTerminal.DELIVERED)

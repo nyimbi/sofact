@@ -1868,8 +1868,15 @@ required for the same reason.
 
 v0.1's lane and oracle definition formats are retained. New surface:
 
-- **`sofact goal`** — submit a goal; begins P0.
-- **`sofact elicit`** — the Socratic dialogue; interactive or batch.
+- **`sofact build --statement <text>`** — submit a goal; begins P0. The bare `sofact`
+  command is the Socratic dialogue itself: it asks the open dimensions in turn,
+  interactively or from stdin.
+- **`sofact elicit`** — revise a dimension that is already *resolved*. A different verb
+  from the questionnaire, and it has to be: FR-068's stop tells the operator to return to
+  P0, where every dimension is resolved and the premise one of them states is what the
+  evidence contradicted — so the questionnaire prints "every dimension resolved" and
+  changes nothing. Re-answering supersedes the earlier answer for that dimension, and the
+  next run drafts fresh clause stems from it (FR-068, FR-173).
 - **`sofact research`** — P1; produces the source ledger and verdicts.
 - **`sofact sources`** — reads a research run's artefacts into a `SourceLedger`
   (`--from-run <id>`), or prints the one the log holds. Claims and sources are
@@ -1896,7 +1903,9 @@ v0.1's lane and oracle definition formats are retained. New surface:
   as not implemented rather than passed (ADR-0027, ADR-0038).
 - **`sofact contract`** — P4; emits contracts + manufactured oracles.
 - **`sofact build`** — P5–P7; runs the platform build.
-- **`sofact report`** — the delivery report (§11).
+- **`sofact deliver`** — P8; renders the delivery report (§11) and opens the deploy gate.
+  There is no separate `sofact report`: the report is what `deliver` produces, and
+  `sofact build` renders it when it reaches P8.
 - **`sofact gate --approve <phase>`** — the only way past a gate, attributable to a
   human identity (FR-061, NFR-017).
 

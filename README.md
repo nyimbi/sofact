@@ -206,6 +206,7 @@ The whole pipeline is reachable from one description of what you want:
 
 ```sh
 sofact speak interview.m4a        # a recording → a transcript → a goal (FR-168)
+sofact elicit                     # revise a resolved answer; FR-068's recovery half
 sofact search                     # web search, queries composed from the goal (FR-174)
 sofact research                   # deep research, dispatched to a harness (FR-167)
 sofact competitors                # the competitive baseline, as a cited artefact (FR-169)
@@ -523,7 +524,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1996 tests
+uv run pytest -vxs tests/ci          # 2009 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
