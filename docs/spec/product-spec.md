@@ -2279,15 +2279,31 @@ is a property of a machine, a budget and a licence, and it is a JSON table read 
 is a configuration error, and a tier that gives no reason is one nobody can review.
 
 **The precedence is stated and the source is carried with the answer.** `resolve_model`
-returns `(model, source)` over `--model` → `tier:<name>` → `SOFACT_MODEL` →
-`DEFAULT_MODEL`. The source is the half that makes the choice checkable after the fact,
-and `DispatchRecord.model_source` records it on every row. A phase that SoFact assigns
-no depth (`phase_tier` returns `None`) falls through to the operator's **named** single
-model and reports `SOFACT_MODEL` — never silently to another tier's model, because a
-phase quietly running the cheap tier's model is a spend decision nobody made. A
-capability probe resolves no tier at all and records `model_source=None`: the probe names
-a model to vary **one** slot, so a tier applied there would make the two arms differ in
-two things and the measured difference would not be attributable to either.
+returns `(model, source)` over `--model` → the module's declared class → `tier:<name>`
+→ `SOFACT_MODEL` → `DEFAULT_MODEL`. The source is the half that makes the choice
+checkable after the fact, and `DispatchRecord.model_source` records it on every row. A
+phase that SoFact assigns no depth (`phase_tier` returns `None`) falls through to the
+operator's **named** single model and reports `SOFACT_MODEL` — never silently to another
+tier's model, because a phase quietly running the cheap tier's model is a spend decision
+nobody made. A capability probe resolves no tier at all and records `model_source=None`:
+the probe names a model to vary **one** slot, so a tier applied there would make the two
+arms differ in two things and the measured difference would not be attributable to either.
+
+**FR-050's declared class is an input to that choice, and it outranks the phase.**
+`reasoning_class` is required on every `ModuleBudget` (FR-097) and every decomposition
+writes it, so `REASONING_CLASS_TIER` maps the class to a tier and `resolve_model`
+consults it **after `--model` and before the phase's tier**. The two disagree by
+construction — every P5 step is `BUILD`, which FR-132 puts in `cheap`, while a module may
+declare `reasoning` because *its* work needs depth — so the order has to be stated rather
+than left to whichever one a reader consults first: the phase is a statement about the
+pipeline and the module is a statement about *this* module. `class_tier` is total over
+`ReasoningClass` and **asserts** rather than defaulting, and a class whose tier the
+deployment named no model for falls through to the phase's tier rather than to another
+tier's model. `dispatch_step` resolves the module **before** the adapter, because the
+class it declared is an input to the model choice — without that ordering a routing
+function nothing calls is the same defect one layer up. The limit, stated: this routes
+between tiers, so it decides *which model*, not *which lane* — §5.1's
+`admissible(lane)` and `ceiling(lane)` remain uncomputed (FR-024–FR-035, ADR-0074).
 
 **FR-133's phase key is derived, not stored, and the fold refuses rather than guesses.**
 `DispatchRecord` carries `step_id` and not the step's kind, so `measure_spend` reads the

@@ -115,6 +115,7 @@ from sofact.views import (
 	PluginVerdict,
 	ProbeOutcome,
 	ProductSpecificationDocument,
+	ReasoningClass,
 	RepairOutcome,
 	ResearchBudget,
 	ResearchClassification,
@@ -4317,6 +4318,18 @@ async def _tiers(svc: FactoryService) -> None:
 				"operator's model",
 				fg="bright_black",
 			)
+	# FR-050/FR-097: the class a module declares outranks the phase's tier, so a reader
+	# of this table would otherwise conclude that every P5 step runs on the cheap model —
+	# which is what the code did before the class was routed on. Printed per class rather
+	# than per module because there is no decomposition here: the mapping is the same for
+	# every module of a class, and a table of modules would be a table of one project.
+	typer.secho(
+		"\n  a module's declared reasoning class (FR-050) outranks the phase above:",
+		fg="cyan",
+	)
+	for reasoning_class in ReasoningClass:
+		model, source = svc.model_for(Phase.BUILD, reasoning_class=reasoning_class)
+		typer.secho(f"  {reasoning_class.value:<20} {model:<28} {source}")
 
 
 @app.command(name="deliver")

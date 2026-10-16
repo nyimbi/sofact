@@ -423,11 +423,20 @@ sofact tiers     # the depth assignment, and which model each phase resolves to
 sofact spend     # where the money went, per phase and per module
 ```
 
-Resolution is `--model` → `tier:<name>` → `SOFACT_MODEL` → the built-in default, and the
-**source travels with the answer**: every `DispatchRecord` says which rule chose its model,
-so a row cannot quietly claim a tier it did not run under. A phase SoFact assigns no depth
-falls through to your named single model and says `SOFACT_MODEL` — never silently to another
-tier's model, because a phase running the cheap tier's model is a spend decision nobody made.
+Resolution is `--model` → the module's declared class → `tier:<name>` → `SOFACT_MODEL` →
+the built-in default, and the **source travels with the answer**: every `DispatchRecord` says
+which rule chose its model, so a row cannot quietly claim a tier it did not run under. A phase
+SoFact assigns no depth falls through to your named single model and says `SOFACT_MODEL` —
+never silently to another tier's model, because a phase running the cheap tier's model is a
+spend decision nobody made.
+
+**A module's declared reasoning class outranks its phase's tier.** FR-097 makes
+`reasoning_class` required on every module's budget and every decomposition writes it, so
+`reasoning_class: reasoning` puts that module on the `deep` model while its neighbours stay
+on `cheap` — even though every P5 step is `BUILD`, which FR-132 puts in the cheap tier. The
+two disagree by construction: the phase is a statement about the pipeline, the module is a
+statement about *this* module. `sofact tiers` prints both tables, because a reader of the
+phase table alone would conclude every P5 step is cheap ([ADR-0074](docs/adr/0074-a-modules-declared-class-outranks-its-phases-tier.md)).
 
 **`spend` reports against §1.3 and says where it cannot.** There is no token dimension in
 the envelope, so the report says so rather than inventing a bound. The wall-clock dimension
@@ -507,7 +516,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1976 tests
+uv run pytest -vxs tests/ci          # 1987 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

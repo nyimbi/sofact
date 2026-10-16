@@ -32,10 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TypeGuard, cast
 
-from sofact.views import Phase, PlanStepKind
+from sofact.views import Phase, PlanStepKind, ReasoningClass
 
 __all__ = [
 	"MODEL_TIERS_ENV",
+	"REASONING_CLASS_TIER",
 	"STEP_PHASE",
 	"TIER_PHASES",
 	"ModelTier",
@@ -248,6 +249,54 @@ def phase_tier(phase: Phase) -> str | None:
 	return None
 
 
+REASONING_CLASS_TIER: Final[dict[ReasoningClass, str]] = {
+	ReasoningClass.THROUGHPUT: "cheap",
+	ReasoningClass.REASONING: "deep",
+	ReasoningClass.EVALUATION: "deep",
+}
+"""Which tier a module's *declared* reasoning class routes to (FR-050, FR-097).
+
+**The half of the routing function that was missing.** FR-050's sentence is that lanes
+declare "the class they need (reasoning-depth or throughput), not a model name", and
+FR-097 makes that class a required field of every module's budget. The class was declared
+on every module in every decomposition and read by exactly two print statements — a
+``ModuleBudget`` saying ``reasoning`` put a module on the same model as one saying
+``throughput``, which is the "written and never read" defect: a field the system collects
+and never uses.
+
+The mapping is SoFact's and not a deployment's, on :data:`TIER_PHASES`' own argument one
+level down. That a reasoning-class module needs a deeper model than a throughput-class one
+is a statement about what the *classes mean* — §10.2 defines them as depth-per-token
+against high-volume — and it is the same for every deployment. *Which* model sits in
+``deep`` remains the deployment's, exactly as for a phase.
+
+``EVALUATION`` routes to ``deep`` rather than to a tier of its own. §10.2 marks it
+"ideally deterministic tooling, not a model", so a deployment that has such tooling should
+configure it as the ``deep`` tier's model for the modules that need it; giving the class
+its own tier would be SoFact inventing a fourth bucket for a case FR-051 says should not
+be a model at all. Routing it to ``cheap`` would be the worse error of the two, because
+the class exists precisely for work whose verdict matters.
+
+A class this build does not know is a refusal rather than a fall-through, for
+:func:`step_phase`'s reason: the dict is total over the enum, and a new member is a
+routing decision somebody has to make rather than one that silently inherits ``cheap``.
+"""
+
+
+def class_tier(reasoning_class: ReasoningClass) -> str:
+	"""The tier a module declaring ``reasoning_class`` routes to (FR-050).
+
+	Total over :class:`~sofact.views.ReasoningClass`, and asserted so. Defaulting to
+	``cheap`` would put a class nobody considered on the high-volume model, which is the
+	direction that fails toward an unmeasured verdict.
+	"""
+	tier = REASONING_CLASS_TIER.get(reasoning_class)
+	assert tier is not None, (
+		f"reasoning class {reasoning_class.value!r} has no tier assignment (FR-050)"
+	)
+	return tier
+
+
 def resolve_model(
 	phase: Phase,
 	*,
@@ -255,28 +304,48 @@ def resolve_model(
 	tiers: Mapping[str, ModelTier] | None = None,
 	operator_model: str | None = None,
 	environ: Mapping[str, str] | None = None,
+	reasoning_class: ReasoningClass | None = None,
 ) -> tuple[str, str]:
-	"""The model ``phase`` runs on, and which rule chose it (FR-132).
+	"""The model ``phase`` runs on, and which rule chose it (FR-132, FR-050).
 
 	Returns ``(model, source)``. The source is returned rather than inferred by the
 	caller because "which model ran this phase, and on whose authority" is the question
 	the tier design exists to make answerable — and a caller that re-derived it from the
 	same inputs would be a second implementation of this precedence.
 
-	The order is **explicit, then tier, then operator, then default**:
+	The order is **explicit, then the module's declared class, then the phase's tier,
+	then operator, then default**:
 
 	- ``explicit`` — ``--model`` on the verb. An operator naming a model for *this* run
 		outranks a table written for every run, which is the ordinary meaning of a flag.
-	- the tier's model, when the phase is in a tier **and** the deployment named one.
+	- the tier :func:`class_tier` derives from ``reasoning_class``, when the caller
+		supplied the class a module declared and the deployment named a model for that tier.
+	- the tier of the *phase*, when the phase is in one **and** the deployment named one.
 	- ``operator_model`` — ``SOFACT_MODEL``, else :data:`~sofact.llm.DEFAULT_MODEL`.
 
-	A tier with no configured model does **not** shadow the operator's model. It falls
-	through to it and says so, because the alternative — treating a declared-but-empty
-	tier as "use the cheap model" — is a substitution the operator never asked for.
+	**Why the class outranks the phase.** FR-132 assigns depth *per phase* and FR-097 makes
+	it a required declaration *per module*, and the two disagree by construction: every P5
+	step is ``BUILD``, which FR-132 puts in ``cheap``, while a module may declare
+	``reasoning`` because its work needs depth. The phase is a statement about the
+	*pipeline* — P5 is high-volume work in general — and the module is a statement about
+	*this* module. Reading the phase first would make the module's declaration
+	unobservable, which is the state this argument exists to end.
+
+	A class the caller does not supply changes nothing: the phase's tier applies, which is
+	every existing caller's behaviour. And a class whose tier the deployment named no model
+	for falls through to the phase's tier rather than to another tier's model, for the
+	reason a declared-but-empty tier falls through to the operator's: answering it with a
+	model nobody chose is the substitution FR-132 prevents.
 	"""
 	env = os.environ if environ is None else environ
 	if explicit is not None and explicit.strip():
 		return explicit, "--model"
+
+	if reasoning_class is not None and tiers is not None:
+		class_name = class_tier(reasoning_class)
+		declared = tiers.get(class_name)
+		if declared is not None:
+			return declared.model, f"tier:{class_name}"
 
 	name = phase_tier(phase)
 	if name is not None and tiers is not None:

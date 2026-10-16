@@ -206,6 +206,7 @@ from sofact.views import (
 	ProductSpecificationDocument,
 	ProjectState,
 	Readiness,
+	ReasoningClass,
 	RepairAttempt,
 	RepairOutcome,
 	ResearchAllowance,
@@ -624,16 +625,35 @@ class FactoryService:
 		"""
 		return self._model_tiers
 
-	def model_for(self, phase: Phase, *, model: str | None = None) -> tuple[str, str]:
-		"""The model ``phase`` runs on here, and which rule chose it (FR-132).
+	def model_for(
+		self,
+		phase: Phase,
+		*,
+		model: str | None = None,
+		reasoning_class: ReasoningClass | None = None,
+	) -> tuple[str, str]:
+		"""The model ``phase`` runs on here, and which rule chose it (FR-132, FR-050).
 
 		The one place the precedence lives. Every dispatch reads it rather than
 		re-deriving it, because a second implementation of "which model runs P5" is a
 		second answer, and the ledger would carry both.
-		"""
-		return resolve_model(phase, explicit=model, tiers=self._model_tiers)
 
-	def model_for_step(self, kind: PlanStepKind, *, model: str | None = None) -> tuple[str, str]:
+		``reasoning_class`` is the class a *module* declared (FR-097), and it outranks the
+		phase's own tier — see :func:`~sofact.tiers.resolve_model`, which is where that
+		order is argued. A caller that has no module to name passes nothing and gets the
+		phase's tier, which is every existing caller's behaviour.
+		"""
+		return resolve_model(
+			phase, explicit=model, tiers=self._model_tiers, reasoning_class=reasoning_class
+		)
+
+	def model_for_step(
+		self,
+		kind: PlanStepKind,
+		*,
+		model: str | None = None,
+		reasoning_class: ReasoningClass | None = None,
+	) -> tuple[str, str]:
 		"""The model a step of ``kind`` runs on, and which rule chose it (FR-132, FR-133).
 
 		A step carries a :class:`~sofact.views.PlanStepKind` and no phase, so this is where
@@ -641,7 +661,7 @@ class FactoryService:
 		:meth:`model_for` does the precedence. Both live in one place so a dispatch cannot
 		be tiered by one rule and attributed by another.
 		"""
-		return self.model_for(step_phase(kind), model=model)
+		return self.model_for(step_phase(kind), model=model, reasoning_class=reasoning_class)
 
 	def envelope(self) -> DeliveryEnvelope | None:
 		"""The configured §1.3 envelope, or ``None`` when this deployment set none."""
@@ -2221,6 +2241,7 @@ class FactoryService:
 		tools: str | None = None,
 		phase: Phase | None = None,
 		step_kind: PlanStepKind | None = None,
+		reasoning_class: ReasoningClass | None = None,
 	) -> ConfiguredHarnessAdapter:
 		"""Build the adapter for one harness. Configuration, never a ledger event.
 
@@ -2235,6 +2256,10 @@ class FactoryService:
 		and gets the operator's model — which is exactly the behaviour every caller had
 		before the tier table existed. A caller that names one gets the tier's model and
 		the record says which rule chose it.
+
+		``reasoning_class`` is what the *module* declared (FR-050, FR-097) and it outranks
+		the phase's tier — see :func:`~sofact.tiers.resolve_model`. A caller that is not
+		dispatching a module's step passes nothing.
 		"""
 		resolved = self.harness_name(name)
 		spec = harness_spec_for(resolved, self._specs)
@@ -2245,9 +2270,11 @@ class FactoryService:
 		selected: str | None = model
 		source: str | None = None
 		if step_kind is not None:
-			selected, source = self.model_for_step(step_kind, model=model)
+			selected, source = self.model_for_step(
+				step_kind, model=model, reasoning_class=reasoning_class
+			)
 		elif phase is not None:
-			selected, source = self.model_for(phase, model=model)
+			selected, source = self.model_for(phase, model=model, reasoning_class=reasoning_class)
 		else:
 			# No phase: the caller is not a phase's dispatch, so the operator's model and
 			# no source. ``model_source=None`` is what the record carries, which keeps a
@@ -2378,6 +2405,31 @@ class FactoryService:
 		found = approved.module_for_clauses(clause_ids)
 		return found.name if found is not None else None
 
+	async def _module_class_for(
+		self, plan: GoalPlan, clause_ids: tuple[str, ...]
+	) -> ReasoningClass | None:
+		"""The reasoning class the module owning ``clause_ids`` declared (FR-050, FR-097).
+
+		The reader :attr:`~sofact.views.ModuleBudget.reasoning_class` did not have. FR-050
+		makes the class the thing a lane declares *instead of* a model name, and FR-097
+		makes it required on every module's budget — and until this existed the field was
+		written by every decomposition and read by two print statements, so a module
+		declaring ``reasoning`` ran on the same model as one declaring ``throughput``.
+
+		``None`` when no single module owns the clauses, which is
+		:meth:`_module_for`'s own answer for a bootstrap step or one spanning two modules.
+		A step with no module has declared no class, and the phase's tier applies — which
+		is the honest reading rather than a default class invented for it.
+		"""
+		if not clause_ids:
+			return None
+		state = await self.state()
+		approved = state.latest_decomposition(plan.contract_id)
+		if approved is None:
+			return None
+		found = approved.module_for_clauses(clause_ids)
+		return found.budget.reasoning_class if found is not None else None
+
 	async def dispatch_step(
 		self,
 		plan_id: str,
@@ -2412,12 +2464,31 @@ class FactoryService:
 		step = plan.step_by_id(step_id)
 		if step is None:
 			raise KeyError(f"plan {plan_id} has no step {step_id}")
-		# FR-132: the model is resolved from the *step's kind*, which is the phase this
-		# dispatch belongs to (FR-133's join). ``--model`` still wins when the operator
-		# named one, so a caller who wants one model for everything passes it and gets
-		# exactly that — the tier table is a default, not an override.
+		# FR-050/FR-097: the module is resolved *first*, because the class it declared is
+		# an input to the model choice below. A module declaring `reasoning` must not run
+		# on the model the pipeline's P5 default names for high-volume work — the field was
+		# written by every decomposition and read by nothing until this reordering, so the
+		# declaration had no effect on what actually ran.
+		#
+		# FR-100 wants the branch per module and FR-136 forbids a session per module, so
+		# this is also the branch's module: every step whose clauses belong to one module
+		# lands on that module's branch, and several steps therefore share it. A step no
+		# single module owns (bootstrap; one spanning two) gets neither a class nor a
+		# module, and falls back to its own ordinal and kind.
+		module = await self._module_for(plan, step.clause_ids)
+		reasoning_class = await self._module_class_for(plan, step.clause_ids)
+		# FR-132: the model is resolved from the *step's kind* — the phase this dispatch
+		# belongs to (FR-133's join) — and from the class the module declared (FR-050).
+		# ``--model`` still wins when the operator named one, so a caller who wants one
+		# model for everything passes it and gets exactly that: the tier table is a
+		# default, not an override.
 		adapter = self.adapter(
-			name, workspace=workspace, model=model, tools=tools, step_kind=step.kind
+			name,
+			workspace=workspace,
+			model=model,
+			tools=tools,
+			step_kind=step.kind,
+			reasoning_class=reasoning_class,
 		)
 		# FR-019: the session runs inside the boundary measured for *this* workspace, and
 		# it is attached here rather than in :meth:`adapter` because the capability probes
@@ -2429,18 +2500,13 @@ class FactoryService:
 		# FR-100: the branch is established *before* the session starts, so the producer
 		# builds on it rather than in place. Refusing here rather than dispatching
 		# unbranched is the point -- a session that ran in place has already done the
-		# thing the requirement forbids by the time anyone could notice.
-		#
-		# The module is resolved from the approved decomposition rather than from the
-		# step, because FR-136 forbids one session per module: a module's work spans
-		# several steps, and those steps share its branch. A step no single module owns
-		# (bootstrap; a step spanning two) falls back to its own ordinal and kind.
+		# thing the requirement forbids by the time anyone could notice. ``module`` was
+		# resolved above, because the class it declared is an input to the model choice.
 		#
 		# FR-141: under ``isolate`` the branch gets a working tree of its own, and the
 		# adapter's workspace moves into it, so the session cannot see or overwrite a
 		# sibling's files. Everything downstream -- the seal, the session directory, the
 		# oracles -- then works on the worktree without knowing the difference.
-		module = await self._module_for(plan, step.clause_ids)
 		checkout = (
 			await ensure_module_worktree(
 				adapter.workspace, step.ordinal, step.kind.value, module=module

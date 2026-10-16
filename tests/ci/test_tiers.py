@@ -29,26 +29,31 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from synthetic import synthetic_service
 from typer.testing import CliRunner
 
+from sofact import tiers as tiers_module
 from sofact.cli import app
 from sofact.llm import DEFAULT_MODEL
+from sofact.service import FactoryService
 from sofact.tiers import (
 	MODEL_TIERS_ENV,
+	REASONING_CLASS_TIER,
 	STEP_PHASE,
 	TIER_PHASES,
 	ModelTier,
 	ModelTierRefusal,
+	class_tier,
 	load_model_tiers,
 	phase_tier,
 	resolve_model,
 	step_phase,
 	tier_statement,
 )
-from sofact.views import Phase, PlanStepKind
+from sofact.views import GoalPlan, LedgerKind, Phase, PlanStepKind, ReasoningClass
 
 RUNNER = CliRunner()
 
@@ -59,6 +64,49 @@ def a_table(**tiers: str) -> dict[str, ModelTier]:
 		name: ModelTier(name=name, model=model, rationale=f"{name} is for {name} work")
 		for name, model in tiers.items()
 	}
+
+
+async def _declare_class(
+	service: FactoryService,
+	plan: GoalPlan,
+	clause_ids: tuple[str, ...],
+	reasoning_class: ReasoningClass,
+) -> None:
+	"""Revise the decomposition so the module owning ``clause_ids`` declares a class.
+
+	``propose`` declares §7.3's ``throughput`` for every module — which is right, because
+	it is a *default for a proposal* and the proposal has no basis for saying a module
+	needs depth. So a test about the class has to state one, and the only honest way is
+	the same way an operator would: a revision of the decomposition, appended as
+	``DECOMPOSITION_PROPOSED`` and therefore the latest one
+	(:meth:`~sofact.views.ProjectState.latest_decomposition`).
+
+	``_commit`` rather than ``ledger.append`` because it invalidates the derived-state
+	cache; without that the dispatch below folds a stale state and sees no revision. The
+	private reach is the point of the helper, as in ``test_review``.
+	"""
+	state = await service.state()
+	current = state.latest_decomposition(plan.contract_id)
+	assert current is not None, "the plan's contract must have an approved decomposition"
+	owner = current.module_for_clauses(clause_ids)
+	assert owner is not None, f"no single module owns {clause_ids}; the test needs one to"
+	revised = current.model_copy(
+		update={
+			"modules": tuple(
+				m.model_copy(
+					update={
+						"budget": m.budget.model_copy(update={"reasoning_class": reasoning_class})
+					}
+				)
+				if m.id == owner.id
+				else m
+				for m in current.modules
+			)
+		}
+	)
+	service._commit(  # pyright: ignore[reportPrivateUsage]
+		LedgerKind.DECOMPOSITION_PROPOSED, {"decomposition": revised.model_dump(mode="json")}
+	)
 
 
 # --------------------------------------------------------------------------- #
@@ -171,6 +219,116 @@ class TestThePrecedence:
 	def test_no_tiers_at_all_is_the_same_as_no_table(self) -> None:
 		model, source = resolve_model(Phase.DECOMPOSE, tiers=None, operator_model="mine")
 		assert (model, source) == ("mine", "SOFACT_MODEL")
+
+
+class TestAModulesDeclaredClassOutranksItsPhasesTier:
+	"""FR-050: a lane declares the class it needs, and the class picks the model.
+
+	The defect this suite exists for is a *field written and never read*. FR-097 makes
+	``reasoning_class`` required on every module's budget, every decomposition writes it,
+	and until the class was routed on, its only readers were two print statements — so a
+	module declaring ``reasoning`` ran on the same model as one declaring ``throughput``,
+	and the declaration had no effect on what ran.
+
+	The two clauses disagree by construction, which is why the order has to be stated:
+	every P5 step is ``BUILD``, and FR-132 puts ``BUILD`` in the ``cheap`` tier, while a
+	module may declare ``reasoning`` because *its* work needs depth. The phase is a
+	statement about the pipeline; the module is a statement about this module.
+	"""
+
+	def test_the_same_step_kind_routes_two_ways_by_the_class_it_declares(self) -> None:
+		"""The property the defect inverted, asserted on one step kind and one table.
+
+		Both calls name ``Phase.BUILD`` — the same phase, the same step kind, the same
+		deployment — and differ only in the class. Before the class was routed on these
+		two returned the same model, which is the bug.
+		"""
+		table = a_table(deep="big-model", cheap="small-model")
+		reasoning = resolve_model(
+			Phase.BUILD, tiers=table, reasoning_class=ReasoningClass.REASONING
+		)
+		throughput = resolve_model(
+			Phase.BUILD, tiers=table, reasoning_class=ReasoningClass.THROUGHPUT
+		)
+		assert reasoning == ("big-model", "tier:deep")
+		assert throughput == ("small-model", "tier:cheap")
+		assert reasoning[0] != throughput[0], "the declaration must change what runs"
+
+	def test_an_explicit_model_still_outranks_the_class(self) -> None:
+		"""``--model`` is still this run's model, so it outranks every declaration."""
+		model, source = resolve_model(
+			Phase.BUILD,
+			explicit="operator-said",
+			tiers=a_table(deep="big-model"),
+			reasoning_class=ReasoningClass.REASONING,
+		)
+		assert (model, source) == ("operator-said", "--model")
+
+	def test_no_class_leaves_the_phases_tier_in_force(self) -> None:
+		"""Every existing caller's behaviour: a caller that supplies no class is unchanged."""
+		model, source = resolve_model(Phase.VERIFY, tiers=a_table(deep="big-model"))
+		assert (model, source) == ("big-model", "tier:deep")
+
+	def test_a_class_whose_tier_has_no_model_falls_through_to_the_phase(self) -> None:
+		"""The substitution FR-132 prevents, one level down.
+
+		A deployment that named no model for ``deep`` has said "these modules are the
+		expensive ones" without saying what runs them. The fall-through is to the *phase's*
+		tier — never to another tier's model, which would be a model nobody chose.
+		"""
+		table = a_table(cheap="small-model")
+		model, source = resolve_model(
+			Phase.BUILD, tiers=table, reasoning_class=ReasoningClass.REASONING
+		)
+		assert (model, source) == ("small-model", "tier:cheap")
+		assert source != "tier:deep", "an unnamed tier must not resolve to a named one"
+
+	def test_a_class_with_no_table_at_all_changes_nothing(self) -> None:
+		"""A deployment with no tiers runs one model everywhere, class or no class."""
+		model, source = resolve_model(
+			Phase.BUILD,
+			tiers=None,
+			operator_model="mine",
+			reasoning_class=ReasoningClass.REASONING,
+		)
+		assert (model, source) == ("mine", "SOFACT_MODEL")
+
+	def test_the_class_assignment_is_total_over_the_enum(self) -> None:
+		"""A new class is a routing decision somebody has to make, not an inherited default."""
+		assert set(REASONING_CLASS_TIER) == set(ReasoningClass)
+		for reasoning_class in ReasoningClass:
+			assert class_tier(reasoning_class) in TIER_PHASES
+
+	def test_a_class_with_no_assignment_is_refused_rather_than_defaulted(self) -> None:
+		"""The assert, watched firing — the dict check above never reaches it.
+
+		``set(REASONING_CLASS_TIER) == set(ReasoningClass)`` is satisfied by the dict the
+		enum happens to have; it says nothing about what ``class_tier`` does with a member
+		the dict is missing, which is exactly the state a new ``ReasoningClass`` produces.
+
+		The member is taken from the real enum and removed from a *copy* of the table
+		patched into the module, because the guard's job is the member the dict lacks and
+		not a non-enum value — passing a bare string would raise ``AttributeError`` on
+		``.value`` inside the message and the assert would never be reached, which is a
+		test that passes for the wrong reason.
+		"""
+		victim = ReasoningClass.REASONING
+		patched = {k: v for k, v in REASONING_CLASS_TIER.items() if k is not victim}
+		with (
+			patch.object(tiers_module, "REASONING_CLASS_TIER", patched),
+			pytest.raises(AssertionError, match="has no tier assignment"),
+		):
+			class_tier(victim)
+
+	def test_a_throughput_module_does_not_route_to_the_deep_model(self) -> None:
+		"""The direction of the mapping, pinned so an inverted dict is caught.
+
+		FR-132's whole asymmetry is that depth is scarce and volume is not: routing
+		``throughput`` to ``deep`` would spend the expensive model on the work the tier
+		design exists to take off it.
+		"""
+		assert class_tier(ReasoningClass.THROUGHPUT) == "cheap"
+		assert class_tier(ReasoningClass.REASONING) == "deep"
 
 
 class TestTheTierTypeRefusesAnEntryThatNamesNothing:
@@ -324,6 +482,40 @@ class TestTheCliReportsIt:
 		assert "tier:cheap" in result.output
 		assert "no tier:" in result.output, "a phase outside every tier must say so"
 
+	def test_the_class_table_names_the_class_and_its_source(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A reader of the phase table alone would conclude every P5 step is cheap.
+
+		Every ``BUILD`` step is in the ``cheap`` tier by FR-132, so the phase table says
+		``small-model`` for all of them — and that is what the code did before the class
+		was routed on. The class table is the row that shows the declaration changing the
+		answer, and the assertion is on the pair rather than on the presence of a string.
+		"""
+		path = tmp_path / "tiers.json"
+		path.write_text(
+			json.dumps(
+				{
+					"deep": {"model": "big-model", "rationale": "depth"},
+					"cheap": {"model": "small-model", "rationale": "volume"},
+				}
+			),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv(MODEL_TIERS_ENV, str(path))
+		monkeypatch.setenv("SOFACT_HOME", str(home))
+		result = RUNNER.invoke(app, ["tiers"])
+		assert result.exit_code == 0, result.output
+		class_rows = {
+			line.split()[0]: line.split()[1:]
+			for line in result.output.splitlines()
+			if line.startswith("  ")
+			and line.split()
+			and line.split()[0] in {"throughput", "reasoning"}
+		}
+		assert class_rows["reasoning"] == ["big-model", "tier:deep"]
+		assert class_rows["throughput"] == ["small-model", "tier:cheap"]
+
 	def test_an_unreadable_table_is_refused_without_a_traceback(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:
@@ -440,3 +632,51 @@ class TestADispatchRecordsTheModel:
 		first = records[0]
 		assert first.model is not None
 		assert first.model_source in {"tier:cheap", "tier:deep", "SOFACT_MODEL", "default"}
+
+	async def test_a_module_declaring_reasoning_dispatches_on_the_deep_model(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""FR-050 end to end: the declaration reaches the record of what actually ran.
+
+		The unit tests above pin the precedence; this one pins that
+		:meth:`~sofact.service.FactoryService.dispatch_step` *supplies* the class at all.
+		A routing function nothing calls is the same defect one layer up, so the assertion
+		is on the dispatch record's own ``model_source`` — the row an operator reads after
+		the fact to ask which model ran this module and on whose authority.
+		"""
+		from synthetic import plan_and_service
+
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete", model_tiers=a_table(cheap="small-model", deep="big-model")
+		)
+		# An ``operation`` step is a P5 ``BUILD`` step, which FR-132 puts in the cheap
+		# tier — so the phase alone would answer ``small-model`` and only the module's
+		# declaration can produce the deep model. That is what makes this test a test.
+		step = next(s for s in plan.steps if s.clause_ids and s.kind is PlanStepKind.OPERATION)
+		await _declare_class(service, plan, step.clause_ids, ReasoningClass.REASONING)
+
+		record = await service.dispatch_step(plan.id, step.id)
+
+		assert record.model == "big-model"
+		assert record.model_source == "tier:deep"
+
+	async def test_a_bootstrap_step_with_no_module_runs_its_phases_tier(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A step no module owns declared no class, so the phase's tier is the honest answer.
+
+		Asserting the complement, because the failure mode of a default class is silent:
+		``None`` here must not become ``THROUGHPUT`` by accident, or a bootstrap step would
+		be claiming a declaration nobody made.
+		"""
+		from synthetic import plan_and_service
+
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete", model_tiers=a_table(cheap="small-model", deep="big-model")
+		)
+		bootstrap = next(s for s in plan.steps if not s.clause_ids)
+		assert await service._module_class_for(plan, bootstrap.clause_ids) is None  # pyright: ignore[reportPrivateUsage]
+
+		record = await service.dispatch_step(plan.id, bootstrap.id)
+
+		assert record.model_source == "tier:cheap"

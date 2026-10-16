@@ -5018,6 +5018,12 @@ nothing in this build measures an oracle strength to compare against
 :data:`L4_GATE_THETA`. It is a named constant rather than a comment so that a third-party
 scope's refusal can say *which* thing is missing, and so that building FR-024–FR-035
 flips one boolean instead of rewriting a sentence in three places.
+
+The routing function's **class** half is built (ADR-0074): a module's declared
+:class:`ReasoningClass` now selects a tier in :func:`~sofact.tiers.resolve_model`. That
+does not move this constant, because the gate is about *theta* -- a measured oracle
+strength -- and what remains absent is section 5.1's ``admissible(lane)`` and
+``ceiling(lane)``, which no declared class supplies.
 """
 
 
