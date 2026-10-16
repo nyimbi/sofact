@@ -54,6 +54,7 @@ __all__ = [
 	"spec_json",
 	"specify_and_approve",
 	"synthetic_service",
+	"two_harness_service",
 	"write_script",
 ]
 
@@ -697,6 +698,31 @@ def synthetic_service(
 		specs={name: spec},
 		envelope=envelope,
 		model_tiers=model_tiers,
+	)
+
+
+async def two_harness_service(
+	home: Path,
+	tmp_path: Path,
+	*,
+	modes: Mapping[str, str],
+	envelope: DeliveryEnvelope | None = None,
+) -> FactoryService:
+	"""A service configured with several harnesses, each running the shared script.
+
+	FR-147 selects *among* candidates, so a fixture with one harness cannot exercise it:
+	the mode is baked into each spec's argv, so two specs over one script are two
+	harnesses that behave differently, and each writes its session record under its own
+	name. ``modes`` maps a harness name to the script mode it runs, and the caller picks
+	the modes — ``{"alpha": "complete", "beta": "fail"}`` is a pair where one producer
+	finishes and the other does not.
+	"""
+	assert modes, "a table of no harnesses has nothing to select among"
+	return FactoryService(
+		home=home,
+		llm=None,
+		specs={name: base_spec(tmp_path, mode, name=name) for name, mode in modes.items()},
+		envelope=envelope,
 	)
 
 

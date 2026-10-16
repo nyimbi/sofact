@@ -2088,6 +2088,36 @@ decides *among* candidates by measurement, and `dsh` can still lose that contest
 The two are not in conflict: §8.6 picks what to probe first, FR-147 picks what to
 keep.
 
+**How the decision is made.** `sofact.selection.measure_harnesses` folds the ledger into
+one `HarnessMetric` per configured harness and `HarnessSelection.ranked` sorts on
+**precision, then seconds per verified module** — the two axes this requirement names, in
+the order it names them. It is a pure fold over rows that already exist (dispatches,
+plans, profiles, integrity checks, verdicts), so no ledger row was added for it: a row
+for a computation the log determines would be a second source of truth
+([ADR-0073](../adr/0073-a-selection-is-a-fold-over-the-log-and-an-unmeasured-harness-cannot-lose.md)).
+
+Three things it refuses, and each is a way the ranking could lie:
+
+- **Rank an unmeasured harness.** `ranked` holds only candidates with a denominator, so a
+  harness nothing has judged is *absent from the ranking* rather than last in it — `None`
+  is not zero (NFR-024). `is_measured` is deliberately two denominators: precision needs a
+  *declaration* and the per-module rates need a *verdict*, so a producer that never says
+  "done" but whose work is verified clean has a real throughput and an unmeasured
+  precision.
+- **Resolve a tie silently.** Two candidates equal on both axes are genuinely undecided by
+  the numbers available; `tied` reports them and `caveats` says the order is arbitrary. The
+  alphabetical third key in the sort exists so the sort is *total*, not so it can read as a
+  finding.
+- **Let a goal-hacker win.** A contract-integrity failure is an **exclusion**, not a
+  deduction, and it is checked before the score is read — §20.4 calls it the sharpest form
+  of goal-hacking, and a high precision is its expected shape.
+
+`--harness` is a **fallback, used only when nothing is measured**, and a selection that
+rested on no measurement returns `discharged == ()` rather than claiming this requirement.
+The limit is stated on the type: the instrument compares producers on whether they know
+when they are done and how fast, and **says nothing about whether their modules are
+correct** — that is the verifier's question and FR-138's whole point.
+
 ### 18.5 The front door — voice in, a built system out (FR-168 to FR-174)
 
 The operator's request was one sentence with seven clauses: *give a voice description,
@@ -2354,6 +2384,15 @@ FR-147 a decision rather than a preference.
 | **Tokens per verified module** | Spend attributable to P5+P6 | Drives §1.3 envelope actuals and model tiering (FR-132) |
 | **Wave utilisation** | Concurrent sessions ÷ wave width | Measures whether the topological order (§7.1) actually permits parallelism, or whether the DAG is a chain |
 | **Contract-integrity failures** | FR-139 hash mismatches | Detects harnesses that edit their own success criteria — the sharpest form of goal-hacking |
+
+**Where these are read.** All five are carried on `HarnessMetric` and read off the log by
+`sofact.selection`; `sofact select` prints them. FR-147 ranks on the first and the
+throughput derived from the second, and the token and continuation rates are **carried and
+not ranked on** — FR-147 names two axes, and the token rate is there because it is the
+number that explains the bill. **Wave utilisation is the one not yet measured**: it needs
+wave *width*, which the plan knows and the dispatch record does not carry, so it is
+reported as unmeasured rather than computed from a proxy
+([ADR-0073](../adr/0073-a-selection-is-a-fold-over-the-log-and-an-unmeasured-harness-cannot-lose.md)).
 
 ### 20.2 The claim under test
 

@@ -3136,6 +3136,67 @@ async def _precision(svc: FactoryService, harness: str | None) -> None:
 	)
 
 
+@app.command(name="select")
+def select(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	harness: str | None = _HARNESS_OPTION,
+) -> None:
+	"""Choose a harness from what has been measured (FR-147)."""
+	asyncio.run(_select(_service(_home_of(ctx, home)), harness))
+
+
+async def _select(svc: FactoryService, declared: str | None) -> None:
+	"""FR-147's selection, printed so a reader can audit the decision it made.
+
+	The exit code is zero on a *choice* and non-zero only when nothing could be chosen,
+	which is the asymmetry `spend` uses for the same reason: an empirical selection that
+	disagrees with ``--harness`` is the requirement working, not a failure, and a verb
+	that exited non-zero for it would be failing on the finding.
+	"""
+	selection = await svc.select_harness(declared)
+	typer.secho("\nharness selection (FR-147)", fg="cyan", bold=True)
+	if selection.chosen is None:
+		typer.secho(f"  {selection.reason}", fg="yellow")
+	else:
+		typer.secho(f"  selected: {selection.chosen}", fg="green")
+		typer.echo(f"  {selection.reason}")
+
+	typer.secho("\n  measured (§20.4)", fg="cyan", bold=True)
+	if not selection.ranked:
+		typer.secho(
+			"    nothing has been measured, so there is no ranking. A harness nothing "
+			"has judged is unmeasured, not last (NFR-024).",
+			fg="yellow",
+		)
+	for metric in selection.ranked:
+		precision = "unmeasured" if metric.precision is None else f"{metric.precision:.0%}"
+		rate = metric.seconds_per_verified_module
+		throughput = "unmeasured" if rate is None else f"{rate:.0f}s/module"
+		typer.echo(
+			f"    {metric.harness:<12} precision {precision:<10} "
+			f"{throughput:<14} {len(metric.verified_modules)} verified module(s)"
+		)
+
+	if selection.excluded:
+		typer.secho("\n  excluded (FR-135, FR-139)", fg="cyan", bold=True)
+		for metric in selection.excluded:
+			typer.secho(f"    {metric.harness}: {metric.exclusion_reason}", fg="red")
+
+	for caveat in selection.caveats:
+		typer.secho(f"\n  caveat: {caveat}", fg="bright_black")
+	if selection.not_implemented:
+		typer.secho(
+			"\n  not implemented: "
+			+ ", ".join(selection.not_implemented)
+			+ ". A choice made from a declaration rather than a measurement is not FR-147, "
+			"and this verb says which happened rather than reporting both as a selection.",
+			fg="yellow",
+		)
+	if selection.chosen is None:
+		raise typer.Exit(code=1)
+
+
 @app.command()
 def repair(
 	ctx: typer.Context,

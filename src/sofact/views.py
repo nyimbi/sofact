@@ -47,6 +47,7 @@ __all__ = [
 	"GOAL_CONTINUATION_UNMEASURED",
 	"GOAL_ENTRY_NOT_FORCED",
 	"GOAL_MODE_REQUIREMENTS",
+	"HARNESS_SELECTION_REQUIREMENTS",
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
 	"INTENT_REQUIREMENTS",
@@ -146,7 +147,9 @@ __all__ = [
 	"HackTechnique",
 	"Handover",
 	"HarnessCapability",
+	"HarnessMetric",
 	"HarnessProfile",
+	"HarnessSelection",
 	"IntegrationCheck",
 	"IntegrationFinding",
 	"IntegrationFindingKind",
@@ -9003,6 +9006,360 @@ class DeclarationPrecision(View):
 		if self.declarations == 0:
 			return None
 		return self.corroborated / self.declarations
+
+
+HARNESS_SELECTION_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-135", "FR-143", "FR-147")
+"""What a harness selection is a reading *of*, so a vacuous one can refuse to claim it.
+
+The rule :data:`ATTEMPT_TELEMETRY_REQUIREMENTS` and :data:`ESCAPE_REQUIREMENTS` both
+state: a report over nothing discharges nothing. A selection that chose a harness
+because the deployment declared a default has not carried out FR-147, and saying it had
+would be the reputation-driven choice this requirement exists to replace.
+"""
+
+
+class HarnessMetric(View):
+	"""One harness's §20.4 readings, and which of them are measurements (FR-147).
+
+	FR-147: "Harness selection must be **empirical** — driven by measured
+	goal-declaration precision (§20.4) and throughput, not by reputation." §20.4 lists
+	five meta-harness metrics; this type carries all five so a reader sees the whole
+	matrix, and :func:`sofact.selection.select_harness` ranks on the two FR-147 names.
+
+	**Two questions that look like one, and are not.** ``corroborated`` is over the
+	dispatches that *declared* completion, which is :class:`DeclarationPrecision`'s
+	denominator: a producer that never says it is done has no precision, and dividing by
+	its silence would score it on nothing. ``verified_modules`` is over every dispatch
+	regardless of declaration, because whether a module's clauses were satisfied is the
+	*verifier's* finding and does not depend on the producer having an opinion. A harness
+	that never declares and whose work is nonetheless verified clean has good throughput
+	and unmeasured precision, and those are both true statements about it.
+
+	**Unmeasured is not zero and it is not disqualifying.** Every rate here is ``None``
+	when its denominator is zero (NFR-024), and ``None`` sorts *last* in a ranking rather
+	than first — the defect this type exists to make impossible is a harness that has
+	never run winning a contest against one that has, on the strength of a rate nobody
+	computed.
+	"""
+
+	harness: NonEmptyStr
+	probed: bool = False
+	"""Whether a capability probe has ever run against this harness (FR-148)."""
+
+	supports_goal_dispatch: bool | None = None
+	"""FR-135's disqualifying pair, or ``None`` when no probe has answered it.
+
+	``None`` rather than ``False``, because an unprobed harness has not *failed* to
+	support goal mode — nobody asked it. Collapsing the two would exclude a harness from
+	selection on the strength of a probe that never ran, which is
+	:attr:`~sofact.views.HarnessProfile.observation`'s ``INCONCLUSIVE`` rule one level up.
+	"""
+
+	dispatches: int = 0
+	declarations: int = 0
+	corroborated: int = 0
+	modules: tuple[NonEmptyStr, ...] = ()
+	verified_modules: tuple[NonEmptyStr, ...] = ()
+	unverified_modules: tuple[NonEmptyStr, ...] = ()
+	continuations: int = 0
+	unmeasured_continuations: int = 0
+	tokens: int = 0
+	unmeasured_tokens: int = 0
+	wall_clock_seconds: float = 0.0
+	integrity_checks: int = 0
+	integrity_failures: int = 0
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		counts = {
+			"dispatches": self.dispatches,
+			"declarations": self.declarations,
+			"corroborated": self.corroborated,
+			"continuations": self.continuations,
+			"unmeasured_continuations": self.unmeasured_continuations,
+			"tokens": self.tokens,
+			"unmeasured_tokens": self.unmeasured_tokens,
+			"integrity_checks": self.integrity_checks,
+			"integrity_failures": self.integrity_failures,
+		}
+		negative = sorted(name for name, value in counts.items() if value < 0)
+		if negative:
+			raise ValueError(f"{self.harness}: {negative} cannot be negative")
+		if self.corroborated > self.declarations:
+			raise ValueError(
+				f"{self.harness}: {self.corroborated} corroborated declarations out of "
+				f"{self.declarations} is impossible"
+			)
+		if self.integrity_failures > self.integrity_checks:
+			raise ValueError(
+				f"{self.harness}: {self.integrity_failures} integrity failures over "
+				f"{self.integrity_checks} check(s) is impossible"
+			)
+		if self.wall_clock_seconds < 0:
+			raise ValueError(
+				f"{self.harness}: wall clock cannot be negative, got {self.wall_clock_seconds}"
+			)
+		# A module cannot be both, and neither list can name a module the harness never
+		# touched. Both are counts *of* `modules`, and a subset that escaped it would be
+		# a rate with a denominator nobody could check.
+		known = set(self.modules)
+		stray = sorted((set(self.verified_modules) | set(self.unverified_modules)) - known)
+		if stray:
+			raise ValueError(f"{self.harness}: {stray} are classified but were never dispatched")
+		both = sorted(set(self.verified_modules) & set(self.unverified_modules))
+		if both:
+			raise ValueError(f"{self.harness}: {both} are recorded as verified and unverified")
+		return self
+
+	@property
+	def precision(self) -> float | None:
+		"""§20.4's goal-declaration precision, or ``None`` with no declaration (FR-143)."""
+		if self.declarations == 0:
+			return None
+		return self.corroborated / self.declarations
+
+	@property
+	def is_measured(self) -> bool:
+		"""Whether *any* §20.4 reading here has a denominator.
+
+		Precision needs a declaration and the per-module rates need a verified module, so
+		a harness with dispatches and no verdict is unmeasured rather than bad — it has
+		run and nothing has judged it yet.
+		"""
+		return self.declarations > 0 or bool(self.verified_modules)
+
+	@property
+	def seconds_per_verified_module(self) -> float | None:
+		"""Throughput, inverted so that *lower is better* — the unit FR-147 ranks on.
+
+		Seconds per module rather than modules per second because a module-per-second
+		rate on a fast harness rounds to a number that cannot be compared with a slow
+		one, and because wall clock is the resource §1.3 bounds.
+		"""
+		if not self.verified_modules:
+			return None
+		return self.wall_clock_seconds / len(self.verified_modules)
+
+	@property
+	def tokens_per_verified_module(self) -> float | None:
+		"""§20.4's token rate, or ``None`` — reported, and deliberately not ranked on.
+
+		FR-147 names precision and throughput, and this is neither. It is carried because
+		it is the number that drives §1.3's envelope actuals and FR-132's tiering, and a
+		selection report that omitted it would send its reader to a second verb for the
+		one figure that explains the bill.
+		"""
+		if not self.verified_modules:
+			return None
+		return self.tokens / len(self.verified_modules)
+
+	@property
+	def continuations_per_verified_module(self) -> float | None:
+		"""§20.4's plan-compilation reading, or ``None``. Reported, not ranked on."""
+		if not self.verified_modules:
+			return None
+		return self.continuations / len(self.verified_modules)
+
+	@property
+	def exclusion_reason(self) -> str | None:
+		"""Why this harness cannot be selected, or ``None`` when it can (FR-135, FR-147).
+
+		Three reasons, and the *order* is the point: a harness that edited its own
+		success criteria is excluded whatever else it measures, because §20.4 calls that
+		"the sharpest form of goal-hacking" and a harness that goal-hacks is not one you
+		rank lower — it is one you do not run. FR-135's disqualifying pair comes next, and
+		it is FR-135's word: a harness lacking goal mode or interactive-free operation is
+		disqualifying for P5. Never having been probed is last and is a different claim
+		again: the harness may be excellent and simply unmeasured, and FR-148 requires a
+		recorded profile before any dispatch, so it cannot be chosen here either.
+		"""
+		if self.integrity_failures:
+			return (
+				f"{self.integrity_failures} contract-integrity failure(s) (FR-139): a harness "
+				"that edited its own success criteria or its own tests is not a harness to "
+				"rank lower, it is one not to run (§20.4)"
+			)
+		if not self.probed:
+			return (
+				"never probed, and FR-148 requires a recorded profile before any dispatch, so "
+				"there is no capability finding to select on"
+			)
+		if not self.supports_goal_dispatch:
+			return (
+				"FR-135: goal mode and interactive-free operation are both required for P5, "
+				"and the probe did not confirm them (FR-144's reduced mode is the fallback)"
+			)
+		return None
+
+	@property
+	def is_selectable(self) -> bool:
+		"""Whether this harness may be chosen at all, measurement aside (FR-135)."""
+		return self.exclusion_reason is None
+
+
+class HarnessSelection(View):
+	"""Which harness FR-147 selects, on what measurement, and why not the others.
+
+	**The defect this type exists to prevent is a contest that was never run.** Before it,
+	the only thing that chose a harness was :meth:`~sofact.service.FactoryService.harness_name`,
+	which takes ``--harness``, then ``SOFACT_HARNESS``, then :data:`~sofact.service.DEFAULT_HARNESS`,
+	then a table with exactly one entry — and refuses an ambiguous table rather than
+	picking one. Every one of those is *reputation or declaration*, which is precisely what
+	FR-147 says selection must not be driven by. So this report can return
+	``chosen is None``: that is not a failure to decide, it is the honest answer when
+	nothing has been measured and the deployment declared no default.
+
+	**A selection is not a measurement of the work.** It says which producer is likelier to
+	know when it is done, at what speed. It says nothing about whether the modules either
+	produced are correct — that is :class:`VerificationReport`'s question and FR-138's whole
+	point. Reading this as a quality ranking would be the substitution
+	:attr:`HarnessProfile.goal_mode` warns about one level down.
+
+	**The vacuous pass is refused**, on :attr:`AttemptTelemetryReport.discharged`'s rule: a
+	selection that fell back to a declared default returns ``discharged == ()``, because
+	choosing what the operator already named is not carrying out FR-147.
+	"""
+
+	id: UUID7
+	rendered_at: datetime
+	metrics: tuple[HarnessMetric, ...] = ()
+	"""Every configured harness, measured or not, in name order.
+
+	*Every* one, including the excluded: a report that listed only the candidates would
+	make a harness that failed FR-135 indistinguishable from one that was never
+	configured, and the operator's next question is always about the one that is missing.
+	"""
+
+	chosen: NonEmptyStr | None = None
+	"""The selected harness, or ``None`` when nothing could be selected (FR-147).
+
+	``None`` is a first-class answer and never a silent fallback: the CLI reports it as
+	*no selection* and the driver refuses rather than dispatching to a harness the
+	measurement did not choose.
+	"""
+
+	reason: NonEmptyStr
+	"""Why, in words — including which rule decided, so a reader can audit the decision."""
+
+	@model_validator(mode="after")
+	def _the_choice_is_a_candidate(self) -> Self:
+		names = {m.harness for m in self.metrics}
+		if len(names) != len(self.metrics):
+			raise ValueError("a harness appears twice in one selection")
+		if self.chosen is not None and self.chosen not in names:
+			raise ValueError(
+				f"selected {self.chosen!r}, which is not among the harnesses this selection "
+				"measured; a choice outside the candidate set is a choice nothing supports"
+			)
+		return self
+
+	@property
+	def candidates(self) -> tuple[HarnessMetric, ...]:
+		"""Harnesses that may be chosen at all, in name order (FR-135)."""
+		return tuple(m for m in self.metrics if m.is_selectable)
+
+	@property
+	def excluded(self) -> tuple[HarnessMetric, ...]:
+		"""Harnesses that may not be chosen, each carrying its own reason."""
+		return tuple(m for m in self.metrics if not m.is_selectable)
+
+	@property
+	def measured(self) -> tuple[HarnessMetric, ...]:
+		"""Candidates with at least one §20.4 reading that has a denominator."""
+		return tuple(m for m in self.candidates if m.is_measured)
+
+	@property
+	def unmeasured(self) -> tuple[HarnessMetric, ...]:
+		"""Candidates nothing has judged yet — a real state, and not a low score."""
+		return tuple(m for m in self.candidates if not m.is_measured)
+
+	@property
+	def ranked(self) -> tuple[HarnessMetric, ...]:
+		"""The measured candidates best-first: precision, then throughput (FR-147).
+
+		The two axes FR-147 names, in the order it names them. A tie on both is not
+		broken here — :attr:`tied` reports it, because a sort key that silently resolved
+		one would be an arbitrary choice wearing a measurement's clothes.
+		"""
+		return tuple(
+			sorted(
+				self.measured,
+				key=lambda m: (
+					-(m.precision if m.precision is not None else 0.0),
+					m.seconds_per_verified_module
+					if m.seconds_per_verified_module is not None
+					else float("inf"),
+					m.harness,
+				),
+			)
+		)
+
+	@property
+	def best(self) -> HarnessMetric | None:
+		"""The top of :attr:`ranked`, or ``None`` when nothing is measured."""
+		ranked = self.ranked
+		return ranked[0] if ranked else None
+
+	@property
+	def tied(self) -> tuple[NonEmptyStr, ...]:
+		"""Candidates equal to the best on *both* ranked axes, best included (FR-147).
+
+		More than one name here means the measurement did not separate them, and the
+		selection says so rather than letting the alphabetical fallback in :attr:`ranked`
+		read as a finding. A tie between two harnesses that have both run is genuinely
+		undecided by the two numbers FR-147 supplies.
+		"""
+		top = self.best
+		if top is None:
+			return ()
+		return tuple(
+			m.harness
+			for m in self.ranked
+			if m.precision == top.precision
+			and m.seconds_per_verified_module == top.seconds_per_verified_module
+		)
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this selection carried out, which may be none (NFR-024).
+
+		FR-147 is discharged only when the choice rested on a measurement. A fallback to
+		the deployment's declared default is a decision and is not a measurement of
+		anything, so it discharges nothing — and the report says which happened rather
+		than leaving a reader to infer it from ``chosen`` being non-``None``.
+		"""
+		if self.chosen is None or self.best is None:
+			return ()
+		return HARNESS_SELECTION_REQUIREMENTS
+
+	@property
+	def not_implemented(self) -> tuple[str, ...]:
+		"""Requirements of FR-135/FR-143/FR-147 this selection did not carry out."""
+		discharged = set(self.discharged)
+		return tuple(name for name in HARNESS_SELECTION_REQUIREMENTS if name not in discharged)
+
+	@property
+	def caveats(self) -> tuple[str, ...]:
+		"""What this selection does not claim, stated rather than left to inference."""
+		notes: list[str] = []
+		if self.unmeasured:
+			names = ", ".join(m.harness for m in self.unmeasured)
+			notes.append(
+				f"{names} have run and nothing has judged them yet, so they are unmeasured "
+				"rather than ranked last; a harness with no reading cannot lose a contest "
+				"it has not entered (NFR-024)"
+			)
+		if len(self.tied) > 1:
+			notes.append(
+				"the top candidates are tied on both precision and throughput, so the order "
+				"between them is arbitrary and the measurement did not decide it (FR-147)"
+			)
+		if self.chosen is not None and self.best is None:
+			notes.append(
+				"the choice was not empirical: it fell back to a declared harness because "
+				"nothing has been measured (FR-147, NFR-024)"
+			)
+		return tuple(notes)
 
 
 class SearchOutcome(StrEnum):

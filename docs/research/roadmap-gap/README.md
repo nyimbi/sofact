@@ -124,7 +124,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-144 degrade where goal mode is absent | **Implemented** | `DispatchMode.SINGLE_SHOT` (`views.py:1533`), `capability_loss` (`views.py:1725`); `test_the_full_probe_measures_the_rows_the_quick_one_skips` (`test_cli.py:532`). |
 | FR-145 no interactive prompt required | **Implemented** | `probe` kills a non-exiting child; `test_a_process_that_never_exits_is_unusable` (`test_harness.py:509`). |
 | FR-146 drive harnesses not authored here | **Implemented** | `HarnessSpec.from_mapping` (`harness.py:236`), `load_specs` (`:406`); `test_a_round_trip_preserves_every_field` (`test_harness.py:603`). |
-| FR-147 harness selection empirical | **Partly** | `declaration_precision` is scoped to one harness (`test_precision_is_scoped_to_one_harness`, `test_service.py:1252`). **No selection**: nothing chooses a harness from the measurement. |
+| FR-147 harness selection empirical | **Implemented** (2026-10-16, ADR-0073) | `measure_harnesses` builds one `HarnessMetric` per configured harness from the dispatches, plans, profiles, integrity checks and verdicts already in the log (`selection.py:112`), and `HarnessSelection.ranked` sorts on measured goal-declaration precision then seconds per verified module (`views.py:9200`). `HarnessMetric.exclusion_reason` refuses a goal-hacker by FR-139's integrity failures before the score is read, then an unprobed harness, then FR-135's disqualifying pair. `sofact select` (`cli.py:3139`) prints the ranking, the exclusions and the caveats; `TestTheSelectionOverRealDispatches` (`test_selection.py:708`) drives two harnesses through real child processes and asserts the measured one wins. `--harness` is now a fallback rather than the choice, and `discharged` is `()` whenever the answer was declared. |
 | FR-148 capability matrix discovered at runtime | **Implemented** | `probe` (`harness.py:1072`); `test_an_unprobed_capability_reads_inconclusive_not_absent` (`test_harness.py:448`). |
 | FR-149 hermetic invocation | **Partly** (2026-10-14, ADR-0060) | Flags are explicit in `HarnessSpec.argv` (`harness.py:443`); `test_pi_argv_matches_the_S19_measurement` (`test_harness.py:138`). **New:** the invocation is now wrapped in the measured boundary at the launch point, and the shipped Seatbelt profile denies egress by construction — `(deny default)` with no `(allow network*)`, measured once on this host as `EGRESS_DENIED_OR_DOWN`. **Still open:** the detector does not *probe* egress per run, so FR-152's "enforced and **proved** at the sandbox layer" is half satisfied — denied by the profile's construction and by a recorded one-time measurement, not by a per-delivery observation. `dsh`'s telemetry egress is still documented as unmitigated (`harness.py:590`) for a deployment that measures no boundary. |
 | FR-150 context-file loading disabled in P5 | **Implemented** | `supports_context_file_flag` + goal text (`harness.py:1204`); `test_dsh_cannot_disable_context_files_but_pi_can` (`test_harness.py:166`). |
@@ -257,8 +257,8 @@ table has 126.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 100 |
-| Partly | 26 |
+| Implemented | 101 |
+| Partly | 25 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 0 |
 | **Total rows** | **126** |
@@ -280,6 +280,24 @@ FR-061 makes a gate a hard stop. A limit the requirement itself names is the req
 discharged; a limit the requirement does not name is the Partly column, and none of these
 seven has one. Re-derived by re-running the classifier over all 126 rows rather than adjusted
 by hand.
+
+**The 2026-10-16 depth unit (ADR-0072) moved two rows and stated no arithmetic, which is the
+omission this paragraph repairs.** FR-132 and FR-133 both leave **Partly** for Implemented —
+the tier table with its two owners and the spend fold with its two attributions are built, and
+each row's cell now names the module, the verb and the test module rather than the missing half.
+So Implemented rises by two and Partly falls by two: `98/28/0/0` becomes **`100/26/0/0`** over
+**126** rows, re-derived by re-running the classifier rather than adjusted by hand. The
+arithmetic was absent from the tree for the length of one commit, which is exactly the drift
+ADR-0065 exists to catch; the *table* was right and the *sentence* was missing, so no check
+fired.
+
+**The 2026-10-16 FR-147 unit (ADR-0073) moved one row.** FR-147 leaves **Partly** for
+Implemented: `sofact.selection` measures every configured harness from the log and ranks on
+goal-declaration precision then throughput, so "nothing chooses a harness from the
+measurement" is no longer true. So Implemented rises by one and Partly falls by one:
+`100/26/0/0` becomes **`101/25/0/0`**, re-derived by re-running the classifier over all 126
+rows. FR-143's row is untouched — `declaration_precision` remains scoped to one harness,
+because that is what FR-143 asks for; FR-147 is the requirement that compares them.
 
 **The counting rule, stated because the last refresh did not state it, and corrected on
 2026-10-15 because the statement was narrower than the classifier it described.** A row is

@@ -115,6 +115,7 @@ from sofact.search import (
 	scan_checks,
 	searcher_spec_for,
 )
+from sofact.selection import select_harness
 from sofact.specdoc import PRODUCT_SPEC_FILENAME, render_product_specification
 from sofact.specdoc import annotate as annotate_requirements
 from sofact.specification import approve as record_specification_approval
@@ -186,6 +187,7 @@ from sofact.views import (
 	GoalStep,
 	GoalStyle,
 	HarnessProfile,
+	HarnessSelection,
 	IntegrationReport,
 	IntegrityCheck,
 	IntentGraph,
@@ -4615,6 +4617,32 @@ class FactoryService:
 		"""
 		state = await self.state()
 		return measure_goal_mode(state.dispatches)
+
+	# --------------------------------------------------------- FR-147: selection
+
+	async def select_harness(self, declared: str | None = None) -> HarnessSelection:
+		"""Choose a harness from what has been measured, and say why (FR-147).
+
+		Reads the whole ledger rather than one plan's dispatches, because the question is
+		about the *harness*: two plans run by one producer are more evidence about it, not
+		less, which is :meth:`goal_mode_report`'s reason for the same scope.
+
+		``declared`` is what the deployment named — and it is a *fallback*, not a first
+		choice. :meth:`harness_name` still resolves ``--harness``/``SOFACT_HARNESS``/
+		:data:`DEFAULT_HARNESS` for every dispatch that has already been asked for a
+		harness; this method is the other question, "which of these should we be using",
+		and FR-147 answers it with a measurement wherever one exists.
+		"""
+		state = await self.state()
+		return select_harness(
+			harnesses=sorted(self._specs),
+			dispatches=state.dispatches,
+			plans=state.plans,
+			profiles=state.profiles,
+			integrity=state.integrity,
+			reports=state.reports,
+			declared=declared,
+		)
 
 	# --------------------------------------------------------- FR-143: precision
 

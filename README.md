@@ -299,6 +299,7 @@ really entered — instead of asking it. `pi`, `dsh`, `claude` and `opencode` sh
 
 ```sh
 sofact probe                        # attempt a harness; record what was observed
+sofact select                       # choose a harness from what has been measured (FR-147)
 sofact dispatch --all               # run the plan; stops at the first refuted wave
 sofact repair                       # hand each refuted clause back to the producer
 sofact attempts                     # what the repair loop cost: attempts, tokens, wall clock
@@ -429,6 +430,50 @@ as *below* the envelope and explicitly not an overspend, and only a run over the
 exits non-zero. Tokens a harness did not report are counted as *unmeasured* and the sum is
 printed as a floor (NFR-024), never as a total.
 
+### Which harness: measured, not reputed
+
+FR-147 makes the choice of producer an empirical one. `sofact select` folds the log into one
+§20.4 reading per configured harness and ranks them on the two axes the requirement names —
+**goal-declaration precision first, throughput second**:
+
+```sh
+sofact select                 # rank what has been measured; say why the others were not
+sofact select --harness pi    # a fallback name, used only when nothing is measured
+```
+
+```
+harness selection (FR-147)
+  selected: alpha
+  alpha has the best measured goal-declaration precision of the 2 measured harness(es);
+  4/4 = 100%; 41s per verified module over 4 module(s) (FR-147: precision, then throughput)
+
+  measured (§20.4)
+    alpha        precision 100%       41s/module     4 verified module(s)
+    beta         precision 50%        12s/module     2 verified module(s)
+```
+
+Three things it refuses to do, each of which is a way the ranking could lie:
+
+- **Rank an unmeasured harness.** Every rate is `None` with no denominator, and `None` is not
+  zero — a harness nothing has judged has not scored badly, it has not scored. It is listed
+  as *unmeasured*, and it cannot win a contest it has not entered (NFR-024).
+- **Resolve a tie silently.** Two harnesses equal on precision *and* throughput are genuinely
+  undecided by the numbers available. The report says so instead of letting the alphabetical
+  tiebreak read as a finding.
+- **Let a goal-hacker win.** A contract-integrity failure is excluded outright rather than
+  ranked lower: a harness that edited its own success criteria is not one you rank below
+  another, it is one you do not run.
+
+A selection that rested on no measurement discharges nothing, and the report says which
+happened. `--harness` is a *fallback*, never a first choice — if a measurement exists it wins.
+The verb exits non-zero only when nothing could be chosen at all, so an empirical answer that
+disagrees with your declared default is the requirement working, not a failure.
+
+**A selection is not a quality ranking.** It says which producer is likelier to know when it
+is done, at what speed. It says nothing about whether either one's modules are correct — that
+is the verifier's question, and SoFact's verdicts come from its own oracles and never from the
+producer's report (FR-138).
+
 ## What this does not do
 
 A README that only lists capabilities is a README you have to verify yourself. These are
@@ -456,7 +501,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1937 tests
+uv run pytest -vxs tests/ci          # 1972 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
