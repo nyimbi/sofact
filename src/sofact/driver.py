@@ -218,10 +218,16 @@ def _next_action(
 			# P0's own gate, and the reason this reads ``ready`` rather than "has an
 			# answer for every dimension": a model-proposed answer nobody attested is
 			# reported as *open* (FR-173), so the count of answers is not the question.
-			# ``propose-answers`` is only selected when a dimension is genuinely open —
-			# otherwise the driver would ask a model to draft an interrogation the
-			# operator has already answered, and a model's paragraph would be sitting
-			# beside their own words in the log for no reason.
+			#
+			# ``readiness`` cannot separate the two ways a dimension is open — "nobody
+			# has answered" and "a model proposed and nobody attested" are both open, with
+			# different reason strings — so this selects ``propose-answers`` for either.
+			# On a reachable model the first iteration drafts all six, the second selects
+			# this again and proposes nothing, and the run stops with the *action's own*
+			# message naming the verb that actually continues it (``attest``). Reading the
+			# reason strings to tell the two apart would be parsing prose to make a control
+			# decision; the state exposes the distinction as data and a future revision
+			# should read it from there rather than from ``ready``.
 			return _ACTION["draft"] if ready else _ACTION["propose-answers"]
 		if not has_research:
 			# P1 sits between the draft and the contract, and that is where the pipeline
@@ -266,6 +272,26 @@ def _next_action(
 	if state.delivery is None:
 		return _ACTION["deliver"]
 	return None
+
+
+def _proposals_waiting(state: ProjectState, goal_id: str) -> bool:
+	"""Whether the goal holds a model's proposal that no person has confirmed (FR-173).
+
+	The fact that separates P0's two waits, and it is a *read of the log* rather than a
+	re-derivation of the gate: a model-proposed answer exists and is unattested. That is
+	exactly the state in which ``propose-answers`` has nothing left to do — it skips
+	dimensions that already hold an answer, so it returns an empty tuple and the run
+	stops — and exactly the state in which the operator's next command is ``attest``
+	rather than a resume.
+
+	Deliberately not "readiness reports the dimension open with a proposal reason": that
+	would be parsing a human-readable string to make a control decision, and the state
+	already exposes the two facts this needs as data.
+	"""
+	attested = state.attested_answer_ids()
+	return any(
+		a.goal_id == goal_id and a.is_model_proposed and a.id not in attested for a in state.answers
+	)
 
 
 async def run_goal(
@@ -457,6 +483,11 @@ async def run_goal(
 				detail=detail,
 				open_gate=None,
 				notify=notify,
+				# Read after the action ran, because that is when the proposals exist:
+				# on a reachable model the *first* iteration drafts them and the second
+				# finds nothing left to propose, so the flag describes the state this
+				# run left behind rather than the one it started in.
+				awaiting_attestation=_proposals_waiting(state, goal.id),
 			)
 		steps.record(action, DriverOutcome.ADVANCED, detail)
 		if on_step is not None:
@@ -558,14 +589,27 @@ async def _perform(
 			)
 		if not proposals:
 			# An empty tuple is not "the model had nothing to say": it means every open
-			# dimension had already been answered, so this action was selected by a stale
-			# reading of the log. Saying "drafted 0 proposal(s)" would report work, and the
-			# loop's ledger check would then see no growth and stop anyway — but with a
-			# detail that describes a draft nobody made.
+			# dimension already holds a proposal, so this action was selected by a reading
+			# of the log that cannot tell "unanswered" from "proposed and unattested" —
+			# both are open to ``readiness`` (FR-173), and only the first is a model's to
+			# close. Saying "drafted 0 proposal(s)" would report work, and the loop's
+			# ledger check would then see no growth and stop anyway, but with a detail
+			# describing a draft nobody made.
+			#
+			# **The verb here is `attest`, not a resume.** This message used to name
+			# ``RESUME_VERB``, and that was wrong in the one case that actually reaches it:
+			# the ordinary first run on a reachable model drafts all six dimensions, the
+			# next iteration selects this action again, and the operator was told to
+			# ``build --resume`` — a command that re-selects this same action, proposes
+			# nothing again, and prints the same sentence. The run was not waiting on a
+			# resume; it was waiting on a person. The line beneath it in the same output
+			# already said so (``next_human_verb`` reads ``stopped_on`` and names the
+			# questionnaire), so the two halves of one report contradicted each other.
 			return (
-				"no dimension left to propose: the interrogation is already answered and "
-				f"awaiting a person's attestation. Run `{RESUME_VERB}` once they have read "
-				"them (FR-173)"
+				"every open dimension already holds a proposal and a person has attested "
+				"none of them: read them with `sofact` and confirm the ones you agree with "
+				f"using `sofact attest <answer-id> --by <you>`, then `{RESUME_VERB}`. A "
+				"resume alone re-selects this action and changes nothing (FR-173)"
 			)
 		return f"drafted {len(proposals)} proposal(s); a person must attest them"
 	if action.name == "draft":
@@ -728,6 +772,7 @@ async def _finish(
 	open_gate: Phase | None,
 	notify: bool,
 	gate_failures: tuple[str, ...] = (),
+	awaiting_attestation: bool = False,
 ) -> DriverRun:
 	"""Record the run, notify, and return it (FR-172).
 
@@ -754,6 +799,7 @@ async def _finish(
 		terminal_detail=detail,
 		open_gate=open_gate,
 		gate_failures=gate_failures,
+		awaiting_attestation=awaiting_attestation,
 	)
 	if notify:
 		statement = await _statement_of(service, goal_id)

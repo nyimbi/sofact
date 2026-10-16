@@ -20,7 +20,14 @@ import pytest
 from pydantic import ValidationError
 from pytest_httpserver import HTTPServer
 
-from sofact.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, LlmClient, LlmConfig, LlmUnavailable
+from sofact.llm import (
+	DEFAULT_BASE_URL,
+	DEFAULT_MAX_TOKENS,
+	DEFAULT_MODEL,
+	LlmClient,
+	LlmConfig,
+	LlmUnavailable,
+)
 
 CLOSED_PORT = "http://127.0.0.1:9/v1"
 CHAT_PATH = "/v1/chat/completions"
@@ -48,10 +55,10 @@ def client_for(
 	)
 
 
-def reply(content: str, **extra: object) -> dict[str, object]:
+def reply(content: str, *, finish_reason: str = "stop", **extra: object) -> dict[str, object]:
 	"""A chat-completions body carrying ``content``."""
 	message: dict[str, object] = {"role": "assistant", "content": content, **extra}
-	return {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
+	return {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -109,7 +116,7 @@ def test_config_falls_back_to_the_defaults_when_the_environment_is_silent(
 	assert config.base_url == DEFAULT_BASE_URL
 	assert config.model == DEFAULT_MODEL
 	assert config.timeout_seconds == 120.0
-	assert config.max_tokens == 1024
+	assert config.max_tokens == DEFAULT_MAX_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -232,6 +239,59 @@ async def test_a_reasoning_only_reply_says_so(httpserver: HTTPServer) -> None:
 	assert "only a reasoning channel" in str(caught.value)
 
 
+async def test_an_exhausted_budget_names_the_budget_and_not_the_channel(
+	httpserver: HTTPServer,
+) -> None:
+	"""The live failure, which the first version of this message misattributed.
+
+	A local ``qwen3.5:9b`` spent all 1024 tokens inside its reasoning channel and
+	returned ``content: ""`` with ``finish_reason: "length"``. The client said "only a
+	reasoning channel, no content" — true of the reply, and useless to the operator,
+	who can only fix it by raising the budget. The number and the remedy are in the
+	response, so the refusal carries them (FR-168, FR-173).
+	"""
+	httpserver.expect_request(CHAT_PATH, method="POST").respond_with_json(
+		reply("", finish_reason="length", reasoning="x" * 4804)
+	)
+
+	with pytest.raises(LlmUnavailable) as caught:
+		await client_for(httpserver, max_tokens=1024).complete(system="s", user="u")
+
+	said = str(caught.value)
+	assert "1024-token budget" in said
+	assert "4804-character reasoning channel" in said
+	assert "Raise SOFACT_LLM_MAX_TOKENS above 1024" in said
+
+
+async def test_the_default_budget_clears_the_deepest_prompt_the_product_writes() -> None:
+	"""The shipped cap has to be enough for P0, which is the front door's own work.
+
+	It was 1024, and two of P0's six dimension prompts spent all of it inside the
+	reasoning channel on the default model. So the default could not finish the
+	interrogation ``sofact build`` opens with, and the operator's first experience of
+	the front door was a refusal. The number here is the measured floor — the deepest
+	prompt answered at 4096 with room — pinned so a later tidy-up cannot lower it
+	below what the product actually asks for (FR-173).
+	"""
+	assert DEFAULT_MAX_TOKENS >= 4096
+
+
+async def test_a_reasoning_field_beside_real_content_is_not_a_failure(
+	httpserver: HTTPServer,
+) -> None:
+	"""``reasoning_content`` is what DeepSeek-R1 and Qwen3 return on *good* replies.
+
+	The channel sits beside the answer rather than consuming its budget, so a client
+	that treats its presence as a symptom refuses a working model. The answer is what
+	was asked for; the thinking is not the client's business.
+	"""
+	httpserver.expect_request(CHAT_PATH, method="POST").respond_with_json(
+		reply("the answer", reasoning_content="how I got there")
+	)
+
+	assert await client_for(httpserver).complete(system="s", user="u") == "the answer"
+
+
 async def test_an_http_error_names_the_status_and_a_snippet_of_the_body(
 	httpserver: HTTPServer,
 ) -> None:
@@ -264,13 +324,21 @@ async def test_an_unusable_body_is_reported_not_ignored(httpserver: HTTPServer, 
 
 
 async def test_an_unreachable_endpoint_becomes_llm_unavailable() -> None:
-	"""A closed socket must not leak httpx's exception type into the caller."""
+	"""A closed socket must not leak httpx's exception type into the caller.
+
+	And it must not leak *nothing* either: every httpx transport error stringifies to
+	``""``, so the shipped message read ``unreachable: .`` — a sentence ending on a bare
+	colon, with the one fact that distinguishes a refused connection from a timeout
+	left out. The class name is that fact.
+	"""
 	client = LlmClient(LlmConfig(base_url=CLOSED_PORT, timeout_seconds=2.0))
 
 	with pytest.raises(LlmUnavailable) as caught:
 		await client.complete(system="s", user="u")
 
-	assert "unreachable" in str(caught.value)
+	said = str(caught.value)
+	assert "unreachable after 2s" in said
+	assert said.rstrip().endswith("ConnectError"), said
 
 
 @pytest.mark.parametrize(("system", "user"), [("   ", "u"), ("s", "\t\n"), ("", "u")])

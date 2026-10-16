@@ -28,11 +28,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from conftest import answer_everything
+from conftest import GOOD_ANSWERS, answer_everything
 from synthetic import a_model_for, synthetic_service
 
 from sofact._uuid7 import uuid7str
 from sofact.driver import DRIVER_ACTIONS, DriverRefusal, run_goal
+from sofact.llm import LlmClient
 from sofact.notify import render_subject
 from sofact.service import FactoryService
 from sofact.specdoc import PRODUCT_SPEC_FILENAME
@@ -42,6 +43,7 @@ from sofact.views import (
 	DriverOutcome,
 	DriverRun,
 	DriverTerminal,
+	ElicitationDimension,
 	Phase,
 	PhaseStatus,
 	ValueHypothesis,
@@ -346,6 +348,108 @@ class TestTheDriverStopsAtEveryGate:
 			assert phase.approved_by == "operator", (
 				f"{phase.phase.value} completed without a human approver"
 			)
+
+
+class _ReachableModel(LlmClient):
+	"""A model that answers every dimension, so P0 can actually be drafted.
+
+	Subclassing :class:`~sofact.llm.LlmClient` rather than duck-typing it, so the stub
+	cannot drift out of step with the interface the service calls — ``test_specdoc.py``'s
+	precedent. The text is the fixture answer for whichever dimension the prompt is for,
+	which is what makes the proposals *usable* and therefore makes the second driver
+	iteration reach the state under test.
+	"""
+
+	def __init__(self) -> None:
+		self.calls = 0
+
+	async def complete(self, *, system: str, user: str) -> str:
+		self.calls += 1
+		# Keyed off ``propose_prompt``'s own ``Dimension: <value>`` line rather than off a
+		# substring search of the whole prompt: the dimensions' rationales mention each
+		# other ("so there can be no oracle"), so a substring match returns whichever
+		# dimension happens to be checked first and the ORACLE proposal came back as the
+		# OUTCOME answer — which does not clear the oracle floor, so attesting everything
+		# still left a dimension open and the test failed for a fixture reason.
+		for dimension, answer in GOOD_ANSWERS.items():
+			if f"Dimension: {dimension.value}" in user:
+				return answer
+		raise AssertionError(f"the prompt names no known dimension:\n{user}")
+
+
+class TestAProposalIsNotAnAnswer:
+	"""A drafted dimension is not a resolved one, and the run says which verb closes it."""
+
+	async def test_a_run_that_drafted_every_dimension_names_attest_not_a_resume(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The ordinary first run on a reachable model, and the dead end it used to hit.
+
+		P0 drafts all six dimensions on the first iteration. ``readiness`` reports a
+		model-proposed answer nobody attested as **open** (FR-173) — correctly, since the
+		floor measures specificity and this measures authorship — so the second iteration
+		selects ``propose-answers`` again, proposes nothing, and stops. The message then
+		told the operator to run ``sofact build --resume``, which re-selects the same
+		action and prints the same sentence forever, while the ``next:`` line directly
+		beneath it named the questionnaire instead. One report, two contradictory
+		instructions, and no test could see it because every other test either has no
+		model configured or answers the dimensions itself.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await service.start("Ship a reminder dashboard.")
+		model = _ReachableModel()
+		service.llm = model
+
+		result = await run(service, deliver_root(tmp_path))
+
+		assert model.calls == len(GOOD_ANSWERS), "every open dimension must be drafted once"
+		assert result.stopped_on == "propose-answers"
+		assert result.terminal is DriverTerminal.EXHAUSTED
+		# The proposals are on the log and unresolved, which is the state that was
+		# mistaken for "nothing to do".
+		goal = await service.current_goal()
+		assert goal is not None, "the run opened a goal"
+		readiness = await service.readiness(goal.id)
+		assert readiness.open_dimensions == tuple(d.value for d in ElicitationDimension)
+		assert result.awaiting_attestation, "the run left proposals nobody confirmed"
+		assert result.next_human_verb is not None
+		assert "attest" in result.next_human_verb, result.next_human_verb
+		assert "questionnaire" not in result.next_human_verb, (
+			"the questionnaire has nothing left to ask; it would re-open at a proposal"
+		)
+
+	async def test_attesting_the_proposals_is_what_lets_the_run_continue(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""The verb the message names is the verb that works — the other half of the claim.
+
+		Naming ``attest`` is only correct if attesting actually unblocks the run, so the
+		test performs it and asserts the run moves on. Without this the message could name
+		a verb that is merely plausible.
+		"""
+		service = synthetic_service(home, tmp_path, "complete")
+		await service.probe_harness(None)
+		await service.start("Ship a reminder dashboard.")
+		service.llm = _ReachableModel()
+		first = await run(service, deliver_root(tmp_path))
+		assert first.next_human_verb is not None
+		assert "attest" in first.next_human_verb, first.next_human_verb
+
+		goal = await service.current_goal()
+		assert goal is not None, "the run opened a goal"
+		proposals = [a for a in (await service.state()).answers_for(goal.id) if a.is_model_proposed]
+		assert len(proposals) == len(GOOD_ANSWERS)
+		for answer in proposals:
+			await service.attest(answer.id, by="operator")
+
+		second = await run(service, deliver_root(tmp_path))
+
+		# P0 is behind it: the run drafted clause stems from the attested answers rather
+		# than proposing again, which is the whole of what ``attest`` was supposed to buy.
+		assert second.steps[0].action == "draft", second.steps[0]
+		assert second.steps[0].outcome is DriverOutcome.ADVANCED, second.steps[0]
+		assert not second.awaiting_attestation
 
 
 class TestIdempotency:

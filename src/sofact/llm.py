@@ -14,21 +14,79 @@ weights are *not* on this machine (ADR-0002).
 from __future__ import annotations
 
 import os
-from typing import Any, Self
+from typing import Any, Final, Self
 
 import httpx
 from pydantic import Field
 
 from sofact.views import NonEmptyStr, View
 
-__all__ = ["DEFAULT_BASE_URL", "DEFAULT_MODEL", "LlmClient", "LlmConfig", "LlmUnavailable"]
+__all__ = [
+	"DEFAULT_BASE_URL",
+	"DEFAULT_MAX_TOKENS",
+	"DEFAULT_MODEL",
+	"LlmClient",
+	"LlmConfig",
+	"LlmUnavailable",
+]
 
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 DEFAULT_MODEL = "deepseek-v4.1-flash:cloud"
 
+DEFAULT_MAX_TOKENS: Final[int] = 4096
+"""Enough for the deepest prompt this product writes, measured rather than guessed.
+
+The default was 1024, and on the default model two of P0's six dimension prompts —
+``boundary`` and ``failure`` — spent all 1024 inside the reasoning channel and
+returned ``content: ""`` with ``finish_reason: length``. So the shipped default
+could not complete the interrogation the front door exists to run, and the failure
+arrived as a refusal about a reasoning channel rather than as a budget problem. At
+4096 all six answer, with the longest at 2915 characters, so the floor is measured
+against the worst prompt in the product rather than chosen for tidiness.
+
+Raising a token cap is a spend decision, not a correctness one: this is a local
+model by default (ADR-0002) and the cap only bounds a runaway, so the honest
+default is the one that lets the product work.
+"""
+
+DEFAULT_MAX_TOKENS_ENV: Final[str] = "SOFACT_LLM_MAX_TOKENS"
+
 
 class LlmUnavailable(RuntimeError):
 	"""The model could not be reached, or returned nothing usable."""
+
+
+def _why_no_content(message: dict[str, Any], choice: dict[str, Any], config: LlmConfig) -> str:
+	"""Why an empty ``content`` happened, read off the reply rather than assumed.
+
+	The first version of this said "only a reasoning channel, no content" whenever the
+	reply carried a non-empty ``reasoning`` field, and that attribution is wrong for
+	every provider that streams the chain of thought *beside* the answer instead of
+	inside the budget — DeepSeek-R1, Qwen3 and friends return ``reasoning_content`` on
+	perfectly good replies. The string asserted a cause the client had not checked, and
+	a reader of a run that stopped at P0 was sent looking at the wrong thing.
+
+	The cause is in the response. ``finish_reason == "length"`` means the budget was
+	spent, and if a reasoning channel is also present then the budget was spent
+	*inside* it — which is the case this refusal exists for, and the only one an
+	operator can act on, since it is fixed by raising ``SOFACT_LLM_MAX_TOKENS``.
+	Otherwise the model simply returned nothing, and saying so is the whole truth.
+	"""
+	channel = (message.get("reasoning") or message.get("reasoning_content") or "").strip()
+	if choice.get("finish_reason") == "length":
+		if channel:
+			return (
+				f"no content: the {config.max_tokens}-token budget went into a "
+				f"{len(channel)}-character reasoning channel (finish_reason: length). "
+				f"Raise {DEFAULT_MAX_TOKENS_ENV} above {config.max_tokens}."
+			)
+		return (
+			f"no content: the {config.max_tokens}-token budget was spent before any was "
+			f"written (finish_reason: length). Raise {DEFAULT_MAX_TOKENS_ENV}."
+		)
+	if channel:
+		return "no content, only a reasoning channel"
+	return "no content at all"
 
 
 class LlmConfig(View):
@@ -38,7 +96,7 @@ class LlmConfig(View):
 	model: NonEmptyStr = DEFAULT_MODEL
 	api_key: NonEmptyStr = "ollama"
 	timeout_seconds: float = Field(default=120.0, gt=0)
-	max_tokens: int = Field(default=1024, gt=0)
+	max_tokens: int = Field(default=DEFAULT_MAX_TOKENS, gt=0)
 	temperature: float = Field(default=0.3, ge=0.0, le=2.0)
 
 	@classmethod
@@ -49,7 +107,7 @@ class LlmConfig(View):
 			model=os.environ.get("SOFACT_MODEL", DEFAULT_MODEL),
 			api_key=os.environ.get("SOFACT_API_KEY", "ollama"),
 			timeout_seconds=float(os.environ.get("SOFACT_LLM_TIMEOUT", "120")),
-			max_tokens=int(os.environ.get("SOFACT_LLM_MAX_TOKENS", "1024")),
+			max_tokens=int(os.environ.get(DEFAULT_MAX_TOKENS_ENV, str(DEFAULT_MAX_TOKENS))),
 			temperature=float(os.environ.get("SOFACT_LLM_TEMPERATURE", "0.3")),
 		)
 
@@ -107,7 +165,16 @@ class LlmClient:
 					json=body,
 				)
 		except httpx.HTTPError as exc:
-			raise LlmUnavailable(f"{self.config.base_url} unreachable: {exc}") from exc
+			# ``str(exc)`` is empty for every httpx transport error — ConnectError,
+			# ConnectTimeout, ReadTimeout all stringify to "" — so the shipped message
+			# read "http://localhost:11434/v1 unreachable: ." with the reason missing and
+			# the sentence ending on a bare colon. The class name is the reason: a
+			# timeout and a refused connection are different problems with different
+			# fixes, and only the type distinguishes them.
+			raise LlmUnavailable(
+				f"{self.config.base_url} unreachable after {self.config.timeout_seconds:g}s: "
+				f"{type(exc).__name__}"
+			) from exc
 
 		if response.status_code != 200:
 			raise LlmUnavailable(
@@ -115,13 +182,14 @@ class LlmClient:
 			)
 
 		try:
-			message = response.json()["choices"][0]["message"]
+			choice = response.json()["choices"][0]
+			message = choice["message"]
 		except (KeyError, IndexError, ValueError) as exc:
 			raise LlmUnavailable(f"{self.config.model} returned an unusable body: {exc}") from exc
 
 		content = (message.get("content") or "").strip()
 		if not content:
-			reasoning = (message.get("reasoning") or "").strip()
-			detail = "only a reasoning channel, no content" if reasoning else "no content at all"
-			raise LlmUnavailable(f"{self.config.model} produced {detail}")
+			raise LlmUnavailable(
+				f"{self.config.model} produced {_why_no_content(message, choice, self.config)}"
+			)
 		return content

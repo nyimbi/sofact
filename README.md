@@ -399,6 +399,13 @@ context model served through Ollama's cloud, not locally. Override with `SOFACT_
 [ADR-0002](docs/adr/0002-model-access-is-one-openai-compatible-interface.md) for what that
 costs in hermeticity.
 
+The completion cap is `SOFACT_LLM_MAX_TOKENS`, default 4096. It was 1024, and on a
+reasoning model that is not enough for P0: two of the six dimension prompts spent the
+whole budget inside the hidden reasoning channel and returned empty content, so the
+default could not finish the interrogation `sofact build` opens with. A refusal from
+that path names the budget and the variable to raise
+([ADR-0075](docs/adr/0075-a-refusal-names-the-cause-the-response-shows.md)).
+
 For a real coding session the model must be one the **harness** can resolve, not merely one
 Ollama serves: `pi` validates `--model` against its own registry and refuses a tag it does
 not list. Run `sofact probe` before dispatching, and read its answer — a refused model is
@@ -516,7 +523,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1987 tests
+uv run pytest -vxs tests/ci          # 1992 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

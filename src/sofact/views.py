@@ -1821,6 +1821,22 @@ class DriverRun(View):
 	machine half passed", which is what ``gate approve`` did with it at the time.
 	"""
 
+	awaiting_attestation: bool = False
+	"""Whether the run stopped with proposals nobody has confirmed (FR-172, FR-173).
+
+	A field rather than a derived property, because the fact is not in the run: both P0
+	waits stop on ``propose-answers`` with an ``EXHAUSTED`` terminal, and only the
+	*state* distinguishes "no dimension has been answered" — where a model proposal is
+	exactly what is missing — from "every open dimension holds a proposal nobody
+	attested", where no amount of driving closes the gap and the next move is a person's.
+	The driver holds that state and the view does not, so it is recorded rather than
+	inferred.
+
+	It defaults to ``False``, which is the reading that names ``sofact build --resume``:
+	correct for a run that stopped on anything else, and the older behaviour for a row
+	written before this field existed.
+	"""
+
 	notification_id: UUID7 | None = None
 
 	@property
@@ -1868,6 +1884,12 @@ class DriverRun(View):
 					)
 			return f"sofact gate approve {self.open_gate.value} --by <you>"
 		if self.stopped_on == "propose-answers":
+			if self.awaiting_attestation:
+				# The proposals are already on the log, so the questionnaire has nothing
+				# left to ask: it would re-open at a dimension that already holds a
+				# model's paragraph, which the operator would then be reading as though
+				# it were theirs. The verb is the one that makes a proposal count.
+				return "sofact attest <answer-id> --by <you>  (then `sofact build --resume`)"
 			# ``sofact`` with no subcommand is the questionnaire — the product's own front
 			# door — so the verb really is bare. It is spelled out as ``sofact`` rather than
 			# as an empty string, because the trailing space read as a missing command in a
