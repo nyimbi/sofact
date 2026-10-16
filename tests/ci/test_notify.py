@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -95,7 +95,7 @@ def a_run(
 	open_gate: Phase | None = None,
 	detail: str = "a detail",
 ) -> DriverRun:
-	stamp = datetime(2026, 10, 15, tzinfo=timezone.utc)
+	stamp = datetime(2026, 10, 15, tzinfo=UTC)
 	return DriverRun(
 		id=uuid7str(),
 		goal_id=uuid7str(),
@@ -364,6 +364,6 @@ def test_a_notification_with_no_exit_code_is_never_delivered() -> None:
 		body_chars=1,
 		exit_code=None,
 		error="FileNotFoundError: no such binary",
-		at=datetime(2026, 10, 15, tzinfo=timezone.utc),
+		at=datetime(2026, 10, 15, tzinfo=UTC),
 	)
 	assert not record.delivered

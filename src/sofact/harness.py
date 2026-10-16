@@ -1102,6 +1102,7 @@ class ConfiguredHarnessAdapter:
 		spec_env: bool = True,
 		composition_hash: str | None = None,
 		boundary: DeploymentBoundary | None = None,
+		model_source: str | None = None,
 	) -> None:
 		assert spec.name, "spec must be named"
 		assert model.strip(), "a dispatch needs a model"
@@ -1110,6 +1111,12 @@ class ConfiguredHarnessAdapter:
 		self.workspace = Path(workspace)
 		self.session_dir = Path(session_dir)
 		self.model = model
+		# FR-132: which rule chose ``model``. Bound to the adapter rather than resolved at
+		# the record for the same reason ``composition_hash`` is -- the adapter is what
+		# knows, and a dispatch that re-derived it could report a source for a model it
+		# did not run. ``None`` means the caller did not say, which is what the capability
+		# probes record: they name a model to vary one slot and are not a phase's dispatch.
+		self.model_source = model_source
 		self.tools = tools
 		self.probe_timeout = probe_timeout
 		self.env = dict(env or {})
@@ -1166,6 +1173,7 @@ class ConfiguredHarnessAdapter:
 			spec_env=self.spec_env if spec_env is None else spec_env,
 			composition_hash=self.composition_hash,
 			boundary=self.boundary if boundary is None else boundary,
+			model_source=self.model_source,
 		)
 
 	def _slots(self, session_id: str) -> dict[str, str]:
@@ -2294,6 +2302,8 @@ class ConfiguredHarnessAdapter:
 				harness=self.spec.name,
 				mode=mode,
 				outcome=outcome,
+				model=self.model,
+				model_source=self.model_source,
 				argv=argv,
 				workspace=workspace,
 				budget=step.budget,

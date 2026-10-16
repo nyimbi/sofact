@@ -71,6 +71,7 @@ class DriverRefusal(Exception):
 	this is a request that never became one.
 	"""
 
+
 RESUME_VERB: Final = "sofact build --resume"
 """What the operator types to continue a run, named in the halt and the notification."""
 
@@ -366,7 +367,11 @@ async def run_goal(
 				opened_by,
 				DriverOutcome.HALTED,
 				f"{gate.phase.value} is awaiting {PHASE_GATE[gate.phase].value}"
-				+ (f"; {len(failed)} machine check(s) failed: {', '.join(failed)}" if failed else ""),
+				+ (
+					f"; {len(failed)} machine check(s) failed: {', '.join(failed)}"
+					if failed
+					else ""
+				),
 			)
 			if failed:
 				producer = PHASE_PRODUCER_VERB.get(gate.phase)
@@ -418,7 +423,7 @@ async def run_goal(
 				harness=harness,
 				research_harness=research_harness,
 			)
-		except Exception as exc:  # noqa: BLE001 - every failure is a named terminal state
+		except Exception as exc:
 			# A named terminal state rather than a propagating exception, and the
 			# catch is broad on purpose: the operator asked to be told when the build
 			# finishes, and a traceback on their terminal is not being told. The
@@ -504,9 +509,7 @@ def _delivery_detail(delivered: DeliveryReport) -> str:
 	"""
 	unverified = delivered.unverified
 	if unverified:
-		return (
-			f"delivered with {len(unverified)} clause(s) unverified; see the delivery report"
-		)
+		return f"delivered with {len(unverified)} clause(s) unverified; see the delivery report"
 	return "delivered: every clause the contract carries is verified"
 
 
@@ -587,11 +590,15 @@ async def _perform(
 		return f"contracted {len(contract.clauses)} clause(s)"
 	if action.name == "specify":
 		proposal = await service.specify(contract.id)
-		await _present(service, Phase.SPECIFY, (await service.specification_gate(proposal.id)).checks)
+		await _present(
+			service, Phase.SPECIFY, (await service.specification_gate(proposal.id)).checks
+		)
 		return f"proposed specification {proposal.id}; its gate is now open"
 	if action.name == "decompose":
 		proposal = await service.decompose(contract.id)
-		await _present(service, Phase.DECOMPOSE, (await service.decomposition_gate(proposal.id)).checks)
+		await _present(
+			service, Phase.DECOMPOSE, (await service.decomposition_gate(proposal.id)).checks
+		)
 		return f"proposed decomposition {proposal.id}; its gate is now open"
 	if action.name == "plan":
 		plan = await service.compile_plan(contract.id)

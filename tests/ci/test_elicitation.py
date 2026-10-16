@@ -283,8 +283,13 @@ def proposed_everything(goal_id: str) -> tuple[ElicitationAnswer, ...]:
 def test_is_model_proposed_is_derived_from_answered_by() -> None:
 	"""The reader ``answered_by`` did not have, and the whole of FR-173's mechanism."""
 	goal_id = uuid7str()
-	assert answered(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed is False
-	assert a_proposal(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed is True
+	assert (
+		answered(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed is False
+	)
+	assert (
+		a_proposal(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed
+		is True
+	)
 
 
 def test_a_model_proposed_answer_that_clears_every_floor_still_does_not_resolve() -> None:
@@ -296,7 +301,7 @@ def test_a_model_proposed_answer_that_clears_every_floor_still_does_not_resolve(
 	"""
 	goal_id = uuid7str()
 	proposals = proposed_everything(goal_id)
-	assert assess(goal_id, proposals, attested=frozenset(a.id for a in proposals)) .is_ready, (
+	assert assess(goal_id, proposals, attested=frozenset(a.id for a in proposals)).is_ready, (
 		"the proposal texts must be adequate, or this test measures the floor"
 	)
 	assert assess(goal_id, all_answered(goal_id)).is_ready

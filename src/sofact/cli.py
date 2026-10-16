@@ -33,7 +33,6 @@ from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
 from sofact.escape import load_deployment_scope, load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
-from sofact.specdoc import PRODUCT_SPEC_FILENAME
 from sofact.harness import SPECS, HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.manufacture import (
@@ -48,16 +47,25 @@ from sofact.notify import (
 	notifier_spec_for,
 )
 from sofact.search import SearcherSpec, SearchRefusal, load_searcher_specs, searcher_spec_for
+from sofact.service import (
+	FactoryService,
+	refuted_steps,
+	resolve_tools,
+)
+from sofact.specdoc import PRODUCT_SPEC_FILENAME
+from sofact.tiers import (
+	MODEL_TIERS_ENV,
+	ModelTier,
+	ModelTierRefusal,
+	load_model_tiers,
+	phase_tier,
+	tier_statement,
+)
 from sofact.transcribe import (
 	TranscriberRefusal,
 	TranscriberSpec,
 	load_transcriber_specs,
 	transcriber_spec_for,
-)
-from sofact.service import (
-	FactoryService,
-	refuted_steps,
-	resolve_tools,
 )
 from sofact.views import (
 	AUTHORSHIP_READING,
@@ -71,11 +79,11 @@ from sofact.views import (
 	V01_REVIEW_MINUTES_PER_DIFF,
 	AdversarialAuditReport,
 	Assumption,
-	CompetitiveLandscape,
 	BoundaryMechanism,
 	ChangeUnit,
 	ClaimKind,
 	ClauseKind,
+	CompetitiveLandscape,
 	Consumer,
 	Contract,
 	Decomposition,
@@ -83,9 +91,9 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeploymentScope,
 	DeploymentTopology,
+	DispatchRecord,
 	DriverOutcome,
 	DriverRun,
-	DispatchRecord,
 	EnvelopeDimension,
 	EscapeBudget,
 	EscapeKind,
@@ -98,15 +106,15 @@ from sofact.views import (
 	InterfaceMember,
 	InterfaceMemberKind,
 	MachineRequest,
-	Notification,
 	ModuleClass,
+	Notification,
 	OracleAuditReport,
 	Phase,
 	PhaseStatus,
 	PluginComposition,
 	PluginVerdict,
-	ProductSpecificationDocument,
 	ProbeOutcome,
+	ProductSpecificationDocument,
 	RepairOutcome,
 	ResearchBudget,
 	ResearchClassification,
@@ -119,6 +127,7 @@ from sofact.views import (
 	Specification,
 	SpecificationDraft,
 	SpecificationGate,
+	SpendAttribution,
 	StepOutcome,
 	SystemCriterion,
 	SystemEntity,
@@ -292,6 +301,50 @@ _REASON_OPTION = typer.Option(
 	help="Why. Recorded in the log, because an unexplained gap reads as a bug.",
 )
 
+# The front door's own options (FR-168 to FR-174). Module-level singletons rather than
+# inline calls, which is this file's convention for every other verb and is what B008
+# asks for: a `typer.Option(...)` in a signature default is a call evaluated at import,
+# so the object a reader sees beside the parameter is not the object typer receives.
+_AUDIO_ARGUMENT = typer.Argument(
+	..., help="Audio file to transcribe into a goal statement (FR-168)."
+)
+_ANSWER_IDS_ARGUMENT = typer.Argument(
+	None, help="Answer ids to attest. Omit with --all to attest every open proposal."
+)
+_CONTRACT_ID_ARGUMENT = typer.Argument(None, help="Defaults to the goal's latest contract.")
+_TRANSCRIBER_OPTION = typer.Option(
+	None, "--transcriber", help="A named entry in SOFACT_TRANSCRIBER_SPECS (FR-168)."
+)
+_ATTEST_BY_OPTION = typer.Option(..., "--by", help="Who read the proposal. Required (FR-173).")
+_CAPABILITY_OPTION = typer.Option(..., "--capability", help="What we will exceed.")
+_BASELINE_OPTION = typer.Option(..., "--baseline", help="The rival's capability exceeded.")
+_SOURCE_ID_OPTION = typer.Option(
+	None, "--source-id", help="Evidence for the baseline. At least one is required (FR-170)."
+)
+_CLAUSE_ID_OPTION = typer.Option(
+	None, "--clause-id", help="The intent clause this traces to. At least one (FR-076)."
+)
+_RATIONALE_OPTION = typer.Option(..., "--rationale", help="Why this is achievable.")
+_SPEC_ROOT_OPTION = typer.Option(
+	None, "--root", help="Also write the rendered specification under this directory."
+)
+_SPEC_APPROVE_OPTION = typer.Option(
+	False, "--approve", help="Record that you approved the rendered document (FR-171)."
+)
+_BUILD_AUDIO_OPTION = typer.Option(
+	None, "--audio", help="Transcribe this file and open the goal from it (FR-168)."
+)
+_BUILD_STATEMENT_OPTION = typer.Option(
+	None, "--statement", help="Open the goal from this text instead."
+)
+_BUILD_RESUME_OPTION = typer.Option(
+	False, "--resume", help="Continue the current goal. The same code path as a cold start."
+)
+_BUILD_ROOT_OPTION = typer.Option(None, "--root", help="Where the delivery artefacts are written.")
+_BUILD_NO_NOTIFY_OPTION = typer.Option(
+	False, "--no-notify", help="Do not send a notification when the run stops."
+)
+
 
 def _service(home: Path | None) -> FactoryService:
 	return FactoryService(
@@ -309,7 +362,28 @@ def _service(home: Path | None) -> FactoryService:
 		searcher=_configured_searcher(),
 		transcriber=_configured_transcriber(),
 		notifier=_configured_notifier(),
+		model_tiers=_configured_model_tiers(),
 	)
+
+
+def _configured_model_tiers() -> Mapping[str, ModelTier]:
+	"""The per-tier models this deployment declared, empty when it declared none (FR-132).
+
+	Empty rather than ``None``, unlike :func:`_configured_specs`: there is no built-in
+	table to fall back to. Which phases need depth is SoFact's assignment and lives in
+	:data:`~sofact.tiers.TIER_PHASES`; *which model* is this deployment's, and SoFact has
+	no basis for naming one. An empty mapping is the honest reading — one model runs every
+	phase — and :func:`~sofact.tiers.resolve_model` says so by returning the operator's
+	model with source ``SOFACT_MODEL``.
+	"""
+	configured = os.environ.get(MODEL_TIERS_ENV)
+	if not configured:
+		return {}
+	try:
+		return load_model_tiers(Path(configured))
+	except ModelTierRefusal as exc:
+		typer.secho(f"cannot read {MODEL_TIERS_ENV}: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
 
 
 def _configured_envelope() -> DeliveryEnvelope | None:
@@ -3273,6 +3347,100 @@ async def _attempts(svc: FactoryService) -> None:
 			typer.echo(f"      {clause_id[:8]}  {count} attempt(s)")
 
 
+@app.command(name="spend")
+def spend(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Report dispatch spend per phase and per module (FR-133, NFR-030)."""
+	asyncio.run(_spend(_service(_home_of(ctx, home))))
+
+
+async def _spend(svc: FactoryService) -> None:
+	"""FR-133's two attributions, and the envelope comparison that has a dimension.
+
+	The exit code is non-zero on an *overspend* and zero on a run that came in under
+	§1.3's floor. That asymmetry is deliberate: §1.3's ``wall_clock_days`` is a target
+	range, a partial run is expected to be below it, and a verb that failed on "faster
+	than the target" would be failing on the good news.
+	"""
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	plan = await svc.origin_plan(built.id)
+	if plan is None:
+		typer.secho("no plan yet. Run `sofact plan` first.", fg="yellow")
+		raise typer.Exit(code=1)
+
+	report = await svc.spend_report(plan.id)
+	typer.secho(f"\nspend attribution — plan {plan.id}", fg="cyan", bold=True)
+	if not report.by_phase:
+		typer.secho(
+			"  nothing was dispatched, so there is no spend to attribute. This is the "
+			"absence of a measurement rather than a run that cost nothing (NFR-024).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+
+	typer.secho("\n  per phase (FR-133)", fg="cyan", bold=True)
+	for bucket in report.by_phase:
+		typer.echo(
+			f"    {bucket.key:<8} {bucket.dispatches:>3} dispatch(es)  "
+			f"{bucket.wall_clock_seconds:>8.1f}s  {_tokens(bucket)}"
+		)
+		if bucket.models:
+			typer.secho(f"      on {', '.join(bucket.models)}", fg="bright_black")
+
+	typer.secho("\n  per module (NFR-030: cost per delivered module)", fg="cyan", bold=True)
+	if report.by_module:
+		for bucket in report.by_module:
+			typer.echo(
+				f"    {bucket.key:<24} {bucket.dispatches:>3} dispatch(es)  "
+				f"{bucket.wall_clock_seconds:>8.1f}s  {_tokens(bucket)}"
+			)
+	else:
+		typer.secho("    no step was owned by a single module", fg="bright_black")
+	if report.unattributed:
+		typer.secho(
+			f"    {report.unattributed} dispatch(es) belonged to no single module — a "
+			"bootstrap step covers no clause (FR-100). Counted here rather than dropped, "
+			"so the module buckets plus this number are the phase total.",
+			fg="bright_black",
+		)
+
+	typer.secho("\n  against the envelope", fg="cyan", bold=True)
+	measurement = report.wall_clock_measurement
+	if measurement is None:
+		typer.secho(
+			"    no envelope is configured, so nothing is compared. §1.3's numbers are a "
+			"hypothesis under test and are not applied until someone adopts them "
+			"(NFR-025).",
+			fg="yellow",
+		)
+	else:
+		typer.secho(f"    {measurement.statement}")
+	typer.secho(f"    tokens: {report.token_envelope_note}", fg="bright_black")
+
+	if report.wall_clock_over_envelope:
+		typer.secho(
+			"\n  over the envelope. FR-133's rationale is this direction: an unattended "
+			"build with no spend attribution is an unbounded financial commitment.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+
+
+def _tokens(bucket: SpendAttribution) -> str:
+	"""One bucket's token column, saying what it left out (NFR-024)."""
+	if bucket.dispatches == 0:
+		return "no session"
+	if not bucket.tokens_measured:
+		return f"{bucket.tokens} tokens — a floor: {bucket.unmeasured_tokens} unmeasured"
+	return f"{bucket.tokens} tokens"
+
+
 @app.command(name="goalmode")
 def goalmode(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
 	"""Report whether goal entry was forced and continuations observed (§20.3 item 6a)."""
@@ -3503,9 +3671,7 @@ async def _search(
 
 
 def _print_scan(scan: SearchScan) -> None:
-	typer.secho(
-		f"\nsearch scan {scan.id} @ {scan.provider}", fg="green", bold=True
-	)
+	typer.secho(f"\nsearch scan {scan.id} @ {scan.provider}", fg="green", bold=True)
 	typer.secho(
 		f"  {scan.hit_count} hit(s) over {scan.queries_answered} of {len(scan.results)} "
 		"query/queries answered (FR-174)",
@@ -4062,6 +4228,36 @@ async def _envelope(svc: FactoryService, *, defaults: bool) -> None:
 		raise typer.Exit(code=1)
 
 
+@app.command(name="tiers")
+def show_tiers(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Show which model each phase runs on, and which rule chose it (FR-132)."""
+	asyncio.run(_tiers(_service(_home_of(ctx, home))))
+
+
+async def _tiers(svc: FactoryService) -> None:
+	"""The tier table and the phase-to-model resolution it produces (FR-132).
+
+	Prints the *resolution* rather than the table, because the table is one of three
+	inputs to the answer and an operator reading it alone would not learn that a phase
+	outside every tier runs the operator's model. Each row names its source for that
+	reason, and ``unconfigured`` is stated rather than left as a blank column.
+	"""
+	tiers = svc.model_tiers()
+	typer.secho(tier_statement(tiers), fg="cyan" if tiers else "yellow")
+	typer.secho("\n  phase  model                        chosen by", fg="cyan", bold=True)
+	for phase in Phase:
+		name = phase_tier(phase)
+		model, source = svc.model_for(phase)
+		label = f"{phase.value} {phase.name.lower()}"
+		typer.secho(f"  {label:<20} {model:<28} {source}")
+		if name is None:
+			typer.secho(
+				f"    {'':<18} no tier: SoFact assigns this phase no depth, so it runs the "
+				"operator's model",
+				fg="bright_black",
+			)
+
+
 @app.command(name="deliver")
 def deliver_command(
 	ctx: typer.Context,
@@ -4450,11 +4646,9 @@ def main() -> None:
 @app.command(name="speak")
 def speak(
 	ctx: typer.Context,
-	audio: Path = typer.Argument(..., help="Audio file to transcribe into a goal statement."),
+	audio: Path = _AUDIO_ARGUMENT,
 	home: Path | None = _HOME_OPTION,
-	transcriber: str | None = typer.Option(
-		None, "--transcriber", help="A named entry in SOFACT_TRANSCRIBER_SPECS (FR-168)."
-	),
+	transcriber: str | None = _TRANSCRIBER_OPTION,
 	start_goal: bool = typer.Option(
 		True,
 		"--start/--no-start",
@@ -4526,11 +4720,9 @@ def _print_transcript(transcript: Transcript) -> None:
 @app.command(name="attest")
 def attest(
 	ctx: typer.Context,
-	answer_ids: list[str] | None = typer.Argument(
-		None, help="Answer ids to attest. Omit with --all to attest every open proposal."
-	),
+	answer_ids: list[str] | None = _ANSWER_IDS_ARGUMENT,
 	home: Path | None = _HOME_OPTION,
-	by: str = typer.Option(..., "--by", help="Who read the proposal. Required (FR-173)."),
+	by: str = _ATTEST_BY_OPTION,
 	all_open: bool = typer.Option(
 		False, "--all", help="Attest every model-proposed answer for the current goal."
 	),
@@ -4655,15 +4847,11 @@ def _print_landscape(landscape: CompetitiveLandscape) -> None:
 @app.command(name="exceed")
 def exceed(
 	ctx: typer.Context,
-	capability: str = typer.Option(..., "--capability", help="What we will exceed."),
-	baseline: str = typer.Option(..., "--baseline", help="The rival's capability exceeded."),
-	source_ids: list[str] | None = typer.Option(
-		None, "--source-id", help="Evidence for the baseline. At least one is required (FR-170)."
-	),
-	clause_ids: list[str] | None = typer.Option(
-		None, "--clause-id", help="The intent clause this traces to. At least one (FR-076)."
-	),
-	rationale: str = typer.Option(..., "--rationale", help="Why this is achievable."),
+	capability: str = _CAPABILITY_OPTION,
+	baseline: str = _BASELINE_OPTION,
+	source_ids: list[str] | None = _SOURCE_ID_OPTION,
+	clause_ids: list[str] | None = _CLAUSE_ID_OPTION,
+	rationale: str = _RATIONALE_OPTION,
 	home: Path | None = _HOME_OPTION,
 	by: str = typer.Option("operator", "--by", help="Who declares it."),
 ) -> None:
@@ -4736,14 +4924,10 @@ async def _exceed(
 @app.command(name="spec-doc")
 def spec_doc(
 	ctx: typer.Context,
-	contract_id: str | None = typer.Argument(None, help="Defaults to the goal's latest contract."),
+	contract_id: str | None = _CONTRACT_ID_ARGUMENT,
 	home: Path | None = _HOME_OPTION,
-	root: Path | None = typer.Option(
-		None, "--root", help=f"Also write {PRODUCT_SPEC_FILENAME} under this directory."
-	),
-	approve: bool = typer.Option(
-		False, "--approve", help="Record that you approved the rendered document (FR-171)."
-	),
+	root: Path | None = _SPEC_ROOT_OPTION,
+	approve: bool = _SPEC_APPROVE_OPTION,
 	by: str = typer.Option("operator", "--by", help="Who approved it, with --approve."),
 ) -> None:
 	"""Render the annotated product specification (FR-171).
@@ -4886,21 +5070,11 @@ def _print_notification(record: Notification) -> None:
 def build(
 	ctx: typer.Context,
 	home: Path | None = _HOME_OPTION,
-	audio: Path | None = typer.Option(
-		None, "--audio", help="Transcribe this file and open the goal from it (FR-168)."
-	),
-	statement: str | None = typer.Option(
-		None, "--statement", help="Open the goal from this text instead."
-	),
-	resume: bool = typer.Option(
-		False, "--resume", help="Continue the current goal. The same code path as a cold start."
-	),
-	root: Path | None = typer.Option(
-		None, "--root", help="Where the delivery artefacts are written."
-	),
-	no_notify: bool = typer.Option(
-		False, "--no-notify", help="Do not send a notification when the run stops."
-	),
+	audio: Path | None = _BUILD_AUDIO_OPTION,
+	statement: str | None = _BUILD_STATEMENT_OPTION,
+	resume: bool = _BUILD_RESUME_OPTION,
+	root: Path | None = _BUILD_ROOT_OPTION,
+	no_notify: bool = _BUILD_NO_NOTIFY_OPTION,
 	harness: str | None = typer.Option(
 		None, "--harness", help="Which configured harness to dispatch the build to."
 	),

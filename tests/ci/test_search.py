@@ -192,7 +192,9 @@ def test_an_empty_table_is_refused(tmp_path: Path) -> None:
 
 def test_both_table_shapes_load(tmp_path: Path) -> None:
 	wrapped = tmp_path / "a.json"
-	wrapped.write_text(json.dumps({"searchers": {"s": {"argv": ["x", "{query}"], "results_glob": "r.json"}}}))
+	wrapped.write_text(
+		json.dumps({"searchers": {"s": {"argv": ["x", "{query}"], "results_glob": "r.json"}}})
+	)
 	bare = tmp_path / "b.json"
 	bare.write_text(json.dumps({"s": {"argv": ["x", "{query}"], "results_glob": "r.json"}}))
 	assert set(load_searcher_specs(wrapped)) == set(load_searcher_specs(bare)) == {"s"}
@@ -377,7 +379,9 @@ def test_a_failed_query_is_reported_as_not_established() -> None:
 	scan = SearchScan(
 		id=uuid7str(),
 		provider="p",
-		results=(SearchQueryResult(query="q", outcome=SearchOutcome.FAILED, provider="p", error="boom"),),
+		results=(
+			SearchQueryResult(query="q", outcome=SearchOutcome.FAILED, provider="p", error="boom"),
+		),
 		started_at=now(),
 	)
 	detail = " ".join(c.detail for c in scan_checks(scan, None))

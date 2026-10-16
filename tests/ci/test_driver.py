@@ -28,7 +28,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from conftest import answer_everything
+from synthetic import a_model_for, synthetic_service
 
+from sofact._uuid7 import uuid7str
 from sofact.driver import DRIVER_ACTIONS, DriverRefusal, run_goal
 from sofact.notify import render_subject
 from sofact.service import FactoryService
@@ -42,10 +45,6 @@ from sofact.views import (
 	PhaseStatus,
 	ValueHypothesis,
 )
-from sofact._uuid7 import uuid7str
-
-from conftest import answer_everything
-from synthetic import a_model_for, synthetic_service
 
 HARNESS = "synthetic"
 

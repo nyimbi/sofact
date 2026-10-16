@@ -241,3 +241,121 @@ class TestTheRoadmapTallyIsDerivedFromItsRows:
 			assert lead in known, (
 				f"{number}'s verdict cell leads with {lead!r}, which is not one of {sorted(known)}"
 			)
+
+
+ADR_DIR = ROOT / "docs" / "adr"
+ADR_INDEX = ADR_DIR / "README.md"
+
+_ADR_FILE = re.compile(r"^(\d{4})-[a-z0-9-]+\.md$")
+_ADR_ROW = re.compile(r"^\| \[(\d{4})\]\((\d{4}-[a-z0-9-]+\.md)\)")
+_NON_RESOLUTION_COUNT = re.compile(
+	r"^Not every decision resolves a `D`\. ([A-Za-z]+(?:-[a-z]+)?) records here", re.M
+)
+_WORDS = {
+	"Twenty": 20,
+	"Thirty": 30,
+	"Forty": 40,
+	"Fifty": 50,
+	"Sixty": 60,
+	"Seventy": 70,
+	"Eighty": 80,
+	"Ninety": 90,
+}
+_UNITS = {
+	"one": 1,
+	"two": 2,
+	"three": 3,
+	"four": 4,
+	"five": 5,
+	"six": 6,
+	"seven": 7,
+	"eight": 8,
+	"nine": 9,
+}
+"""The number words the sentence uses, so the count is read rather than pattern-matched.
+
+A regex for a run of digits would not match the prose as written, and rewriting the
+sentence into digits to make it matchable would be changing the document to suit the
+check.
+"""
+
+
+def _word_value(word: str) -> int:
+	"""``"Fifty-two"`` → 52, ``"Forty"`` → 40. Hyphenated tens and units only."""
+	head, _, tail = word.partition("-")
+	value = _WORDS.get(head)
+	assert value is not None, f"{word!r} is not a number word this check can read"
+	if not tail:
+		return value
+	assert tail in _UNITS, f"{word!r} has a unit this check cannot read"
+	return value + _UNITS[tail]
+
+
+def _adr_index_rows(text: str) -> list[tuple[str, str]]:
+	"""``(number, filename)`` for every row of the ADR **index** table.
+
+	Scoped to the ``## Index`` section, because the file carries a **second** table of
+	ADR rows further down (the records that resolve no open decision). A scan over the
+	whole file reads both and reports 124 rows for 72 records, and the repeats would make
+	the uniqueness check fail on a document that is correct. The index is the table that
+	is meant to be the complete set, so it is the one read.
+	"""
+	head = text.index("\n## Index")
+	tail = text.index("\n## ", head + 1)
+	rows: list[tuple[str, str]] = []
+	for line in text[head:tail].splitlines():
+		match = _ADR_ROW.match(line)
+		if match is not None:
+			rows.append((match.group(1), match.group(2)))
+	return rows
+
+
+class TestTheAdrIndexIsTheSetOfRecords:
+	"""The ADR index lists every record and the prose count is the one that ran.
+
+	The count in ``docs/adr/README.md`` had drifted: the prose said forty-nine records
+	while the table it introduces had fifty-one, because two rows were added without the
+	sentence moving. Nothing failed, and the sentence is where a reader takes the size of
+	the decision log from. The roadmap file had the same defect and ADR-0065 fixed it
+	there; this is the same rule one document over.
+
+	The index and the directory are checked against each other in both directions,
+	because either alone is satisfied by a different mistake: a file with no row is a
+	decision nobody can find, and a row with no file is a link that 404s.
+	"""
+
+	def test_every_record_has_a_row_and_every_row_has_a_record(self) -> None:
+		on_disk = {name for name in (p.name for p in ADR_DIR.iterdir()) if _ADR_FILE.match(name)}
+		assert on_disk, "no ADR files found; the directory or the naming convention moved"
+
+		rows = _adr_index_rows(ADR_INDEX.read_text(encoding="utf-8"))
+		assert rows, "the ADR index has no rows in the documented shape"
+		listed = {name for _number, name in rows}
+
+		missing = sorted(on_disk - listed)
+		assert not missing, (
+			f"{missing} exist in docs/adr/ and no index row names them, so a decision "
+			"recorded here cannot be found by reading the index"
+		)
+		dangling = sorted(listed - on_disk)
+		assert not dangling, f"the index names {dangling}, which no file in docs/adr/ provides"
+
+		numbers = [number for number, _ in rows]
+		assert len(set(numbers)) == len(numbers), f"the index lists a number twice: {numbers}"
+
+	def test_the_stated_count_of_non_resolution_records_is_the_table(self) -> None:
+		text = ADR_INDEX.read_text(encoding="utf-8")
+		stated = _NON_RESOLUTION_COUNT.search(text)
+		assert stated is not None, (
+			"the sentence introducing the non-resolution table no longer states a count, "
+			"so nothing can be checked against the table it introduces"
+		)
+		expected = _word_value(stated.group(1))
+
+		head = text.index(stated.group(0))
+		rows = [line for line in text[head:].splitlines() if line.startswith("| [00")]
+		assert rows, "the non-resolution table is absent or reshaped"
+		assert expected == len(rows), (
+			f"the sentence says {expected} non-resolution records and the table beneath it "
+			f"has {len(rows)}. The number is read off the table, so move it when a row is added."
+		)

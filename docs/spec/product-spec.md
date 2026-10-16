@@ -2221,6 +2221,70 @@ therefore genuinely unknown, and R14 is the risk that it is poor. Any plan that
 commits to Mode G before M0 item 6 returns is a plan built on an untested
 assumption.
 
+### 18.6 Tiering and spend attribution, and the envelope dimension that is not a cap
+
+**FR-132's two facts belong to two parties, and the split is the design.** SoFact owns
+**which phases need depth** — that is a property of the pipeline, and it is
+`TIER_PHASES` (`deep`: P3 decomposition, P4 contract, P6 failure diagnosis; `cheap`: P5
+module builds, P7 integration) plus `STEP_PHASE`, which maps every `PlanStepKind` to the
+phase it runs in and **asserts** rather than defaults when a kind has no assignment,
+because a new step kind silently landing in the cheap tier is the economical default
+becoming an unexamined one. **The deployment owns which model sits in each tier** — that
+is a property of a machine, a budget and a licence, and it is a JSON table read by
+`load_model_tiers`, in `HarnessSpec`'s shape and for its reason. `ModelTier` carries
+`name`, `model` and **`rationale`**, each refused when blank: a tier that names no model
+is a configuration error, and a tier that gives no reason is one nobody can review.
+
+**The precedence is stated and the source is carried with the answer.** `resolve_model`
+returns `(model, source)` over `--model` → `tier:<name>` → `SOFACT_MODEL` →
+`DEFAULT_MODEL`. The source is the half that makes the choice checkable after the fact,
+and `DispatchRecord.model_source` records it on every row. A phase that SoFact assigns
+no depth (`phase_tier` returns `None`) falls through to the operator's **named** single
+model and reports `SOFACT_MODEL` — never silently to another tier's model, because a
+phase quietly running the cheap tier's model is a spend decision nobody made. A
+capability probe resolves no tier at all and records `model_source=None`: the probe names
+a model to vary **one** slot, so a tier applied there would make the two arms differ in
+two things and the measured difference would not be attributable to either.
+
+**FR-133's phase key is derived, not stored, and the fold refuses rather than guesses.**
+`DispatchRecord` carries `step_id` and not the step's kind, so `measure_spend` reads the
+plan and raises — naming the dispatch and the step — when a dispatch names a step the
+plan does not hold. Guessing a phase there would attribute spend to a phase it never ran
+in, which is worse than an empty cell. The **module** key is `ModuleCheckout.module`
+(FR-100), and a dispatch with no module (a bootstrap step, or one spanning two) is
+counted in `unattributed` rather than dropped, so `by_module` plus `unattributed` equals
+the phase total and the two tables are one fold rather than two summaries that can drift.
+
+**`None` is unmeasured, and the report says so.** `tokens_observed` is `int | None`
+(NFR-024), so `SpendAttribution.tokens` sums what reported and `unmeasured_tokens` counts
+what did not; `tokens_measured` and `tokens_complete` say whether the sum is exact and
+`tokens_per_dispatch` is `None` unless it is. `sofact spend` prints *a floor* beside a
+partial sum rather than a number an operator would read as the whole.
+
+**The §1.3 dimension that is not a cap, which is this unit's own finding.**
+`DeliveryEnvelope` has **no token dimension** — §1.3 states none — so `SpendReport`
+carries `token_dimension = None` and a `token_envelope_note` saying the envelope cannot
+bound a quantity it does not state, rather than inventing a bound to have something to
+compare against. The wall-clock dimension it *does* have is a **target range (2–10
+days), not a ceiling**, and the first version of the comparison was a boolean that
+conflated "faster than the floor" with "over the ceiling". §1.4 wants small deliveries
+buildable, so a run under the floor is expected and is **not an overspend** — the
+inverse reading would report every short run as an envelope failure and train an operator
+to ignore the column. `wall_clock_measurement` therefore returns the
+`EnvelopeMeasurement` with a `detail` that names the direction, and
+`wall_clock_over_envelope` is `True` only above the ceiling; the verb exits non-zero on
+that and on an empty run.
+
+**What the tier table cannot do.** It cannot make a harness honour the model it is
+given. `{model}` is a slot in the spec's argv and a spec may simply not use it, in which
+case the child runs whatever the harness defaults to while `DispatchRecord.model` names
+the tier's model — the record would be true about the decision and false about the
+session. FR-147's `MODEL_RESOLVED` probe is the instrument for that, and it is the
+harness's *acceptance* of the identifier plus a readable session record that it observes;
+nothing in this build reads the serving model off the record, so a harness that accepted
+the tag and served another one is not detectable here. The config table states the
+decision; it does not witness it.
+
 ---
 
 ## 19. Business model
@@ -2472,6 +2536,7 @@ manufactured oracles depend on it.
 | §8.1 delegation vs apparatus cost | [S08] [S10] | Strong for the costs of building the loop; [S08]'s phrase "harness of harness" means *layered harness for durability*, **not** orchestration of many harnesses — the term is reused here with a different meaning |
 | §18.4 Mode G harness evidence gap | [S04] [S05] | Medium — the cited figures are Mode M settings and do **not** transfer |
 | §18.5 FR-168–FR-174 front door | — | **None. Designed here.** The transcriber and notifier are declared argv templates with no shipped entry, so nothing in this section rests on a source; FR-173's defect is argued from this tree's own `assess`, and FR-170's "no oracle compares two systems" is a statement about O1–O8 rather than a citation |
+| §18.6 FR-132–FR-133 tiering and spend attribution | — | **None. Designed here.** The tier assignment is this pipeline's own shape and the envelope comparison is read off §1.3, which is a first-principles estimate in this document rather than a citation; the range-versus-cap reading of `wall_clock_days` is this tree's own `DimensionBound` semantics |
 | §9.2 oracle manufacturing | [S01] [S15] [S07] | Medium — novel; ranks proposed by this spec |
 | §9.4 O8 integration oracle | [S07] [S09] | Weak — argued |
 | §10 integration is where systems fail | [S09] | Weak — conventional wisdom, not evidenced here |

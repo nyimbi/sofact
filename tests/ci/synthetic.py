@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from conftest import answer_everything
 from sofact._uuid7 import uuid7str
 from sofact.harness import HarnessSpec
 from sofact.service import FactoryService
+from sofact.tiers import ModelTier
 from sofact.views import (
 	Assumption,
 	Contract,
@@ -675,6 +677,7 @@ def synthetic_service(
 	*,
 	name: str = "synthetic",
 	envelope: DeliveryEnvelope | None = None,
+	model_tiers: Mapping[str, ModelTier] | None = None,
 ) -> FactoryService:
 	"""A service whose only configured harness is the shared real script.
 
@@ -682,9 +685,19 @@ def synthetic_service(
 	§1.3's numbers: NFR-025 makes the envelope configuration, and a fixture that
 	silently adopted the defaults would make every test in the suite a test of a
 	configured envelope while claiming to test the unconfigured path.
+
+	``model_tiers`` is the same kind of seam for FR-132: ``None`` is a deployment
+	that has configured no tiers, which is a different state from one that
+	configured a tier and left it empty.
 	"""
 	spec = base_spec(tmp_path, mode, name=name)
-	return FactoryService(home=home, llm=None, specs={name: spec}, envelope=envelope)
+	return FactoryService(
+		home=home,
+		llm=None,
+		specs={name: spec},
+		envelope=envelope,
+		model_tiers=model_tiers,
+	)
 
 
 async def elicitation_to_contract(
@@ -821,9 +834,10 @@ async def plan_and_service(
 	*,
 	commands: str | None = None,
 	envelope: DeliveryEnvelope | None = None,
+	model_tiers: Mapping[str, ModelTier] | None = None,
 ) -> tuple[FactoryService, GoalPlan]:
 	"""A probed service plus its compiled plan. Returns ``(service, plan)``."""
-	registered = synthetic_service(home, tmp_path, mode, envelope=envelope)
+	registered = synthetic_service(home, tmp_path, mode, envelope=envelope, model_tiers=model_tiers)
 	await registered.probe_harness(None)
 	_, contract_id = await gated_contract(registered, commands=commands)
 	return registered, await registered.compile_plan(contract_id)

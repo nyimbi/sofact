@@ -222,9 +222,7 @@ def load_transcriber_specs(path: Path) -> dict[str, TranscriberSpec]:
 	return specs
 
 
-def transcriber_spec_for(
-	name: str | None, specs: Mapping[str, TranscriberSpec]
-) -> TranscriberSpec:
+def transcriber_spec_for(name: str | None, specs: Mapping[str, TranscriberSpec]) -> TranscriberSpec:
 	"""Resolve one transcriber by name, refusing an unknown one by name.
 
 	The refusal lists what *is* configured, because "unknown transcriber" is only

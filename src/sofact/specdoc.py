@@ -216,8 +216,7 @@ def _annotation_lines(
 	for verdict in annotation.research:
 		evidence = ", ".join(verdict.source_ids) or "none"
 		lines.append(
-			f"  - research on `{verdict.clause_id}`: {verdict.verdict.value} "
-			f"(evidence: {evidence})"
+			f"  - research on `{verdict.clause_id}`: {verdict.verdict.value} (evidence: {evidence})"
 		)
 	if annotation.exceeds_claim_ids:
 		lines.append(
@@ -287,9 +286,7 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 	if verdicts:
 		for verdict in verdicts.values():
 			evidence = ", ".join(verdict.source_ids) or "none"
-			lines.append(
-				f"- `{verdict.clause_id}`: {verdict.verdict.value} (evidence: {evidence})"
-			)
+			lines.append(f"- `{verdict.clause_id}`: {verdict.verdict.value} (evidence: {evidence})")
 	else:
 		lines.append(
 			"No research verdict is recorded for any clause this specification traces to. "
@@ -328,13 +325,9 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 		for claim in document.exceeds:
 			lines.append(f"- `{claim.id}` {claim.capability}")
 			lines.append(f"  - baseline: {claim.baseline}")
-			lines.append(
-				f"  - baseline evidence: {', '.join(claim.baseline_source_ids)}"
-			)
+			lines.append(f"  - baseline evidence: {', '.join(claim.baseline_source_ids)}")
 			lines.append(f"  - rationale: {claim.rationale}")
-			lines.append(
-				f"  - measured margin: unmeasured (declared by {claim.declared_by!r})"
-			)
+			lines.append(f"  - measured margin: unmeasured (declared by {claim.declared_by!r})")
 	else:
 		lines.append("No capability is declared to exceed another system's.")
 
@@ -351,18 +344,14 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 		lines.append("")
 		for annotation in unattested:
 			lines.append(f"- {UNATTESTED_MARKER}")
-			lines.append(
-				f"  - `{annotation.requirement_id}` {annotation.requirement.statement}"
-			)
+			lines.append(f"  - `{annotation.requirement_id}` {annotation.requirement.statement}")
 			for answer in annotation.unattested_answers:
 				lines.append(
 					f"  - proposed by {answer.answered_by!r} as the "
 					f"{answer.dimension.value} answer `{answer.answer_id}`"
 				)
 	else:
-		lines.append(
-			"Every requirement descends from an answer a person gave or confirmed."
-		)
+		lines.append("Every requirement descends from an answer a person gave or confirmed.")
 
 	lines += ["", "## Assumptions", ""]
 	lines += _assumption_lines(document)
@@ -393,9 +382,7 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 		)
 
 	lines += ["", "## Machine checks", ""]
-	lines.append(
-		f"- Rendered from {len(document.requirements)} requirement annotation(s)."
-	)
+	lines.append(f"- Rendered from {len(document.requirements)} requirement annotation(s).")
 	lines.append(
 		f"- Unattested: {len(unattested)} requirement(s) "
 		f"({len(unattested)} of {len(document.requirements)})."

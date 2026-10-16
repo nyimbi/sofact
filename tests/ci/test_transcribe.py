@@ -144,7 +144,9 @@ def test_a_bare_table_and_a_wrapped_one_both_load(tmp_path: Path) -> None:
 	bare = tmp_path / "bare.json"
 	bare.write_text('{"w": {"argv": ["whisper", "{audio}"]}}', encoding="utf-8")
 	wrapped = tmp_path / "wrapped.json"
-	wrapped.write_text('{"transcribers": {"w": {"argv": ["whisper", "{audio}"]}}}', encoding="utf-8")
+	wrapped.write_text(
+		'{"transcribers": {"w": {"argv": ["whisper", "{audio}"]}}}', encoding="utf-8"
+	)
 	assert set(load_transcriber_specs(bare)) == {"w"}
 	assert set(load_transcriber_specs(wrapped)) == {"w"}
 

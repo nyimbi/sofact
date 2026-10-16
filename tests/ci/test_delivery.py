@@ -1671,7 +1671,9 @@ class TestAnExceedanceIsDeclaredAndNeverVerified:
 		contract = one_clause_contract("the ledger records entries", command="true")
 		check = self.check_for(self.a_report_with(self.a_claim(contract)))
 
-		assert check.passed, "refusing a delivery for a property no oracle observes would refuse all"
+		assert check.passed, (
+			"refusing a delivery for a property no oracle observes would refuse all"
+		)
 		assert "0 were verified by an oracle" in check.detail
 		assert "sub-second reconciliation" in check.detail
 		assert "Rival Ledger Cloud" in check.detail

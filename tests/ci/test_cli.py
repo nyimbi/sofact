@@ -2910,7 +2910,7 @@ class TestTheAuthorshipVerb:
 # FR-174: the search verb
 # --------------------------------------------------------------------------- #
 
-SEARCH_PROVIDER = '''\
+SEARCH_PROVIDER = """\
 import json, sys
 from pathlib import Path
 
@@ -2924,7 +2924,7 @@ else:
 		{"title": f"About {query}", "url": "https://example.test/one", "content": "a snippet"},
 	]}
 (workspace / "results.json").write_text(json.dumps(payload))
-'''
+"""
 
 
 class TestTheSearchVerb:
@@ -2934,9 +2934,7 @@ class TestTheSearchVerb:
 	what is under test is the configuration seam itself rather than a Python-side stub.
 	"""
 
-	def _configure_search(
-		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
-	) -> None:
+	def _configure_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
 		script = tmp_path / "provider.py"
 		script.write_text(SEARCH_PROVIDER, encoding="utf-8")
 		table = tmp_path / "searchers.json"
@@ -3024,7 +3022,7 @@ class TestTheSearchVerb:
 # FR-168, FR-170, FR-171, FR-172: the front-door verbs
 # --------------------------------------------------------------------------- #
 
-TRANSCRIBER = '''\
+TRANSCRIBER = """\
 import sys
 from pathlib import Path
 
@@ -3033,13 +3031,13 @@ if mode == "crash":
 	sys.exit(3)
 text = "" if mode == "empty" else "A reminder service that shows scheduled reminders."
 (workspace / "transcript.txt").write_text(text)
-'''
+"""
 
-NOTIFIER = '''\
+NOTIFIER = """\
 import sys
 
 sys.exit(0 if sys.argv[1] == "ok" else 7)
-'''
+"""
 """A notifier whose only job is its exit code: ``delivered`` is derived from it."""
 
 
@@ -3171,11 +3169,17 @@ class TestTheFrontDoorVerbs:
 		result = RUNNER.invoke(
 			app,
 			[
-				"--home", str(home), "exceed",
-				"--capability", "sub-second reconciliation",
-				"--baseline", "Rival Cloud",
-				"--rationale", "their window is hourly",
-				"--clause-id", "01a14000-0000-7000-8000-000000000000",
+				"--home",
+				str(home),
+				"exceed",
+				"--capability",
+				"sub-second reconciliation",
+				"--baseline",
+				"Rival Cloud",
+				"--rationale",
+				"their window is hourly",
+				"--clause-id",
+				"01a14000-0000-7000-8000-000000000000",
 			],
 		)
 		assert result.exit_code == 1, result.output
@@ -3187,11 +3191,17 @@ class TestTheFrontDoorVerbs:
 		result = RUNNER.invoke(
 			app,
 			[
-				"--home", str(home), "exceed",
-				"--capability", "sub-second reconciliation",
-				"--baseline", "Rival Cloud",
-				"--rationale", "their window is hourly",
-				"--source-id", "01a14000-0000-7000-8000-000000000000",
+				"--home",
+				str(home),
+				"exceed",
+				"--capability",
+				"sub-second reconciliation",
+				"--baseline",
+				"Rival Cloud",
+				"--rationale",
+				"their window is hourly",
+				"--source-id",
+				"01a14000-0000-7000-8000-000000000000",
 			],
 		)
 		assert result.exit_code == 1, result.output
@@ -3212,12 +3222,16 @@ class TestTheFrontDoorVerbs:
 	) -> None:
 		configure(tmp_path, monkeypatch)
 		conversation(home)
-		assert RUNNER.invoke(
-			app, ["--home", str(home), "contract", "--command", "true"]
-		).exit_code == 0
-		assert RUNNER.invoke(
-			app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS]
-		).exit_code == 0
+		assert (
+			RUNNER.invoke(app, ["--home", str(home), "contract", "--command", "true"]).exit_code
+			== 0
+		)
+		assert (
+			RUNNER.invoke(
+				app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS]
+			).exit_code
+			== 0
+		)
 		root = tmp_path / "out"
 		result = RUNNER.invoke(app, ["--home", str(home), "spec-doc", "--root", str(root)])
 		assert result.exit_code == 0, result.output
@@ -3248,9 +3262,13 @@ class TestTheFrontDoorVerbs:
 			app,
 			["--home", str(home), "notify", "--subject", "s", "--body", "b"],
 		)
-		assert result.exit_code == 1, "a script cannot see the prose, so the exit code must carry it"
+		assert result.exit_code == 1, (
+			"a script cannot see the prose, so the exit code must carry it"
+		)
 		assert "NOT delivered (exit 7)" in result.output
-		assert "no process ran" not in result.output, "a process did run; the prose must not say otherwise"
+		assert "no process ran" not in result.output, (
+			"a process did run; the prose must not say otherwise"
+		)
 		assert "Traceback" not in result.output
 
 	# build ----------------------------------------------------------------- #

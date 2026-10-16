@@ -55,7 +55,9 @@ _SYSTEM_KEYS: Final = frozenset(
 	{"id", "name", "vendor", "url", "source_ids", "posture"},
 )
 _CAPABILITY_KEYS: Final = frozenset({"id", "system_id", "statement", "kind", "source_ids"})
-_DOCUMENT_KEYS: Final = frozenset({"subject", "domain", "selection_criterion", "systems", "capabilities"})
+_DOCUMENT_KEYS: Final = frozenset(
+	{"subject", "domain", "selection_criterion", "systems", "capabilities"}
+)
 
 
 def _object(value: object, *, what: str) -> Mapping[str, Any]:
@@ -133,7 +135,9 @@ def parse_competitors(
 	systems: list[RivalSystem] = []
 	for raw in _mapping_list(document.get("systems"), key="systems"):
 		_unknown_keys(raw, _SYSTEM_KEYS, what="a rival system")
-		posture_text = _text(raw.get("posture"), key="system posture") or SourcePosture.EVIDENCE.value
+		posture_text = (
+			_text(raw.get("posture"), key="system posture") or SourcePosture.EVIDENCE.value
+		)
 		try:
 			posture = SourcePosture(posture_text)
 		except ValueError as exc:

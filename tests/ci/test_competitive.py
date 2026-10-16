@@ -351,7 +351,7 @@ async def test_a_run_that_left_no_scan_is_refused_rather_than_read_as_empty(
 		started_at=now(),
 		ended_at=now(),
 	)
-	with pytest.raises(ValueError, match="left no research-competitors.json"):
+	with pytest.raises(ValueError, match=r"left no research\-competitors\.json"):
 		await service.competitors(record=record)
 
 

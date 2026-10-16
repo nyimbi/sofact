@@ -398,6 +398,37 @@ not list. Run `sofact probe` before dispatching, and read its answer — a refus
 recorded as a measured capability, in the harness's own words, rather than blamed on the
 producer ([ADR-0018](docs/adr/0018-a-refused-model-is-attributed.md)).
 
+### Tiers: depth where it matters, cheapness where it does not
+
+FR-132 splits the decision in two, because the two halves belong to different parties.
+**SoFact owns which phases need depth** — P3 decomposition, P4 contract and P6 failure
+diagnosis get a large model; P5 module builds and P7 integration get a cheap or local one.
+**The deployment owns which model sits in each tier**, as a JSON table:
+
+```json
+{ "deep":  { "model": "qwen3-coder:480b", "rationale": "decomposition is where a wrong split costs the whole build" },
+  "cheap": { "model": "deepseek-v4.1-flash:cloud", "rationale": "module builds are high-volume and shallow" } }
+```
+
+```sh
+export SOFACT_MODEL_TIERS=./tiers.json
+sofact tiers     # the depth assignment, and which model each phase resolves to
+sofact spend     # where the money went, per phase and per module
+```
+
+Resolution is `--model` → `tier:<name>` → `SOFACT_MODEL` → the built-in default, and the
+**source travels with the answer**: every `DispatchRecord` says which rule chose its model,
+so a row cannot quietly claim a tier it did not run under. A phase SoFact assigns no depth
+falls through to your named single model and says `SOFACT_MODEL` — never silently to another
+tier's model, because a phase running the cheap tier's model is a spend decision nobody made.
+
+**`spend` reports against §1.3 and says where it cannot.** There is no token dimension in
+the envelope, so the report says so rather than inventing a bound. The wall-clock dimension
+it does have is a **target range (2–10 days), not a cap** — a run under the floor is reported
+as *below* the envelope and explicitly not an overspend, and only a run over the ceiling
+exits non-zero. Tokens a harness did not report are counted as *unmeasured* and the sum is
+printed as a floor (NFR-024), never as a total.
+
 ## What this does not do
 
 A README that only lists capabilities is a README you have to verify yourself. These are
@@ -425,7 +456,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1881 tests
+uv run pytest -vxs tests/ci          # 1937 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

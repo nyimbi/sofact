@@ -29,17 +29,46 @@ from synthetic import plan_and_service
 from typer.testing import CliRunner, Result
 
 from sofact.cli import app
-from sofact.telemetry import measure_attempts
+from sofact.telemetry import measure_attempts, measure_spend
 from sofact.views import (
 	AttemptTelemetry,
 	AttemptTelemetryReport,
+	DeliveryEnvelope,
 	DispatchMode,
 	DispatchRecord,
+	GoalPlan,
+	GoalSpec,
+	GoalStep,
+	GoalStyle,
+	Phase,
+	PlanStepKind,
 	RepairAttempt,
 	RepairOutcome,
+	SpendAttribution,
 	StepBudget,
 	StepOutcome,
 )
+
+PLAN_ID = "01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f0"
+STEP_ID = "01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f2"
+
+
+def a_goal() -> GoalSpec:
+	"""A minimal goal, for the plan a spend fold is measured against.
+
+	The six parts are restated here rather than imported from another suite for this
+	module's own reason: no suite here imports across test modules, and a cross-module
+	import would make this file's failure depend on that one's collection order.
+	"""
+	return GoalSpec(
+		outcome="Implement the reminder store.",
+		verification_surface=("the oracle exits 0",),
+		constraints=("no new dependency",),
+		boundaries=("the module directory only",),
+		iteration_policy="one attempt, then stop",
+		blocked_stop_condition="stop and report if the interface is missing",
+	)
+
 
 REPAIR_ORACLE = "test -f repair-marker.txt"
 """The refuted-until-repaired oracle, as ``test_service`` defines it.
@@ -64,14 +93,16 @@ def _dispatch(
 	*,
 	tokens: int | None,
 	wall_clock: float = 3.5,
+	step_id: str = STEP_ID,
+	plan_id: str = PLAN_ID,
 ) -> DispatchRecord:
 	"""A dispatch record whose harness reported ``tokens``, or reported nothing."""
 	at = datetime(2026, 10, 14, tzinfo=UTC)
 	return DispatchRecord(
 		id=dispatch_id,
-		plan_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f0",
+		plan_id=plan_id,
 		goal_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f1",
-		step_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f2",
+		step_id=step_id,
 		step_ordinal=1,
 		harness="synthetic",
 		mode=DispatchMode.SINGLE_SHOT,
@@ -405,3 +436,231 @@ class TestTheCliReportsIt:
 
 		assert result.exit_code == 1, result.output
 		assert "absence of a measurement" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# FR-133 — spend attributed per phase and per module
+# --------------------------------------------------------------------------- #
+
+
+class TestSpendIsAttributedPerPhaseAndPerModule:
+	"""FR-133's two keys, over one run's real dispatches.
+
+	``DispatchRecord`` carries a step id and no phase, and a ``GoalStep`` carries a kind
+	and no phase — P3 produced the decomposition and P5 produced the plan, and the two
+	never met. The phase is therefore *derived* from the step kind
+	(:func:`sofact.tiers.step_phase`) rather than stored, and the module comes from the
+	checkout, which is where FR-100 already records it. This class is what asserts that
+	join holds on real rows.
+	"""
+
+	async def test_both_keys_account_for_every_dispatch(self, home: Path, tmp_path: Path) -> None:
+		"""The two buckets are the same rows totalled twice, so they must sum alike.
+
+		That equality is what makes this a fold rather than two unrelated summaries: the
+		module buckets plus the unattributed count must equal the phase buckets, or a row
+		went into one key and not the other.
+		"""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		assert report.by_phase, "a dispatched plan must attribute spend to at least one phase"
+		per_module = sum(bucket.dispatches for bucket in report.by_module)
+		assert per_module + report.unattributed == report.total_dispatches
+
+	async def test_the_phase_is_a_pipeline_phase_not_a_step_kind(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A bucket keyed ``operation`` would be a step kind wearing a phase's name."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		keys = {bucket.key for bucket in report.by_phase}
+		assert keys, "the report must have at least one phase bucket"
+		assert keys <= {phase.value for phase in Phase}
+
+	async def test_the_module_buckets_name_modules_of_the_approved_decomposition(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A module name the decomposition does not hold would be an invented key."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		state = await service.state()
+		decomposition = state.latest_decomposition(plan.contract_id)
+		assert decomposition is not None
+		report = await service.spend_report(plan.id)
+
+		named = {module.name for module in decomposition.modules}
+		for bucket in report.by_module:
+			assert bucket.key in named
+
+	async def test_a_step_no_module_owns_is_counted_rather_than_dropped(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""A bootstrap step covers no clause (FR-100), and its spend is still spend."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		unowned = [step for step in plan.steps if step.kind is PlanStepKind.BOOTSTRAP]
+		if not unowned:
+			pytest.skip("this plan has no module-less step to check")
+		assert report.unattributed >= 1
+
+	async def test_the_same_log_folds_to_the_same_attribution(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Reproducible from the log alone, which is what makes it evidence."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+
+		first = await service.spend_report(plan.id)
+		second = await service.spend_report(plan.id)
+
+		assert first.total_dispatches == second.total_dispatches
+		assert first.total_tokens == second.total_tokens
+		assert first.by_module == second.by_module
+
+
+class TestTheAttributionSaysWhatItLeftOut:
+	"""NFR-024 applied to a bucket: an unmeasured dispatch is not a cheap one."""
+
+	def _plan(self) -> GoalPlan:
+		step = GoalStep(
+			id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f2",
+			ordinal=0,
+			kind=PlanStepKind.OPERATION,
+			goal=a_goal(),
+			goal_hash="0" * 64,
+			budget=StepBudget(max_wall_clock_seconds=60.0, max_continuations=0, max_attempts=1),
+			exit_evidence=("the oracle passes",),
+		)
+		return GoalPlan(
+			id=PLAN_ID,
+			goal_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f1",
+			contract_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f3",
+			contract_hash="1" * 64,
+			oracle_set_hash="2" * 64,
+			goal_style=GoalStyle.LABELLED,
+			created_at=datetime(2026, 10, 14, tzinfo=UTC),
+			steps=(step,),
+		)
+
+	def test_a_bucket_with_an_unmeasured_dispatch_is_not_fully_measured(self) -> None:
+		"""``tokens=0`` with ``unmeasured_tokens=1`` is a different statement from zero."""
+		report = measure_spend(plan=self._plan(), dispatches=(_dispatch(STEP_ID, tokens=None),))
+		bucket = report.by_phase[0]
+		assert bucket.tokens == 0
+		assert bucket.unmeasured_tokens == 1
+		assert not bucket.tokens_measured
+		assert not report.tokens_complete
+
+	def test_a_mean_is_refused_when_the_bucket_is_not_fully_measured(self) -> None:
+		"""A mean whose denominator silently drops the unmeasured rows is the flattering one."""
+		report = measure_spend(plan=self._plan(), dispatches=(_dispatch(STEP_ID, tokens=None),))
+		assert report.by_phase[0].tokens_per_dispatch is None
+
+	def test_a_fully_measured_bucket_reports_its_mean(self) -> None:
+		report = measure_spend(
+			plan=self._plan(),
+			dispatches=(_dispatch(STEP_ID, tokens=100, wall_clock=2.0),),
+		)
+		bucket = report.by_phase[0]
+		assert bucket.tokens_measured
+		assert bucket.tokens_per_dispatch == 100.0
+
+	def test_a_vacuous_run_claims_nothing(self) -> None:
+		"""A plan with no dispatch is the absence of a measurement, not a cheap build."""
+		report = measure_spend(plan=self._plan(), dispatches=())
+		assert report.discharged == ()
+		assert report.total_dispatches == 0
+
+	def test_a_dispatch_of_another_plan_is_not_folded_in(self) -> None:
+		"""The scope is the plan, so one run's spend cannot hide inside another's."""
+		other = _dispatch(STEP_ID, tokens=999).model_copy(
+			update={"plan_id": "01a136fc-097a-7aa6-aeb7-6e4f5e5ce2ff"}
+		)
+		report = measure_spend(plan=self._plan(), dispatches=(other,))
+		assert report.total_dispatches == 0
+
+	def test_a_dispatch_naming_a_step_the_plan_lacks_is_refused(self) -> None:
+		"""A stranger's row must not be attributed to a default phase."""
+		orphan = _dispatch(
+			"01a136fc-097a-7aa6-aeb7-6e4f5e5ce2ee",
+			tokens=10,
+			step_id="01a136fc-097a-7aa6-aeb7-6e4f5e5ce2e0",
+		)
+		with pytest.raises(ValueError, match="does not hold"):
+			measure_spend(plan=self._plan(), dispatches=(orphan,))
+
+
+class TestTheEnvelopeComparisonIsMadeWhereThereIsADimension:
+	"""FR-133 says "against the §1.3 envelope", and §1.3 bounds no tokens (NFR-025)."""
+
+	async def test_tokens_are_attributed_but_compared_to_no_dimension(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""``token_dimension`` is ``None`` *with a reason*, not a field nobody filled in."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		assert report.token_dimension is None
+		assert "none of them is tokens" in report.token_envelope_note
+		assert report.total_tokens >= 0
+
+	async def test_wall_clock_is_measured_against_the_envelope(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""§1.3's ``wall_clock_days`` is a *range*, so a fast run is below its floor.
+
+		This is the finding the boolean would have hidden: a synthetic run takes seconds
+		and §1.3 targets 2-10 days, so ``within`` is ``False`` — correctly, because the
+		run did not hit the target — while the run is nowhere near an *overspend*. The
+		measurement carries the direction; :attr:`wall_clock_over_envelope` answers the
+		overspend question, which is the one FR-133's rationale is about.
+		"""
+		service, plan = await plan_and_service(
+			home, tmp_path, "complete", envelope=DeliveryEnvelope()
+		)
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		measurement = report.wall_clock_measurement
+		assert measurement is not None
+		assert measurement.actual is not None and measurement.actual < 1.0
+		assert measurement.within is False, "seconds is below §1.3's 2-day floor"
+		assert report.wall_clock_over_envelope is False, (
+			"under the floor is not an overspend, and reporting it as one would train "
+			"an operator to ignore this column"
+		)
+		assert "below" in measurement.detail
+		assert "not an overspend" in measurement.detail
+
+	async def test_no_envelope_leaves_the_comparison_unmade_rather_than_true(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""Three states, and "nobody set an envelope" is not "the envelope held"."""
+		service, plan = await plan_and_service(home, tmp_path, "complete")
+		await service.dispatch_plan(plan.id)
+		report = await service.spend_report(plan.id)
+
+		assert report.envelope is None
+		assert report.wall_clock_measurement is None
+		assert report.wall_clock_over_envelope is None
+
+
+class TestTheSpendBucketTypeRefusesImpossibleSpend:
+	def test_more_unmeasured_than_dispatches_is_refused(self) -> None:
+		with pytest.raises(ValueError, match="more unmeasured dispatches"):
+			SpendAttribution(key="P5", dispatches=1, unmeasured_tokens=2)
+
+	def test_spend_with_no_dispatch_is_refused(self) -> None:
+		with pytest.raises(ValueError, match="no dispatches but reports spend"):
+			SpendAttribution(key="P5", dispatches=0, tokens=10)
+
+	def test_a_negative_count_is_refused(self) -> None:
+		with pytest.raises(ValueError, match="cannot be negative"):
+			SpendAttribution(key="P5", dispatches=-1)

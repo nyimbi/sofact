@@ -32,15 +32,20 @@ from collections.abc import Sequence
 from datetime import datetime
 
 from sofact._uuid7 import uuid7str
+from sofact.tiers import step_phase
 from sofact.views import (
 	AttemptTelemetry,
 	AttemptTelemetryReport,
+	DeliveryEnvelope,
 	DispatchRecord,
+	GoalPlan,
 	RepairAttempt,
+	SpendAttribution,
+	SpendReport,
 	now,
 )
 
-__all__ = ["measure_attempts"]
+__all__ = ["measure_attempts", "measure_spend"]
 
 
 def measure_attempts(
@@ -108,4 +113,106 @@ def measure_attempts(
 		plan_id=plan_id,
 		rendered_at=rendered_at if rendered_at is not None else now(),
 		attempts=tuple(rows),
+	)
+
+
+def _bucket(
+	key: str,
+	records: Sequence[DispatchRecord],
+) -> SpendAttribution:
+	"""One spend bucket over ``records`` (FR-133).
+
+	``tokens`` sums only what reported and ``unmeasured_tokens`` counts the rest, which is
+	:class:`~sofact.views.AttemptTelemetry`'s rule stated once more rather than a second
+	one: a total that added ``None`` as zero would report a cheap phase where the truth is
+	a phase whose cost nobody observed (NFR-024).
+
+	``models`` is read from ``record.model`` and never from ``argv``. The harness's own
+	command line carries a ``--model`` for some harnesses and not others, so a reader
+	would be parsing a producer's argv to learn something SoFact resolved itself — and for
+	the harnesses that do not take the flag, the model would read as absent.
+	"""
+	tokens = sum(r.tokens_observed for r in records if r.tokens_observed is not None)
+	unmeasured = sum(1 for r in records if r.tokens_observed is None)
+	models = sorted({r.model for r in records if r.model})
+	return SpendAttribution(
+		key=key,
+		dispatches=len(records),
+		wall_clock_seconds=sum(r.wall_clock_seconds for r in records),
+		tokens=tokens,
+		unmeasured_tokens=unmeasured,
+		models=tuple(models),
+	)
+
+
+def measure_spend(
+	*,
+	plan: GoalPlan,
+	dispatches: Sequence[DispatchRecord],
+	envelope: DeliveryEnvelope | None = None,
+	rendered_at: datetime | None = None,
+) -> SpendReport:
+	"""Fold a plan's dispatches into FR-133's per-phase and per-module attribution.
+
+	``plan`` is the plan the spend is attributed against, and it is required rather than
+	optional: the phase of a dispatch is a property of the *step* it ran, and a dispatch
+	row carries ``step_id`` without the step's kind. Handing this fold only the dispatches
+	would leave it unable to name a phase at all — and the tempting fix, a ``phase`` field
+	on :class:`~sofact.views.DispatchRecord`, would be a second place for one fact to be
+	right, written at dispatch time from the same join this function already makes.
+
+	``dispatches`` is filtered to ``plan.id`` here rather than by the caller, for
+	:func:`measure_attempts`'s reason: a run handed the whole ledger must not report
+	another plan's spend.
+
+	**The phase comes from the step kind**, through :func:`~sofact.tiers.step_phase`,
+	because a plan step carries no phase — P3 produced the decomposition and P5 produced
+	the plan, and the two never met. That join is the whole of FR-133's first half.
+
+	**The module comes from the checkout**, which is where FR-100 already records it.
+	``None`` there is a real state — a bootstrap step covers no clause and a step spanning
+	two modules belongs to neither — and those dispatches are counted in
+	:attr:`~sofact.views.SpendReport.unattributed` rather than dropped, so the module
+	buckets plus that count account for every row the phase buckets counted.
+
+	**A dispatch whose step is not in the plan is a refusal, not a default.** The plan is
+	the authority on what its steps are, so a row naming a step it does not hold is a torn
+	read or a cross-plan leak, and attributing it to some default phase would put a
+	stranger's spend in this plan's totals.
+	"""
+	kinds = {step.id: step.kind for step in plan.steps}
+	mine: list[DispatchRecord] = []
+	by_phase: dict[str, list[DispatchRecord]] = {}
+	by_module: dict[str, list[DispatchRecord]] = {}
+	unattributed = 0
+	for record in dispatches:
+		if record.plan_id != plan.id:
+			continue
+		kind = kinds.get(record.step_id)
+		if kind is None:
+			raise ValueError(
+				f"dispatch {record.id} names step {record.step_id}, which plan {plan.id} "
+				"does not hold; the phase of this spend cannot be derived, and guessing "
+				"one would attribute it to a phase it never ran in (FR-133)"
+			)
+		mine.append(record)
+		by_phase.setdefault(step_phase(kind).value, []).append(record)
+		module = record.checkout.module if record.checkout is not None else None
+		if module:
+			by_module.setdefault(module, []).append(record)
+		else:
+			unattributed += 1
+
+	return SpendReport(
+		id=uuid7str(),
+		plan_id=plan.id,
+		rendered_at=rendered_at if rendered_at is not None else now(),
+		by_phase=tuple(
+			_bucket(key, rows) for key, rows in sorted(by_phase.items(), key=lambda kv: kv[0])
+		),
+		by_module=tuple(
+			_bucket(key, rows) for key, rows in sorted(by_module.items(), key=lambda kv: kv[0])
+		),
+		envelope=envelope,
+		unattributed=unattributed,
 	)

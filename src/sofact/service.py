@@ -30,9 +30,7 @@ from sofact.authorship import (
 from sofact.boundary import TEMP_DIRNAME
 from sofact.boundary_probe import detect_boundary
 from sofact.changecost import measure_change_costs
-from sofact.competitive import LEDGER_COMPETITORS_FILENAME
-from sofact.competitive import competitor_checks
-from sofact.competitive import parse_competitors
+from sofact.competitive import LEDGER_COMPETITORS_FILENAME, competitor_checks, parse_competitors
 from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
@@ -86,11 +84,13 @@ from sofact.manufacture import (
 	place_artefacts,
 )
 from sofact.mutation import measure_strength
-from sofact.notify import NOTIFIERS
-from sofact.notify import ConfiguredNotifierAdapter
-from sofact.notify import NotificationSpec
-from sofact.notify import NotificationRefusal
-from sofact.notify import notifier_spec_for
+from sofact.notify import (
+	NOTIFIERS,
+	ConfiguredNotifierAdapter,
+	NotificationRefusal,
+	NotificationSpec,
+	notifier_spec_for,
+)
 from sofact.planner import (
 	DEFAULT_REPAIR_ATTEMPTS,
 	check_integrity,
@@ -115,21 +115,24 @@ from sofact.search import (
 	scan_checks,
 	searcher_spec_for,
 )
+from sofact.specdoc import PRODUCT_SPEC_FILENAME, render_product_specification
+from sofact.specdoc import annotate as annotate_requirements
 from sofact.specification import approve as record_specification_approval
 from sofact.specification import gate as gate_specification
 from sofact.specification import specify as propose_specification
-from sofact.specdoc import PRODUCT_SPEC_FILENAME
-from sofact.specdoc import annotate as annotate_requirements
-from sofact.specdoc import render_product_specification
 from sofact.state import fold
-from sofact.telemetry import measure_attempts
-from sofact.transcribe import ConfiguredTranscriberAdapter
-from sofact.transcribe import TRANSCRIBERS
-from sofact.transcribe import TranscriberSpec
-from sofact.transcribe import transcriber_spec_for
+from sofact.telemetry import measure_attempts, measure_spend
+from sofact.tiers import ModelTier, resolve_model, step_phase
+from sofact.transcribe import (
+	TRANSCRIBERS,
+	ConfiguredTranscriberAdapter,
+	TranscriberSpec,
+	transcriber_spec_for,
+)
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	COVERING_ORACLE_MAX_RANK,
+	MODEL_ANSWER_PREFIX,
 	PHASE_GATE,
 	PHASE_GATE_INVERSE,
 	PHASE_SEQUENCE,
@@ -187,8 +190,6 @@ from sofact.views import (
 	IntegrityCheck,
 	IntentGraph,
 	LedgerKind,
-	is_uuid7,
-	MODEL_ANSWER_PREFIX,
 	ModuleClass,
 	NonGoal,
 	Notification,
@@ -198,6 +199,7 @@ from sofact.views import (
 	PhaseAdvance,
 	PhaseGate,
 	PhaseStatus,
+	PlanStepKind,
 	PluginComposition,
 	ProductSpecificationDocument,
 	ProjectState,
@@ -214,6 +216,7 @@ from sofact.views import (
 	Specification,
 	SpecificationDraft,
 	SpecificationGate,
+	SpendReport,
 	StepBudget,
 	StepOutcome,
 	SystemCriterion,
@@ -222,6 +225,7 @@ from sofact.views import (
 	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
+	is_uuid7,
 	now,
 )
 from sofact.writing import render_delivery_artifacts
@@ -508,6 +512,7 @@ class FactoryService:
 		searcher: SearcherSpec | None = None,
 		transcriber: TranscriberSpec | None = None,
 		notifier: NotificationSpec | None = None,
+		model_tiers: Mapping[str, ModelTier] | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -605,7 +610,36 @@ class FactoryService:
 		self._searcher_spec = searcher
 		self._transcriber_spec = transcriber
 		self._notifier_spec = notifier
+		self._model_tiers: Mapping[str, ModelTier] = dict(model_tiers or {})
 		self._state: ProjectState | None = None
+
+	def model_tiers(self) -> Mapping[str, ModelTier]:
+		"""The tier table this deployment declared, empty when it declared none (FR-132).
+
+		Empty rather than a built-in default, for :meth:`envelope`'s reason: a factory
+		that invented tier models would be choosing a deployment's hardware for it, and
+		the honest reading of an empty table is that one model runs every phase.
+		"""
+		return self._model_tiers
+
+	def model_for(self, phase: Phase, *, model: str | None = None) -> tuple[str, str]:
+		"""The model ``phase`` runs on here, and which rule chose it (FR-132).
+
+		The one place the precedence lives. Every dispatch reads it rather than
+		re-deriving it, because a second implementation of "which model runs P5" is a
+		second answer, and the ledger would carry both.
+		"""
+		return resolve_model(phase, explicit=model, tiers=self._model_tiers)
+
+	def model_for_step(self, kind: PlanStepKind, *, model: str | None = None) -> tuple[str, str]:
+		"""The model a step of ``kind`` runs on, and which rule chose it (FR-132, FR-133).
+
+		A step carries a :class:`~sofact.views.PlanStepKind` and no phase, so this is where
+		the two meet — :func:`~sofact.tiers.step_phase` does the join and
+		:meth:`model_for` does the precedence. Both live in one place so a dispatch cannot
+		be tiered by one rule and attributed by another.
+		"""
+		return self.model_for(step_phase(kind), model=model)
 
 	def envelope(self) -> DeliveryEnvelope | None:
 		"""The configured §1.3 envelope, or ``None`` when this deployment set none."""
@@ -1437,9 +1471,7 @@ class FactoryService:
 		state = await self.state()
 		attested = state.attested_answer_ids()
 		latest = {a.dimension: a for a in state.answers_for(goal_id)}
-		return tuple(
-			a for a in latest.values() if a.is_model_proposed and a.id not in attested
-		)
+		return tuple(a for a in latest.values() if a.is_model_proposed and a.id not in attested)
 
 	# ------------------------------------------------------------ P2: drafting
 
@@ -1451,7 +1483,9 @@ class FactoryService:
 		that produced it.
 		"""
 		state = await self.state()
-		draft = draft_stems(goal_id, state.answers_for(goal_id), attested=state.attested_answer_ids())
+		draft = draft_stems(
+			goal_id, state.answers_for(goal_id), attested=state.attested_answer_ids()
+		)
 		self._commit(LedgerKind.DRAFT_CREATED, {"draft": draft.model_dump(mode="json")})
 		return draft
 
@@ -2183,6 +2217,8 @@ class FactoryService:
 		workspace: Path | None = None,
 		model: str | None = None,
 		tools: str | None = None,
+		phase: Phase | None = None,
+		step_kind: PlanStepKind | None = None,
 	) -> ConfiguredHarnessAdapter:
 		"""Build the adapter for one harness. Configuration, never a ledger event.
 
@@ -2190,6 +2226,13 @@ class FactoryService:
 		operator's checkout: a factory that wrote agent sessions into whatever
 		directory it happened to be run from would put its own debris in the repository
 		it was asked to build.
+
+		``phase`` or ``step_kind`` selects the model tier (FR-132). Both are optional
+		because most callers are not a phase's dispatch: a capability probe names a model
+		to vary one slot and must run the *same* model in both arms, so it passes neither
+		and gets the operator's model — which is exactly the behaviour every caller had
+		before the tier table existed. A caller that names one gets the tier's model and
+		the record says which rule chose it.
 		"""
 		resolved = self.harness_name(name)
 		spec = harness_spec_for(resolved, self._specs)
@@ -2197,11 +2240,23 @@ class FactoryService:
 		sessions = self.home / "sessions" / resolved
 		sessions.mkdir(parents=True, exist_ok=True)
 		workdir.mkdir(parents=True, exist_ok=True)
+		selected: str | None = model
+		source: str | None = None
+		if step_kind is not None:
+			selected, source = self.model_for_step(step_kind, model=model)
+		elif phase is not None:
+			selected, source = self.model_for(phase, model=model)
+		else:
+			# No phase: the caller is not a phase's dispatch, so the operator's model and
+			# no source. ``model_source=None`` is what the record carries, which keeps a
+			# probe's row from reading as a tiered dispatch it never was.
+			selected = model or os.environ.get("SOFACT_MODEL") or DEFAULT_MODEL
 		return ConfiguredHarnessAdapter(
 			spec,
 			workspace=workdir,
 			session_dir=sessions,
-			model=model or os.environ.get("SOFACT_MODEL") or DEFAULT_MODEL,
+			model=selected,
+			model_source=source,
 			tools=resolve_tools(tools),
 			probe_timeout=DEFAULT_PROBE_TIMEOUT_SECONDS,
 			composition_hash=self.composition_hash(resolved),
@@ -2355,7 +2410,13 @@ class FactoryService:
 		step = plan.step_by_id(step_id)
 		if step is None:
 			raise KeyError(f"plan {plan_id} has no step {step_id}")
-		adapter = self.adapter(name, workspace=workspace, model=model, tools=tools)
+		# FR-132: the model is resolved from the *step's kind*, which is the phase this
+		# dispatch belongs to (FR-133's join). ``--model`` still wins when the operator
+		# named one, so a caller who wants one model for everything passes it and gets
+		# exactly that — the tier table is a default, not an override.
+		adapter = self.adapter(
+			name, workspace=workspace, model=model, tools=tools, step_kind=step.kind
+		)
 		# FR-019: the session runs inside the boundary measured for *this* workspace, and
 		# it is attached here rather than in :meth:`adapter` because the capability probes
 		# go through that factory too — and the sandbox probe's whole instrument is an
@@ -3144,15 +3205,11 @@ class FactoryService:
 			)
 		workdir = self.home / "search" / goal.id / uuid7str()[:8]
 		adapter = SearchAdapter(spec)
-		scan = await adapter.search(
-			authored, workdir=workdir, timeout=timeout, goal_id=goal.id
-		)
+		scan = await adapter.search(authored, workdir=workdir, timeout=timeout, goal_id=goal.id)
 		# The provider name is recorded from the spec that ran, never from the argument,
 		# so a caller that named a provider cannot make the log disagree with the argv.
 		scan = scan.model_copy(update={"provider": resolved})
-		self._commit(
-			LedgerKind.SEARCH_SCAN_RECORDED, {"scan": scan.model_dump(mode="json")}
-		)
+		self._commit(LedgerKind.SEARCH_SCAN_RECORDED, {"scan": scan.model_dump(mode="json")})
 		return scan
 
 	async def current_scan(self) -> SearchScan | None:
@@ -3187,7 +3244,9 @@ class FactoryService:
 
 	def _searchers(self) -> Mapping[str, SearcherSpec]:
 		"""The searcher table this instance may ask (FR-174)."""
-		return {} if self._searcher_spec is None else {self._searcher_spec.name: self._searcher_spec}
+		return (
+			{} if self._searcher_spec is None else {self._searcher_spec.name: self._searcher_spec}
+		)
 
 	def _default_searcher(self) -> SearcherSpec:
 		spec = self._searcher_spec
@@ -3513,9 +3572,7 @@ class FactoryService:
 			goal_id=goal_id,
 			run_id=run_id,
 		)
-		self._commit(
-			LedgerKind.NOTIFICATION_SENT, {"notification": record.model_dump(mode="json")}
-		)
+		self._commit(LedgerKind.NOTIFICATION_SENT, {"notification": record.model_dump(mode="json")})
 		return record
 
 	async def notifications(self, goal_id: str | None = None) -> tuple[Notification, ...]:
@@ -4516,6 +4573,28 @@ class FactoryService:
 			plan_id=plan_id,
 			repairs=state.repairs,
 			dispatches=state.dispatches,
+		)
+
+	# ------------------------------------------- FR-133: spend, per phase and module
+
+	async def spend_report(self, plan_id: str) -> SpendReport:
+		"""Fold one plan's dispatch spend into FR-133's two attributions.
+
+		The plan is read rather than passed in because the *phase* of a dispatch is a
+		property of the step it ran, and a dispatch row carries ``step_id`` without the
+		step's kind. The envelope is read from this deployment's configuration rather than
+		from the caller, for the reason :meth:`envelope` gives: the comparison is against
+		the envelope the operator chose, and a caller supplying one could compare a run
+		against a bound nobody adopted (NFR-025).
+		"""
+		state = await self.state()
+		plan = next((p for p in state.plans if p.id == plan_id), None)
+		if plan is None:
+			raise KeyError(f"no plan {plan_id} in the log")
+		return measure_spend(
+			plan=plan,
+			dispatches=state.dispatches,
+			envelope=self._envelope,
 		)
 
 	# --------------------------------------------------- §20.3 item 6a: goal mode

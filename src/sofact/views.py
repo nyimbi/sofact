@@ -7866,6 +7866,27 @@ class DispatchRecord(View):
 	harness: NonEmptyStr
 	mode: DispatchMode
 	outcome: StepOutcome
+	model: NonEmptyStr | None = None
+	"""The model this session ran on (FR-132), or ``None`` when none was resolved.
+
+	Recorded rather than left in ``argv``. The harness's own command line carries a
+	``--model`` for some harnesses and not others, and for those it carries it the flag
+	is one token among twenty — a reader wanting to know which model produced a module
+	would be parsing a producer's command line, which is the inference FR-132's
+	declarative table exists to remove. ``None`` means no model was resolved for this
+	dispatch, which is what a refusal records; it is not the same as the default model.
+	"""
+	model_source: NonEmptyStr | None = None
+	"""Which rule chose :attr:`model` — ``--model``, ``tier:<name>``, ``SOFACT_MODEL``
+	or ``default`` (FR-132).
+
+	The *source* is the half that makes a tier table checkable. A row saying
+	``model="qwen3-coder"`` answers "what ran"; ``model_source="tier:cheap"`` answers
+	"and it ran because the table said so", which is the question a deployment asks
+	when the bill arrives or the depth of a diagnosis is doubted. Without it a factory
+	with a tier table and a factory without one produce identical records whenever the
+	models happen to coincide, and the table's effect would be unobservable.
+	"""
 	argv: tuple[str, ...]
 	workspace: str
 	budget: StepBudget
@@ -8491,6 +8512,241 @@ class AttemptTelemetryReport(View):
 		return ATTEMPT_TELEMETRY_REQUIREMENTS
 
 
+class SpendAttribution(View):
+	"""One bucket of dispatch spend: a phase, or a module (FR-133, NFR-030).
+
+	FR-133 asks for spend "attributed per phase and per module", and NFR-030 says why:
+	"so that cost per delivered module is knowable". The two keys are the same numbers
+	bucketed twice, which is why this is one type used in two tuples rather than two
+	types — a second type would be a second set of totals to keep in step with the first.
+
+	**``tokens`` is a floor and ``unmeasured_tokens`` is its coverage.** Same rule as
+	:class:`AttemptTelemetry` (NFR-024): a harness that reported no usage is *unmeasured*,
+	never zero, so a bucket sums what reported and counts what did not. A phase whose
+	every dispatch was unmeasured reports ``tokens=0, unmeasured_tokens=N`` and
+	:attr:`tokens_measured` is ``False`` — which is a different statement from a phase
+	that spent nothing, and the only one of the two that is a measurement.
+
+	``models`` is the set of models this bucket ran on, sorted. FR-132's tier table is
+	what makes it a *set* rather than a name: a phase whose steps ran on two models is a
+	phase the table was changed under, and a single-model field would report whichever
+	dispatch was read last.
+	"""
+
+	key: NonEmptyStr
+	"""The phase's value, or the module's name. Never empty — see :attr:`SpendReport`."""
+
+	dispatches: int = 0
+	wall_clock_seconds: float = 0.0
+	tokens: int = 0
+	unmeasured_tokens: int = 0
+	models: tuple[NonEmptyStr, ...] = ()
+
+	@model_validator(mode="after")
+	def _consistent(self) -> Self:
+		if self.dispatches < 0:
+			raise ValueError(f"dispatches cannot be negative, got {self.dispatches}")
+		if self.wall_clock_seconds < 0:
+			raise ValueError(f"wall clock cannot be negative, got {self.wall_clock_seconds}")
+		if self.tokens < 0 or self.unmeasured_tokens < 0:
+			raise ValueError("token counts cannot be negative")
+		if self.unmeasured_tokens > self.dispatches:
+			raise ValueError(
+				f"{self.unmeasured_tokens} unmeasured token counts over {self.dispatches} "
+				"dispatch(es): more unmeasured dispatches than dispatches means the "
+				"coverage count is not a count of this bucket's rows (NFR-024)"
+			)
+		if self.dispatches == 0 and (self.tokens or self.wall_clock_seconds or self.models):
+			raise ValueError(
+				f"bucket {self.key!r} has no dispatches but reports spend; a cost with no "
+				"session attached is a measurement of nothing"
+			)
+		return self
+
+	@property
+	def tokens_measured(self) -> bool:
+		"""True when every dispatch in this bucket reported usage, so ``tokens`` is exact."""
+		return self.unmeasured_tokens == 0
+
+	@property
+	def tokens_per_dispatch(self) -> float | None:
+		"""Mean tokens per dispatch, or ``None`` when the bucket is not fully measured.
+
+		``None`` rather than a mean over the measured subset: a mean whose denominator
+		silently excludes the dispatches nobody measured is the flattering reading, and it
+		is the one a cost comparison would use.
+		"""
+		if not self.tokens_measured or self.dispatches == 0:
+			return None
+		return self.tokens / self.dispatches
+
+
+class SpendReport(View):
+	"""FR-133's attribution: the same dispatch spend bucketed per phase and per module.
+
+	**Every bucket is a count of rows that exist, and ``dispatches`` sums to the total.**
+	That is the property that makes this a fold rather than a summary: a reader can add
+	the phase buckets and get the same number as adding the module buckets, and a
+	discrepancy is a bug rather than a rounding. ``unattributed`` carries the dispatches
+	whose step no module owned — a bootstrap step covers no clause, and FR-100's own
+	:attr:`~sofact.views.ModuleCheckout.module` is ``None`` for it — so the module buckets
+	plus ``unattributed`` account for every row. Dropping them would make the module
+	totals quietly smaller than the phase totals with nothing to say why.
+
+	**Against the §1.3 envelope, and honest about which dimension.** §1.3's eight
+	dimensions contain exactly one that bounds spend: ``wall_clock_days``. There is no
+	token dimension, so FR-133's "reported against the envelope" is discharged for wall
+	clock and *stated as unbounded* for tokens — :attr:`token_dimension` is ``None`` and
+	:attr:`token_envelope_note` says why. Inventing a ninth dimension to have something to
+	compare against would be SoFact bounding a resource its operator never bounded
+	(NFR-025), and silently omitting the comparison would leave the requirement reading as
+	met when half of it has nowhere to be measured.
+
+	**The vacuous pass is refused**, on :attr:`AttemptTelemetryReport.discharged`'s rule: a
+	plan with no dispatch returns ``()``. "0 tokens over 0 sessions" is the shape a clean
+	result takes when there was no run, not a measurement of a cheap one.
+	"""
+
+	id: UUID7
+	plan_id: UUID7
+	rendered_at: datetime
+	by_phase: tuple[SpendAttribution, ...] = ()
+	by_module: tuple[SpendAttribution, ...] = ()
+	envelope: DeliveryEnvelope | None = None
+	"""The §1.3 envelope this run is measured against, or ``None`` when none is configured.
+
+	``None`` is *no envelope was chosen*, not "§1.3's defaults" — :meth:`FactoryService.envelope`
+	draws that distinction and this field carries it rather than re-deciding it.
+	"""
+
+	unattributed: int = 0
+	"""Dispatches whose step no single module owned. Counted, never dropped (FR-100)."""
+
+	@property
+	def total_dispatches(self) -> int:
+		return sum(bucket.dispatches for bucket in self.by_phase)
+
+	@property
+	def total_wall_clock_seconds(self) -> float:
+		return sum(bucket.wall_clock_seconds for bucket in self.by_phase)
+
+	@property
+	def total_tokens(self) -> int:
+		"""Summed tokens over the dispatches that reported usage. A floor, not a total."""
+		return sum(bucket.tokens for bucket in self.by_phase)
+
+	@property
+	def unmeasured_tokens(self) -> int:
+		return sum(bucket.unmeasured_tokens for bucket in self.by_phase)
+
+	@property
+	def tokens_complete(self) -> bool:
+		"""True when every dispatch reported usage, so the token total is exact."""
+		return self.unmeasured_tokens == 0
+
+	@property
+	def token_dimension(self) -> EnvelopeDimension | None:
+		"""Always ``None``: §1.3 bounds no token dimension, so there is nothing to compare.
+
+		A property rather than an absent field so the *reason* travels with the reading —
+		a reader who looks for the token comparison and finds nothing must find this
+		instead of concluding the number was forgotten.
+		"""
+		return None
+
+	@property
+	def token_envelope_note(self) -> str:
+		"""Why tokens are attributed but not compared to the envelope (FR-133, NFR-025)."""
+		dimensions = ", ".join(d.value for d in EnvelopeDimension)
+		return (
+			f"§1.3 bounds {len(EnvelopeDimension)} dimensions ({dimensions}) and none of "
+			"them is tokens. FR-133's attribution is reported above and the envelope "
+			"comparison is made on wall clock, the one dimension that bounds spend; a "
+			"token bound would be a resource SoFact bounded and its operator did not "
+			"(NFR-025, and §20.4's 'tokens per verified module' is a metric rather than a "
+			"bound)"
+		)
+
+	@property
+	def wall_clock_measurement(self) -> EnvelopeMeasurement | None:
+		"""The run's wall clock against §1.3's ``wall_clock_days``, or ``None``.
+
+		``None`` when no envelope is configured — the three-state rule
+		:class:`EnvelopeMeasurement` states: an unmeasured dimension is never reported as
+		satisfied, and "nobody set an envelope" is not "the envelope held".
+
+		**A measurement rather than a boolean, because §1.3's bound is a range.** Its
+		``wall_clock_days`` is 2-10: a floor *and* a ceiling, since §1.3 is a hypothesis
+		under test about what a delivery costs rather than a cap. A bare ``within`` would
+		report a run that took twenty minutes and a run that took twenty days as the same
+		answer, and only one of those is the failure FR-133 is about — so the direction is
+		carried by :attr:`EnvelopeMeasurement.within` *and* by the detail, and
+		:attr:`wall_clock_over_envelope` answers the overspend question on its own.
+		"""
+		if self.envelope is None:
+			return None
+		days = self.total_wall_clock_seconds / 86400.0
+		bound = self.envelope.bound(EnvelopeDimension.WALL_CLOCK_DAYS)
+		within = bound.admits(days)
+		if within:
+			detail = (
+				f"{days:.4f} day(s) of session wall clock, inside §1.3's {bound.stated()} (FR-133)"
+			)
+		elif bound.minimum is not None and days < bound.minimum:
+			detail = (
+				f"{days:.4f} day(s) of session wall clock is *below* §1.3's "
+				f"{bound.stated()}. This is not an overspend: §1.3's figure is a target "
+				"range and the run came in under it, which for a partial run is expected "
+				"and for a complete one is the envelope's floor being wrong"
+			)
+		else:
+			detail = (
+				f"{days:.4f} day(s) of session wall clock exceeds §1.3's "
+				f"{bound.stated()}. FR-133's own rationale is this direction: an "
+				"unattended build with no spend attribution is an unbounded financial "
+				"commitment (NFR-029, FR-101)"
+			)
+		return EnvelopeMeasurement(
+			dimension=EnvelopeDimension.WALL_CLOCK_DAYS,
+			bound=bound,
+			actual=days,
+			within=within,
+			detail=detail,
+		)
+
+	@property
+	def wall_clock_over_envelope(self) -> bool | None:
+		"""True only when the run's wall clock *exceeds* §1.3's ceiling (FR-133).
+
+		``None`` when no envelope is configured. ``False`` covers both "inside the range"
+		and "below the floor", because neither is an overspend — and reporting a fast run
+		as an envelope failure is the reading that would train an operator to ignore this
+		column.
+		"""
+		measurement = self.wall_clock_measurement
+		if measurement is None or measurement.actual is None:
+			return None
+		ceiling = measurement.bound.maximum
+		return ceiling is not None and measurement.actual > ceiling
+
+	@property
+	def discharged(self) -> tuple[str, ...]:
+		"""The requirements this reading carried out, which may be none."""
+		if not self.by_phase:
+			return ()
+		return SPEND_ATTRIBUTION_REQUIREMENTS
+
+
+SPEND_ATTRIBUTION_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-133", "NFR-030")
+"""What :attr:`SpendReport.discharged` reports when the fold carried it out.
+
+FR-133 is the requirement and NFR-030 is the reason it exists — "cost per delivered
+module is knowable" is the sentence the per-module bucket answers. Naming both keeps a
+future gate from discharging the attribution while leaving the module key absent, which
+is the state this unit was written to leave.
+"""
+
+
 ATTEMPT_TELEMETRY_REQUIREMENTS: Final[tuple[str, ...]] = ("FR-102",)
 """What :attr:`AttemptTelemetryReport.discharged` reports when the fold carried it out.
 
@@ -8911,8 +9167,10 @@ class SearchScan(View):
 		know. Reading a partial scan as "nothing exists" is the inventing-a-measurement
 		failure NFR-024 names.
 		"""
-		return bool(self.results) and self.hit_count == 0 and self.queries_answered == len(
-			self.results
+		return (
+			bool(self.results)
+			and self.hit_count == 0
+			and self.queries_answered == len(self.results)
 		)
 
 	@property
