@@ -1813,12 +1813,12 @@ class DriverRun(View):
 
 	Carried as names rather than as :class:`GateCheck` rows because the only thing read
 	off them is whether the gate's machine half failed at all — and a gate whose machine
-	half failed is *not* resumable with ``gate approve``, which refuses it. See
+	half failed is *not* resumable with ``gate --approve``, which refuses it. See
 	:attr:`next_human_verb`.
 
 	The default is empty, and empty is the truthful reading for a run that recorded no
 	failures: an older row in a ledger written before this field existed folds to "the
-	machine half passed", which is what ``gate approve`` did with it at the time.
+	machine half passed", which is what ``gate --approve`` did with it at the time.
 	"""
 
 	awaiting_attestation: bool = False
@@ -1863,13 +1863,13 @@ class DriverRun(View):
 		that will do nothing until they do — so the verb is read off the steps the run
 		actually took rather than assumed from the terminal alone.
 
-		**An open gate whose machine half failed is not approved with ``gate approve``.**
+		**An open gate whose machine half failed is not approved with ``gate --approve``.**
 		That verb refuses a failed check, so naming it sent the operator to a command that
 		could only refuse — and the fix for a failed machine half is to supply what the
 		checks found missing and produce the artefact again, which is the phase's own verb.
 		:data:`PHASE_PRODUCER_VERB` is that verb, and the branch is keyed on
 		:attr:`gate_failures` rather than on the gate being open at all, because a gate
-		whose machine half passed *is* approved with ``gate approve`` and saying otherwise
+		whose machine half passed *is* approved with ``gate --approve`` and saying otherwise
 		would be the opposite mistake.
 		"""
 		if self.terminal is DriverTerminal.DELIVERED:
@@ -1879,10 +1879,10 @@ class DriverRun(View):
 				producer = PHASE_PRODUCER_VERB.get(self.open_gate)
 				if producer is not None:
 					return (
-						f"sofact {producer}  (then `sofact gate approve "
+						f"sofact {producer}  (then `{GATE_APPROVE_VERB} "
 						f"{self.open_gate.value} --by <you>` once the checks pass)"
 					)
-			return f"sofact gate approve {self.open_gate.value} --by <you>"
+			return f"{GATE_APPROVE_VERB} {self.open_gate.value} --by <you>"
 		if self.stopped_on == "propose-answers":
 			if self.awaiting_attestation:
 				# The proposals are already on the log, so the questionnaire has nothing
@@ -3191,6 +3191,25 @@ disagree — and derived rather than written out because a second hand-maintaine
 is a second place for a gate to be attached to the wrong phase."""
 
 
+GATE_APPROVE_VERB: Final = "sofact gate --approve"
+"""The command that passes a gate, spelled the way the CLI accepts it (FR-061).
+
+One constant, because this sentence is printed from three places and only one of them can
+be tested against the CLI. The driver and the view both told the operator to type
+``sofact gate approve P2 --by you`` — a spelling the ``gate`` command does not accept,
+since its option is ``--approve`` — so the one verb that gets a run past a gate was
+reported to every operator as a command that exits 2 with ``Got unexpected extra
+argument(s) (approve P2)``. The failure is invisible in the same way the "one of two
+spellings" failures always are: the *string* is right about which gate and which human,
+and the shell never gets that far.
+
+Hand-written rather than derived from the CLI because there is no machine-readable link
+from a phase to a verb, and importing the CLI into the view layer is the dependency arrow
+pointing the wrong way — so ``tests/ci/test_docs.py`` checks the spelling against the
+installed ``--help`` instead, which is the only check that can catch a drift here.
+"""
+
+
 PHASE_PRODUCER_VERB: dict[Phase, str] = {
 	Phase.SPECIFY: "specify",
 	Phase.DECOMPOSE: "decompose",
@@ -3200,7 +3219,7 @@ PHASE_PRODUCER_VERB: dict[Phase, str] = {
 """The verb that produces the artefact a gate is a gate on, per gated phase.
 
 It exists because **a gate can be open with a failed machine half**, and the verb that
-resumes such a run is not ``gate approve``. ``gate approve`` refuses a failed check —
+resumes such a run is not ``gate --approve``. ``gate --approve`` refuses a failed check —
 correctly, since approval cannot make an unsound artefact sound — so a run that stopped
 there and named it sent the operator to a command that could only refuse them, with no
 way forward that did not involve editing the ledger by hand.

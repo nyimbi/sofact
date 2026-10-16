@@ -3041,6 +3041,119 @@ sys.exit(0 if sys.argv[1] == "ok" else 7)
 """A notifier whose only job is its exit code: ``delivered`` is derived from it."""
 
 
+class TestTheVerbTheProductTellsTheOperatorToType:
+	"""Every command this product *prints* is a command this CLI accepts.
+
+	Not a style check. ``next_human_verb`` is the answer to "what do I type now", and
+	``driver`` and ``views`` both printed ``sofact gate approve P2 --by you`` — a spelling
+	the ``gate`` command does not accept, because its option is ``--approve``. Every test
+	that pinned that string asserted it *equal to a literal*, which is the one thing that
+	cannot fail: the literal was written from the same misreading as the code, so the
+	suite agreed with itself while the operator got ``Got unexpected extra argument(s)
+	(approve P2)`` and exit 2 from the single verb that passes a gate.
+
+	So the check is against the **installed CLI**, which is the only oracle here. Each
+	printed verb is split at the point where a name or a phase would go, and the prefix is
+	invoked for real; a prefix the parser rejects fails the test. This is the same
+	discipline the repo applies to a DSN hardcoded in the source and to a gate scoped to
+	the wrong directory — the artefact that runs is the one to check against.
+	"""
+
+	def test_no_module_names_a_sofact_verb_this_cli_does_not_have(self) -> None:
+		"""The source is scanned, not a hand-written list, so a new string is covered.
+
+		Three verbs were named across the tree and did not exist: ``sofact gate approve``,
+		which the parser rejected; ``sofact ask``, printed by ``sofact speak`` and by the
+		driver as the way to answer the interrogation by hand; and ``sofact start``, printed
+		by ``attest`` and ``contract`` as the way to open a goal. The bare questionnaire is
+		``sofact`` with no subcommand, and opening a goal from text is ``sofact build
+		--statement``. A hand-written list of strings to check would have missed all three,
+		because the defect is precisely that nobody was keeping the list.
+
+		The word after ``sofact`` is compared against the **registered commands**, which is
+		the same object ``--help`` is built from. Two shapes are exempt and both are prose
+		rather than instructions: ``sofact import`` (a sentence about Python imports) and
+		``sofact or`` (a sentence about the state directory).
+		"""
+		import pathlib
+		import re
+
+		from sofact.cli import app as the_app
+
+		commands = {
+			c.name or (c.callback.__name__ if c.callback is not None else "")
+			for c in the_app.registered_commands
+		}
+		assert {"gate", "build", "attest", "speak"} <= commands, "the fixture's own premise"
+		prose = {"import", "or"}
+
+		pattern = re.compile(r"sofact ([a-z][a-z-]*)")
+		named: dict[str, list[str]] = {}
+		for module in sorted(pathlib.Path("src/sofact").glob("*.py")):
+			for number, line in enumerate(module.read_text(encoding="utf-8").splitlines(), 1):
+				for match in pattern.finditer(line):
+					word = match.group(1)
+					if word in commands or word in prose:
+						continue
+					named.setdefault(word, []).append(f"{module.name}:{number}")
+
+		assert not named, (
+			"these modules tell the operator to run a command this CLI does not have: "
+			+ "; ".join(f"sofact {w} at {', '.join(locs)}" for w, locs in sorted(named.items()))
+		)
+
+	def test_every_verb_the_product_prints_is_one_this_cli_accepts(self, home: Path) -> None:
+		from sofact.views import GATE_APPROVE_VERB, PHASE_PRODUCER_VERB, Phase
+
+		printed = {GATE_APPROVE_VERB, "sofact build", "sofact attest", "sofact"}
+		printed.update(f"sofact {verb}" for verb in PHASE_PRODUCER_VERB.values())
+		assert Phase.SPECIFY in PHASE_PRODUCER_VERB, "the table must cover the gate it is for"
+
+		for verb in sorted(printed):
+			# ``sofact`` bare is the questionnaire, and it is the one entry with no
+			# argument to strip; every other prefix is invoked as the operator would
+			# type it up to the name they have to supply.
+			argv = ["--home", str(home), *verb.split()[1:]]
+			result = RUNNER.invoke(app, argv)
+			assert "unexpected extra argument" not in result.output, (
+				f"{verb!r} is printed to the operator and the CLI refuses it: "
+				f"{result.output.strip()}"
+			)
+			assert "No such command" not in result.output, (
+				f"{verb!r} is printed to the operator and names no command: {result.output.strip()}"
+			)
+
+	def test_the_gate_approval_verb_names_the_gate_and_the_human(self) -> None:
+		"""The printed sentence still has to say *which* gate and *who*.
+
+		The other direction, and the one the prefix check above cannot see: a constant that
+		became ``sofact gate`` would pass every invocation and tell the operator nothing.
+		"""
+		from sofact.views import GATE_APPROVE_VERB
+
+		assert GATE_APPROVE_VERB == "sofact gate --approve", GATE_APPROVE_VERB
+
+	def test_a_run_at_a_gate_prints_a_verb_this_cli_accepts(self, home: Path) -> None:
+		"""End to end: the string the *driver* produces, invoked against the real CLI.
+
+		The unit above checks the constant; this checks that the constant is what reaches
+		the operator, which is the part a refactor can quietly detach.
+		"""
+		service = FactoryService(home)
+		asyncio.run(service.advance_phase(Phase.ELICIT, PhaseStatus.COMPLETE))
+		asyncio.run(service.advance_phase(Phase.RESEARCH, PhaseStatus.COMPLETE))
+		asyncio.run(
+			service.advance_phase(
+				Phase.SPECIFY,
+				PhaseStatus.AWAITING_GATE,
+				checks=(GateCheck(name="internal_consistency", passed=True, detail="ok"),),
+			)
+		)
+		result = RUNNER.invoke(app, ["--home", str(home), "phase"])
+		assert result.exit_code == 1, result.output
+		assert "sofact gate --approve P2" in result.output
+
+
 class TestTheFrontDoorVerbs:
 	"""Each new verb refuses with a named reason, an exit code, and no traceback.
 

@@ -4768,7 +4768,7 @@ async def _speak(
 	goal = await svc.start(transcript.text)
 	typer.secho(f"\ngoal {goal.id} opened from the transcript", fg="green", bold=True)
 	typer.secho(
-		"  `sofact build` drafts the six dimensions, or `sofact ask` to answer them "
+		"  `sofact build` drafts the six dimensions, or `sofact` alone to answer them "
 		"yourself (FR-173).",
 		fg="bright_black",
 	)
@@ -4820,7 +4820,7 @@ async def _attest(
 	state = await svc.state()
 	goal = state.latest_goal()
 	if goal is None:
-		typer.secho("no goal yet; `sofact start` first.", fg="yellow")
+		typer.secho("no goal yet; `sofact build --statement <text>` first.", fg="yellow")
 		raise typer.Exit(code=1)
 	targets = list(answer_ids or [])
 	if all_open:
@@ -5026,7 +5026,7 @@ async def _spec_doc(
 	if contract_id is None:
 		goal = await svc.current_goal()
 		if goal is None:
-			typer.secho("no goal yet; `sofact start` first.", fg="yellow")
+			typer.secho("no goal yet; `sofact build --statement <text>` first.", fg="yellow")
 			raise typer.Exit(code=1)
 		contract = await svc.latest_contract(goal.id)
 		if contract is None:

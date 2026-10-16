@@ -40,6 +40,7 @@ from typing import Final
 from sofact._uuid7 import uuid7str
 from sofact.service import FactoryService
 from sofact.views import (
+	GATE_APPROVE_VERB,
 	PHASE_GATE,
 	PHASE_PRODUCER_VERB,
 	PHASE_SEQUENCE,
@@ -308,7 +309,7 @@ async def run_goal(
 
 	One call does as much as it can and then stops — at a gate, at a failure, or at a
 	completed delivery. It never waits in-process for an approval: an approval comes from
-	another terminal (``sofact gate approve P2 --by you``) and the way to pick it up is
+	another terminal (``sofact gate --approve P2 --by you``) and the way to pick it up is
 	to run this again, which re-reads the log and continues. That is what makes the stop
 	a stop rather than a poll.
 
@@ -338,8 +339,8 @@ async def run_goal(
 		# belongs to nothing. There is no machine work to report and no run to name, so
 		# the operator gets a sentence and the log stays honest about what it holds.
 		raise DriverRefusal(
-			"no goal in this log: run `sofact start <statement>` or `sofact speak <audio>` "
-			"first, then `sofact build` (FR-172)"
+			"no goal in this log: run `sofact build --statement <text>` or "
+			"`sofact speak <audio>` first, then `sofact build` (FR-172)"
 		)
 	for _ in range(_MAX_ITERATIONS):
 		state = await service.state()
@@ -372,7 +373,7 @@ async def run_goal(
 					DRIVER_ACTIONS[0],
 				),
 			)
-			# FR-061: a gate whose machine half *failed* is not passed with `gate approve`
+			# FR-061: a gate whose machine half *failed* is not passed with `gate --approve`
 			# — that verb refuses a failed check, and correctly, since approval cannot make
 			# an unsound artefact sound. Reporting the stop without saying so sent the
 			# operator to a command that could only refuse them, which turns a hard stop
@@ -385,7 +386,7 @@ async def run_goal(
 			# the machine half failed. `approve_gate` already decides on the recomputation;
 			# a driver reading the frozen row would report failures that no longer exist
 			# and send an operator whose repair passed every check to re-produce the
-			# artefact anyway, while `gate approve` would have accepted it.
+			# artefact anyway, while `gate --approve` would have accepted it.
 			current = await service.current_gate_checks(gate.phase)
 			checks = current if current is not None else gate.checks
 			failed = tuple(c.name for c in checks if not c.passed)
@@ -404,7 +405,7 @@ async def run_goal(
 				detail = (
 					f"{gate.phase.value} awaits {PHASE_GATE[gate.phase].value}, and "
 					f"{len(failed)} machine check(s) failed ({', '.join(failed)}). Approval "
-					f"cannot make an unsound artefact sound, so `gate approve` will refuse: "
+					f"cannot make an unsound artefact sound, so `{GATE_APPROVE_VERB}` will refuse: "
 					f"supply what the checks found missing with "
 					f"`sofact {producer}` and run `{RESUME_VERB}` (FR-061, FR-172)"
 					if producer is not None
@@ -416,7 +417,7 @@ async def run_goal(
 			else:
 				detail = (
 					f"{gate.phase.value} awaits {PHASE_GATE[gate.phase].value}: "
-					f"approve it with `sofact gate approve {gate.phase.value} --by <you>` "
+					f"approve it with `{GATE_APPROVE_VERB} {gate.phase.value} --by <you>` "
 					f"and run `{RESUME_VERB}`"
 				)
 			return await _finish(
@@ -469,7 +470,7 @@ async def run_goal(
 			# The action ran and the log did not grow, which is the definition of an action
 			# that did nothing. It is a **waiting** state, not a failure and not a success:
 			# `propose-answers` with no reachable model leaves every dimension open for a
-			# person, so the next thing that has to happen is `sofact ask` — and looping
+			# person, so the next thing that has to happen is `sofact` alone — and looping
 			# would re-select the same action forever, which is why this stops rather than
 			# `continue`s. Recorded as SKIPPED so the run says what it waited on instead of
 			# reporting a step that advanced nothing as ADVANCED.

@@ -149,7 +149,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-169 the competitive baseline is a cited artefact, and an unsourced rival does not count | **Implemented** | `CompetitiveScan`/`Competitor`/`CompetitorCapability`/`parse_scan` (`competitive.py`), the competitive section in `research_goal` (`service.py:255`), `competitors` (`service.py`), `sofact competitors` (`cli.py`); `test_competitive.py`. A competitor with no `source_ids` is recorded **unsourced** and excluded from the baseline; one with no capabilities is **unexamined**; a scan over zero sourced competitors reports `None`, never `0` (NFR-024). SoFact cannot name the best systems in an arbitrary domain, so the producer identifies them under a criterion SoFact writes, and the identification is an artefact with its own evidence. |
 | FR-170 an exceedance is a declaration against a cited baseline | **Implemented** | `ExceedanceDeclaration` (`views.py`), `declare_exceedance`/`exceedances` (`service.py`), the `exceedance_declared` check (`delivery.py`), `sofact exceed` (`cli.py`); `TestTheExceedanceIsDeclaredNotVerified` (`test_delivery.py`). A baseline with no source ids is refused — a claim to exceed nothing is a wish. **No oracle in O1–O8 compares two systems**, so the check reports `N declared, 0 verified by oracle` with `passed=True` and the obligation stays in `DELIVERY_REQUIREMENTS`: nothing may print an exceedance as a verified capability. |
 | FR-171 the specification document is rendered at P2 and every requirement annotated | **Implemented** (2026-10-16) | **Corrected 2026-10-16 (ADR-0071): it is rendered *before* the approval, not after it.** `SPEC_DOC_HEADINGS`/`RequirementAnnotation`/`annotate`/`render_specification_document` (`specdoc.py`), `write_specification` (`service.py`), `sofact spec-doc` (`cli.py`); `test_specdoc.py`. Every requirement carries its provenance — the stem it descends from, that stem's elicitation dimension, the answer's id **and whether it was operator or `model:` and whether it was attested**, the research verdict, the competitor capabilities, the exceedance, and the oracle's class and rank. An unattested requirement is visibly unattested with the marker derived from the ledger, so the document cannot be rendered clean over a specification whose answers nobody read. |
-| FR-172 one verb drives the pipeline, stops at every gate, and is idempotent | **Implemented** (corrected 2026-10-16, ADR-0075) | `DriverAction`/`DRIVER_ACTIONS`/`run_goal` (`driver.py`), `DriverRun`/`DriverStep`/`DriverTerminal`/`DriverOutcome` (`views.py`), `record_driver_run`/`current_gate_checks` (`service.py`), `sofact build` (`cli.py`); `test_driver.py`. **No branch returns `DELIVERED` with a gate open**, and the driver has no code path that advances one (FR-061) — it halts at each of the four in turn and `--resume` continues from the ledger, because the loop re-reads state rather than holding a cursor. Idempotency is asserted on ledger length. **Three defects the end-to-end walk found, all one shape:** `approve_gate` decided on the frozen presented row, so a gate whose defect was repaired could never be passed; the driver named `gate approve` for a gate whose machine half had failed, a verb that can only refuse; and the build guard read `sealed_dispatches`, which filters on reviewability, so a producer that commits its own work left it empty and the whole plan was re-dispatched 64 times until the run reported `exhausted` on a completed build. |
+| FR-172 one verb drives the pipeline, stops at every gate, and is idempotent | **Implemented** (corrected 2026-10-16, ADR-0075) | `DriverAction`/`DRIVER_ACTIONS`/`run_goal` (`driver.py`), `DriverRun`/`DriverStep`/`DriverTerminal`/`DriverOutcome` (`views.py`), `record_driver_run`/`current_gate_checks` (`service.py`), `sofact build` (`cli.py`); `test_driver.py`. **No branch returns `DELIVERED` with a gate open**, and the driver has no code path that advances one (FR-061) — it halts at each of the four in turn and `--resume` continues from the ledger, because the loop re-reads state rather than holding a cursor. Idempotency is asserted on ledger length. **Four defects the end-to-end walk found, all one shape — a name that reads as an instruction and is not one:** `approve_gate` decided on the frozen presented row, so a gate whose defect was repaired could never be passed; the driver named the approval for a gate whose machine half had failed, a verb that can only refuse — and named it `gate approve`, which the CLI does not accept, as every printed approval did; and the build guard read `sealed_dispatches`, which filters on reviewability, so a producer that commits its own work left it empty and the whole plan was re-dispatched 64 times until the run reported `exhausted` on a completed build. |
 | FR-173 a model-proposed answer does not resolve a dimension | **Implemented** | `MODEL_ANSWER_PREFIX`/`ElicitationAnswer.is_model_proposed`/`ElicitationAttestation` (`views.py`), `assess(..., attested=...)` (`elicitation.py`), `propose_answers`/`attest` (`service.py`), `sofact attest` (`cli.py`); `TestAModelProposalIsNotAnAnswer` (`test_elicitation.py`). A model-proposed unattested answer is reported **open** with the proposal's id, so `draft` cannot be reached; an attestation whose `attested_by` is itself model-prefixed is refused. The floor stays deterministic — what changes is that a paragraph a model wrote can no longer clear it on the operator's behalf. **Attestation records that a human read an answer, not that it is correct.** |
 | FR-174 SoFact authors its own search queries and every hit is a lead | **Implemented** | `SearcherSpec`/`load_searcher_specs`/`authored_queries`/`parse_search_results` (`search.py`), `search` (`service.py`), `sofact search` (`cli.py`); `test_search.py`. The queries are composed from the goal's own words **before any provider runs** and written into the log, so what was asked is answerable from the ledger alone — a provider asked what to search for chooses its own subject list. Every hit is recorded at `VerificationStatus.REPORTED` and `SearchHit` refuses to be constructed at `CONTENT_VERIFIED` at all; a hit with no url is refused; a failed query is recorded as failed rather than as a domain with no results. |
 
@@ -330,26 +330,66 @@ discharged, not whether it was discharged correctly the first time. The row's ev
 carries the correction, because a reader who trusted the bare "Implemented" would re-derive
 the same wrong order from the same sentence.
 
-**The 2026-10-16 front-door unit (ADR-0075) moved no row and fixed three defects inside
-two already-Implemented ones.** FR-168 (a spoken goal) and FR-172 (one verb drives the
-pipeline) were both **Implemented** and stay there: the modules, the verbs and the test
-modules existed, and the test modules passed. What was wrong is that the product did not
-run. `sofact build` against a fresh home at the shipped defaults failed at P0 three times
-over — a completion cap of 1024 that two of six dimension prompts exhausted inside the
-model's reasoning channel, a refusal that reported "only a reasoning channel" for a
-`finish_reason: "length"` the response stated plainly, an unreachable endpoint printed as
-`unreachable: .` because every httpx transport error stringifies to `""`, and a stop whose
-own two lines named different next commands (`build --resume` above, the questionnaire
-below) when the verb that works is `attest`. Every one is a defect *inside* a discharged
+**The 2026-10-16 front-door unit (ADR-0075) moved no row, fixed four defects inside
+two already-Implemented ones, and found two gaps that are still open.** FR-168 (a spoken
+goal) and FR-172 (one verb drives the pipeline) were both **Implemented** and stay there:
+the modules, the verbs and the test modules existed, and the test modules passed. What was
+wrong is that the product did not run. `sofact build` against a fresh home at the shipped
+defaults failed at P0 three times over — a completion cap of 1024 that two of six dimension
+prompts exhausted inside the model's reasoning channel, a refusal that reported "only a
+reasoning channel" for a `finish_reason: "length"` the response stated plainly, an
+unreachable endpoint printed as `unreachable: .` because every httpx transport error
+stringifies to `""`, and a stop whose own two lines named different next commands
+(`build --resume` above, the questionnaire below) when the verb that works is `attest`. The
+fourth is the one that matters most, because it is the only route past a gate: **every
+printed approval read `sofact gate approve P2 --by you`, and the `gate` command's option is
+`--approve`**, so the single verb that passes a gate exited 2 with `Got unexpected extra
+argument(s) (approve P2)` for every operator who typed what the product told them to. It
+appeared in five files and every test that covered it compared the string to a literal
+written from the same misreading — the one assertion that cannot fail. The replacement
+check invokes the **installed CLI** on every verb the product prints, which is the only
+oracle for "is this a command". Every one of the four is a defect *inside* a discharged
 requirement rather than a missing half of one, which is why no verdict moves: the counting
 rule asks whether a requirement is discharged, and this document has already stated that
 it does not ask whether it was discharged correctly the first time. The tally is therefore
-`101/25/0/0` **unchanged** over **126** rows. The finding worth carrying forward is about
-evidence rather than about these four bugs: **1987 passing tests said nothing about whether
-`sofact build` runs**, because no test drives the front door at the shipped defaults
-against a reachable model — every test of that path either configures no model, and so
-stops on the unreachable branch, or answers the interrogation itself. ADR-0075's four
-canaries and the four live probes are the record.
+`101/25/0/0` **unchanged** over **126** rows.
+
+**The two gaps the same walk found are open, and neither is a verdict to move.** Both
+are reachable from the front door at the shipped defaults, and neither is a wording defect.
+Neither is an unbuilt half of the row it sits under either, which is why the tally stays
+where it is rather than being adjusted by work that did not discharge it:
+
+- **FR-068's action column names a remedy nothing implements.** The walk reached P2, P1
+  having classified twelve of the draft's thirty-six clauses `invalidated`/`deepened`, and
+  the pipeline refused — correctly, since the spec's own table says "Return to P0. Do not
+  build." But **P0 cannot be re-entered**: `advance_phase(P0, ACTIVE)` raises "P0 is already
+  complete; a phase is not re-entered by advancing it again (FR-060)", and `sofact draft`
+  re-emits *the same thirty-six clause ids* from the same answers, so re-eliciting produces
+  the same draft, the same ids, and — with the same sources — the same verdicts. The only
+  verb that touches the clauses, `sofact draft`, takes no input with which to revise one.
+  So the recovery `sofact build --resume` prints after this refusal re-selects `decompose`,
+  which refuses identically: three runs, byte for byte. **A pipeline stopped by its own
+  evidence has no documented exit.** FR-068 is not the row that is short: its requirement is
+  that every clause is *classified*, the classification is delivered, and the refusal to
+  build on an invalidated premise is enforced in `advance_phase`, where it cannot be routed
+  around. What is missing is a **recovery verb** — "revise the clauses and re-elicit" is an
+  action column with nothing behind it — and that is a requirement the spec does not state,
+  rather than a half of one it does.
+- **A `FAILED` run's `next_human_verb` is `RESUME_VERB` for every failure, including the
+  ones a resume cannot act on.** The third defect above was fixed for the two `EXHAUSTED`
+  waits and not for `FAILED`, so the loop above is what the operator is told to run. Whether
+  a resume can act is a fact about *why* the run failed, and the driver holds it.
+
+Neither gap is fixed here. Both need a design decision — what "revise the clauses and
+re-elicit" is as a verb, and whether a `FAILED` run carries the action it failed on — and
+neither is a wording change. They are recorded because a walk that stops at the first
+refusal it can explain leaves the next operator to find the second one.
+
+The finding worth carrying forward is about evidence rather than about these bugs: **1987
+passing tests said nothing about whether `sofact build` runs**, because no test drives the
+front door at the shipped defaults against a reachable model — every test of that path
+either configures no model, and so stops on the unreachable branch, or answers the
+interrogation itself. ADR-0075's five canaries and the six live probes are the record.
 
 **The counting rule, stated because the last refresh did not state it, and corrected on
 2026-10-15 because the statement was narrower than the classifier it described.** A row is

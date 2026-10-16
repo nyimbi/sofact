@@ -986,7 +986,7 @@ class FactoryService:
 		:meth:`record_driver_run` is public: the presented row is a record of what was
 		*shown*, and a driver that reported the stop off that row told an operator whose
 		repair had made every check pass to go and re-produce the artefact anyway. A gate
-		whose machine half now passes is approved with ``gate approve``, and the run that
+		whose machine half now passes is approved with ``gate --approve``, and the run that
 		says otherwise sends them to the one verb that cannot help.
 		"""
 		state = await self.state()

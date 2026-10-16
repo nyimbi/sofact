@@ -85,8 +85,46 @@ it for either. Every other test of this path either configures no model — so t
 stops on the *unreachable* branch — or answers the dimensions itself, which is why 1987
 tests passed over it.
 
+**Fourth.** Acting on the third — attesting the six proposals and resuming — the run
+reached P2 and stopped, and told the operator to type a command that does not exist:
+
+```console
+$ sofact build --resume
+  [done] research (P1)      researched: 70 source(s), 36 clause verdict(s)
+  [done] contract (P2)      contracted 36 clause(s)
+  [REFUSED] specify (P2)
+    ValueError: P1 cannot complete: 12 clause(s) return the pipeline to P0 …
+  next: sofact build --resume
+```
+
+The refusal is correct and is a finding of its own — P1 classified twelve clauses as
+`invalidated`/`deepened`, and FR-068 says those return the pipeline to P0 rather than
+being built on. But the run reports `terminal: failed`, and `next_human_verb` for a
+failed run is `RESUME_VERB`, which re-selects `decompose` and refuses identically, three
+runs in a row, byte for byte. That is the third defect's shape again with a different
+terminal.
+
+Then the gate branch, which is the one that matters, since it is the *only* way past a
+gate:
+
+```console
+$ sofact gate approve P2 --by operator
+╭─ Error ─────────────────────────────────────────────────────────────────────────╮
+│ Got unexpected extra argument(s) (approve P2)                                   │
+╰────────────────────────────────────────────────────────────────────────────────────╯
+exit 2
+```
+
+Every string this product printed for the approval read `sofact gate approve P2 --by
+you`. The command's option is `--approve`, so the spelling was refused by the parser
+before reaching any of the checks the sentence was about. It appeared in `views.py`,
+`driver.py`, `api.py`, `docs/spec/product-spec.md` and ADR-0070, and the tests that
+covered it asserted the string **equal to a literal** — the literal written from the same
+misreading as the code, which is the one assertion that cannot fail. `test_cli.py` had
+the correct spelling in one place and the wrong one in another, and passed.
+
 Neither defect is caught by a test that passes a healthy reply, and none was caught by
-the 1987-test suite. All three were caught by running the product.
+the 1987-test suite. All four were caught by running the product.
 
 ## Decision
 
@@ -111,7 +149,14 @@ operator can do about it.**
 4. `httpx` transport errors are reported by **class name** and with the configured
    timeout: `unreachable after 120s: ConnectTimeout`. `str(exc)` is not used, because
    for these types it is empty.
-5. `DriverRun.awaiting_attestation` records which of P0's two waits a run ended in, and
+5. `GATE_APPROVE_VERB` is the one spelling of the approval, and it is the CLI's:
+   `sofact gate --approve`. A constant rather than four strings, because the sentence is
+   printed from three modules and only the CLI can say which spelling parses — and the
+   check that it parses is a **test that invokes the installed CLI** on every verb the
+   product prints, rather than an equality against a literal. A string a product tells a
+   person to type is an interface; the test for an interface is the interface, not a
+   copy of the string.
+6. `DriverRun.awaiting_attestation` records which of P0's two waits a run ended in, and
    `next_human_verb` reads it. Both waits stop on `propose-answers` with an `EXHAUSTED`
    terminal; only the state distinguishes "no dimension has been answered", where a
    proposal is what is missing, from "every open dimension holds a proposal nobody
@@ -123,6 +168,14 @@ operator can do about it.**
    for every other stop, and the reading an older ledger row folds to.
 
 ## Consequences
+
+**An instruction is a claim, and it is checkable against the thing it instructs.** The
+approval sentence was wrong in five files and in every test that covered it, because the
+tests compared the string to a copy of itself. The replacement compares it to the CLI:
+the prefix is invoked for real, and a parser that rejects it fails the test. That is the
+only oracle for "is this a command", and it generalises to every other verb the product
+prints — the check enumerates the printed verbs rather than naming the one that was
+wrong, so a fifth string added later is covered without an edit.
 
 The three cases are now distinguishable from the message alone, which is the whole
 point: "raise the budget", "the endpoint is not answering", "the model returned
@@ -141,9 +194,36 @@ records the failure as a named terminal state, and `sofact build` still stops wi
 `NOT built` and the next verb. What changed is whether the operator is told why, and
 whether the verb they are told to type can do anything.
 
+## What this does not fix
+
+Two gaps the same walk reached, both recorded and neither closed here, because both need a
+design decision rather than a wording change.
+
+**A pipeline stopped by its own evidence has no exit.** P1 classified twelve of the draft's
+thirty-six clauses `invalidated`/`deepened`, and FR-068's table says what to do: "Return to
+P0. Do not build." The refusal is enforced and correct. But P0 cannot be re-entered —
+`advance_phase(P0, ACTIVE)` raises "P0 is already complete; a phase is not re-entered by
+advancing it again (FR-060)" — and `sofact draft` re-emits the *same* thirty-six clause ids
+from the same answers, so re-eliciting produces the same draft, the same ids and, with the
+same sources, the same verdicts. The one verb that touches the clauses takes no input with
+which to revise one. So the remedy FR-068 names is unreachable, and `build --resume`
+re-selects `decompose` and refuses identically. The missing thing is a recovery verb, which
+is a requirement the specification does not state.
+
+**A `FAILED` run's next verb is `RESUME_VERB` for every failure.** The third defect above
+was fixed for P0's two `EXHAUSTED` waits and not for `FAILED`, so a run stopped by the gap
+above tells the operator to run the command that provably loops. Whether a resume can act is
+a fact about *why* the run failed, and the driver holds it — the same shape as
+`awaiting_attestation`, which is why it is named here rather than fixed by guessing.
+
+Both are reachable from the front door at the shipped defaults. Neither is fixed by the
+change this ADR records, and neither moves a verdict: FR-068's requirement is that every
+clause is classified, which is delivered and enforced, and the missing recovery verb is not
+a half of it.
+
 ## Evidence
 
-**Four canaries, all caught, each reverted from a `cp` backup with `__pycache__`
+**Five canaries, all caught, each reverted from a `cp` backup with `__pycache__`
 cleared.**
 
 1. The `finish_reason == "length"` branch disabled — 1 of 32 failed,
@@ -158,16 +238,25 @@ cleared.**
    — 2 of 20 failed, both in `TestAProposalIsNotAnAnswer`. The flag is the only thing
    that distinguishes P0's two waits, so both the message and the continuation depend
    on it.
+5. `GATE_APPROVE_VERB` back to `"sofact gate approve"` — 2 of 3 failed in
+   `TestTheVerbTheProductTellsTheOperatorToType`, the first on
+   `'sofact gate approve' is printed to the operator and the CLI refuses it: … Got
+   unexpected extra argument(s) (approve)`. The canary **is** the defect: it is the
+   string that shipped, so the gate is watching the thing that was wrong rather than a
+   mutation chosen to be nearby.
 
 The three `llm.py` tests are pinned to literals rather than to the constants they check, so
 lowering the bound moves the assertion and not the input — the trap recorded in
 `tests/ci/test_docs.py`'s lesson about a test whose input is computed from the
 constant it tests.
 
-**Four probes against the live endpoint and the live front door**, which is what found
+**Six probes against the live endpoint and the live front door**, which is what found
 all of this and what a test cannot substitute for: the six-dimension sweep at 1024 (2
 refused) and at 4096 (6 answered); the `qwen3.5:9b` reply read field by field to
 establish that `reasoning_content` accompanies working answers; `sofact build` against a
 fresh home at the shipped defaults, twice, which is how the empty-message defect and the
-contradictory-verb defect surfaced; and `sofact attest --all` followed by
-`build --resume` to confirm the verb the message names is the verb that works.
+contradictory-verb defect surfaced; `sofact attest --all` followed by `build --resume`,
+which carried the run through P1's research (70 sources, 36 clause verdicts) and the
+contract to P2; `sofact gate approve P2 --by operator`, which exited 2 on the spelling
+every printed sentence named; and `build --resume` a third time, byte-identical to the
+second, which is how the `FAILED`-terminal loop surfaced.

@@ -106,11 +106,11 @@ hard stop, it is a dead end. The checks are now recomputed from the artefact as 
 `approve_decomposition` already state one level down.
 
 *The driver named a verb that could only refuse.* A gate whose machine half failed is not
-passed with `gate approve`, and that verb correctly refuses it. Reporting the stop without
+passed with `gate --approve`, and that verb correctly refuses it. Reporting the stop without
 saying so sent the operator to a command that could not help. `DriverRun.gate_failures` now
 carries the failed check names and `next_human_verb` names the phase's producer verb
 (`PHASE_PRODUCER_VERB`) instead — and reads the same recomputation, so a repaired gate is
-reported as passing rather than sending the operator to re-produce an artefact `gate approve`
+reported as passing rather than sending the operator to re-produce an artefact `gate --approve`
 would have accepted.
 
 *The build was re-dispatched until the iteration bound.* The guard read

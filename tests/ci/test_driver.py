@@ -255,7 +255,7 @@ class TestTheDriverStopsAtEveryGate:
 	async def test_a_gate_whose_machine_half_failed_names_the_producer_not_the_gate(
 		self, home: Path, tmp_path: Path
 	) -> None:
-		"""``gate approve`` refuses a failed check, so naming it is naming a dead end.
+		"""``gate --approve`` refuses a failed check, so naming it is naming a dead end.
 
 		FR-061 makes approval unable to make an unsound artefact sound. A driver that
 		reported the stop without saying so sent the operator to a command that could only
@@ -273,7 +273,7 @@ class TestTheDriverStopsAtEveryGate:
 		verb = first.next_human_verb
 		assert verb is not None
 		assert verb.startswith("sofact specify"), verb
-		assert "gate approve" in verb, "the approval is still the second half of the instruction"
+		assert "gate --approve" in verb, "the approval is still the second half of the instruction"
 		assert "P2 awaits" in first.terminal_detail
 		assert "cannot make an unsound artefact sound" in first.terminal_detail
 
@@ -599,7 +599,7 @@ class TestTerminalStateIsReported:
 	async def test_a_run_that_reaches_a_gate_names_the_verb_that_continues_it(
 		self, home: Path, tmp_path: Path
 	) -> None:
-		"""A gate whose machine half passed is approved with ``gate approve``.
+		"""A gate whose machine half passed is approved with ``gate --approve``.
 
 		The other direction of the ``gate_failures`` branch, and the one that would be the
 		opposite mistake: telling an operator to re-produce an artefact whose checks all
@@ -616,7 +616,7 @@ class TestTerminalStateIsReported:
 
 		assert second.open_gate is Phase.SPECIFY
 		assert not second.gate_failures
-		assert second.next_human_verb == "sofact gate approve P2 --by <you>"
+		assert second.next_human_verb == "sofact gate --approve P2 --by <you>"
 
 
 class TestTheActionTable:

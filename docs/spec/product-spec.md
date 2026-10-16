@@ -1897,7 +1897,7 @@ v0.1's lane and oracle definition formats are retained. New surface:
 - **`sofact contract`** — P4; emits contracts + manufactured oracles.
 - **`sofact build`** — P5–P7; runs the platform build.
 - **`sofact report`** — the delivery report (§11).
-- **`sofact gate approve <phase>`** — the only way past a gate, attributable to a
+- **`sofact gate --approve <phase>`** — the only way past a gate, attributable to a
   human identity (FR-061, NFR-017).
 
 **Running in v0.1** — the subset of the above that exists as executable code today:
