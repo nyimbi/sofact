@@ -145,6 +145,13 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-165 undecidable row measured by differential | **Implemented** | `test_an_unprobed_capability_reads_inconclusive_not_absent` (`test_harness.py:448`), `test_a_quick_probe_skips_the_rows_that_need_a_second_child` (`test_service.py:423`). |
 | FR-166 key then reuse | **Implemented** | `verdict_cache_key` (`verification.py:71`), `VERDICT_REUSED` (`views.py:1848`); `test_an_unchanged_workspace_reuses_the_verdict` (`test_service.py:1336`), `test_a_changed_artefact_is_measured_again` (`:1373`). |
 | FR-167 research is dispatched, not performed | **Implemented** | `research` (`service.py:1326`); `test_a_completed_loop_records_the_report_and_its_sources` (`test_service.py:1453`), `test_a_truncated_loop_is_a_fact_not_a_failure_to_report` (`:1481`). |
+| FR-168 a spoken goal, and the audio digest it came from | **Implemented** | `TranscriberSpec`/`load_transcriber_specs`/`TRANSCRIBERS`/`parse_transcript` (`transcribe.py`), `speak` (`service.py`), `sofact speak` (`cli.py`); `test_transcribe.py`. The transcript is read from the file the tool wrote rather than from stdout, and the audio's SHA-256 is recorded — a transcript whose digest is not the audio you passed is not a transcript of it. **No built-in entry ships**, because no speech-to-text tool is a dependency of this product. |
+| FR-169 the competitive baseline is a cited artefact, and an unsourced rival does not count | **Implemented** | `CompetitiveScan`/`Competitor`/`CompetitorCapability`/`parse_scan` (`competitive.py`), the competitive section in `research_goal` (`service.py:255`), `competitors` (`service.py`), `sofact competitors` (`cli.py`); `test_competitive.py`. A competitor with no `source_ids` is recorded **unsourced** and excluded from the baseline; one with no capabilities is **unexamined**; a scan over zero sourced competitors reports `None`, never `0` (NFR-024). SoFact cannot name the best systems in an arbitrary domain, so the producer identifies them under a criterion SoFact writes, and the identification is an artefact with its own evidence. |
+| FR-170 an exceedance is a declaration against a cited baseline | **Implemented** | `ExceedanceDeclaration` (`views.py`), `declare_exceedance`/`exceedances` (`service.py`), the `exceedance_declared` check (`delivery.py`), `sofact exceed` (`cli.py`); `TestTheExceedanceIsDeclaredNotVerified` (`test_delivery.py`). A baseline with no source ids is refused — a claim to exceed nothing is a wish. **No oracle in O1–O8 compares two systems**, so the check reports `N declared, 0 verified by oracle` with `passed=True` and the obligation stays in `DELIVERY_REQUIREMENTS`: nothing may print an exceedance as a verified capability. |
+| FR-171 the specification document is rendered at P2 and every requirement annotated | **Implemented** | `SPEC_DOC_HEADINGS`/`RequirementAnnotation`/`annotate`/`render_specification_document` (`specdoc.py`), `write_specification` (`service.py`), `sofact spec-doc` (`cli.py`); `test_specdoc.py`. Every requirement carries its provenance — the stem it descends from, that stem's elicitation dimension, the answer's id **and whether it was operator or `model:` and whether it was attested**, the research verdict, the competitor capabilities, the exceedance, and the oracle's class and rank. An unattested requirement is visibly unattested with the marker derived from the ledger, so the document cannot be rendered clean over a specification whose answers nobody read. |
+| FR-172 one verb drives the pipeline, stops at every gate, and is idempotent | **Implemented** | `DriverAction`/`DRIVER_ACTIONS`/`run_goal` (`driver.py`), `DriverRun`/`DriverStep`/`DriverTerminal`/`DriverOutcome` (`views.py`), `record_driver_run`/`current_gate_checks` (`service.py`), `sofact build` (`cli.py`); `test_driver.py`. **No branch returns `DELIVERED` with a gate open**, and the driver has no code path that advances one (FR-061) — it halts at each of the four in turn and `--resume` continues from the ledger, because the loop re-reads state rather than holding a cursor. Idempotency is asserted on ledger length. **Three defects the end-to-end walk found, all one shape:** `approve_gate` decided on the frozen presented row, so a gate whose defect was repaired could never be passed; the driver named `gate approve` for a gate whose machine half had failed, a verb that can only refuse; and the build guard read `sealed_dispatches`, which filters on reviewability, so a producer that commits its own work left it empty and the whole plan was re-dispatched 64 times until the run reported `exhausted` on a completed build. |
+| FR-173 a model-proposed answer does not resolve a dimension | **Implemented** | `MODEL_ANSWER_PREFIX`/`ElicitationAnswer.is_model_proposed`/`ElicitationAttestation` (`views.py`), `assess(..., attested=...)` (`elicitation.py`), `propose_answers`/`attest` (`service.py`), `sofact attest` (`cli.py`); `TestAModelProposalIsNotAnAnswer` (`test_elicitation.py`). A model-proposed unattested answer is reported **open** with the proposal's id, so `draft` cannot be reached; an attestation whose `attested_by` is itself model-prefixed is refused. The floor stays deterministic — what changes is that a paragraph a model wrote can no longer clear it on the operator's behalf. **Attestation records that a human read an answer, not that it is correct.** |
+| FR-174 SoFact authors its own search queries and every hit is a lead | **Implemented** | `SearcherSpec`/`load_searcher_specs`/`authored_queries`/`parse_search_results` (`search.py`), `search` (`service.py`), `sofact search` (`cli.py`); `test_search.py`. The queries are composed from the goal's own words **before any provider runs** and written into the log, so what was asked is answerable from the ledger alone — a provider asked what to search for chooses its own subject list. Every hit is recorded at `VerificationStatus.REPORTED` and `SearchHit` refuses to be constructed at `CONTENT_VERIFIED` at all; a hit with no url is refused; a failed query is recorded as failed rather than as a domain with no results. |
 
 ### Counts
 
@@ -246,18 +253,33 @@ qualification rather than as the bare word, and so the one a prefix match would 
 drop. That is why the tally is **derived from the row count by a test** (ADR-0065) rather
 than trusted, and why the derivation splits each row on the pipe rather than matching it
 with a regex: an evidence cell contains `|`, so a non-greedy pattern reads 77 rows where the
-table has 119.
+table has 126.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 91 |
+| Implemented | 98 |
 | Partly | 28 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 0 |
-| **Total rows** | **119** |
+| **Total rows** | **126** |
 
 Rows, not FR numbers: several rows cover a stated range (FR-008–011, FR-016–020), so
 this counts the classification units rather than the FR identifiers inside them.
+
+**The 2026-10-16 front-door unit (ADR-0070, ADR-0071) added seven rows and moved none.**
+FR-168 through FR-174 — transcription, the competitive baseline, the exceedance
+declaration, the specification document, the driver, attestation and SoFact's own search —
+are new requirements rather than newly-satisfied old ones, so every one of them enters at
+**Implemented** and the arithmetic is `91/28/0/0` becomes **`98/28/0/0`** over **126** rows.
+Implemented is the honest class for each: every row names a module, a service method, a verb
+and a test module that fails if the behaviour is removed, and each verdict cell states the
+limit that is *inside* the requirement rather than a missing half of it — FR-170's oracle
+count is zero by design because no oracle class compares two systems, FR-169 reports `None`
+rather than `0` over an empty baseline, and FR-172's driver stops at four gates because
+FR-061 makes a gate a hard stop. A limit the requirement itself names is the requirement
+discharged; a limit the requirement does not name is the Partly column, and none of these
+seven has one. Re-derived by re-running the classifier over all 126 rows rather than adjusted
+by hand.
 
 **The counting rule, stated because the last refresh did not state it, and corrected on
 2026-10-15 because the statement was narrower than the classifier it described.** A row is

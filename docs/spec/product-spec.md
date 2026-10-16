@@ -2088,6 +2088,131 @@ decides *among* candidates by measurement, and `dsh` can still lose that contest
 The two are not in conflict: §8.6 picks what to probe first, FR-147 picks what to
 keep.
 
+### 18.5 The front door — voice in, a built system out (FR-168 to FR-174)
+
+The operator's request was one sentence with seven clauses: *give a voice description,
+research the best systems in the world, specify capabilities that exceed them, write a
+detailed annotated specification, plan the build, build and verify it, and notify me
+when it is built.* Three of those seven had no representation in this tree in any form —
+transcription, notification, and any single verb that drives the pipeline. A full run
+was eleven hand-typed invocations.
+
+The design is constrained from both sides, and the constraints are load-bearing rather
+than inconvenient. **FR-061 makes a gate a hard stop** (`advance_phase` can never pass
+one; `approve_gate(phase, *, by)` is the only human half), so an unattended run *cannot*
+reach a delivery without a person — and the honest design is to stop rather than invent
+a way past. **ADR-0064 keeps model-reaching modules out of the authoring surfaces**, so
+anything that opens a socket lives outside them and `sofact authorship` is the gate that
+says so.
+
+**FR-168** *(a transcriber is a declared external tool)* Speech-to-text must be a
+**declared argv template in a JSON table**, resolved by name, launched as a child
+process, and judged by the exit code and the file it wrote — `HarnessSpec`'s shape, for
+its reason. **No built-in entry ships**, and that is a decision rather than an omission:
+no speech-to-text tool is a dependency of this product, so there is no ambient one to
+fall back to, and a machine with none configured gets a refusal naming the variable to
+set. The transcript is read **from the file the tool wrote**, never from stdout, and the
+audio's **SHA-256 is recorded** — a transcript whose digest is not the audio you passed
+is not a transcript of it. `Transcript.text` is a plain `str` and not a `NonEmptyStr`,
+because a transcription that failed is a real state and rounding it into an empty goal
+would show the operator a goal with a blank statement rather than a tool that did not
+run.
+
+**FR-169** *(the competitive baseline is producer-chosen and recorded as such)* SoFact
+**cannot name the best systems in the world** for an arbitrary domain, and pretending to
+would be the machine writing the claim it then measures. So SoFact **authors the subject
+and the selection criterion** into the research prompt — the reason `research_goal`
+writes the clause ids in today — and the producer identifies the systems under them, as
+an artefact with its own evidence, parsed fail-closed. A rival with **no source ids is
+recorded as unsourced** and does not count toward the baseline; a rival with **no
+capabilities is recorded as unexamined**; a source id naming nothing in the ledger is
+**dangling rather than dropped**. Each count is carried, never rounded: `None` when the
+artefact is absent, and a scan over zero sourced rivals **claims nothing** (NFR-024).
+The report says the producer chose them and does not claim the set is the best in the
+world.
+
+**FR-170** *(an exceedance is declared against a cited baseline, and never verified)* No
+oracle in O1–O8 compares two systems, and the authorship closure would not survive
+putting one that reads a rival's behaviour inside the authoring path. So a capability
+meant to exceed a rival's is an `ExceedanceDeclaration`: non-empty `baseline_source_ids`
+(a claim to exceed something nobody can look up is a wish) and non-empty `clause_ids`
+(FR-076's rule, so it traces to something the operator asked for). `measured_margin`
+returns `None` **always** — that is NFR-024 stated as a type, not an unimplemented
+method. The delivery report gains a check that **passes on every branch** and says
+`N declared, 0 verified by oracle`, for `machine_surface_not_verified`'s reason:
+refusing a delivery for a property no oracle observes would refuse all of them, and the
+obligation belongs in the report a human reads rather than in a gate that can never pass.
+**Nothing may print an exceedance as a verified capability.**
+
+**FR-171** *(the specification document is rendered at P2, and every requirement is
+annotated)* `SPECIFICATION.md` is rendered **deterministically and model-free** — two
+renders of one input are byte-identical — and written at **P2**, because that is the
+artefact the first gate is a gate *on* and a specification nobody can read is not gated
+by anything a human did. `PRODUCT_SPEC_HEADINGS` is asserted against the render, the
+`DELIVERY_HEADINGS` convention one module over, so a dropped section is a failure rather
+than a shorter document. **"Annotated" is the whole content of the feature**: every
+requirement carries the clause stem it descends from, that stem's `derived_from`
+elicitation dimension, the answer id and **whether a person or a model wrote it and
+whether it was attested**, the research verdict and its evidence ids, the rival
+capabilities it is positioned against, any exceedance it belongs to, and its oracle's
+class and rank. Two consequences follow and both are the point: an **unattested
+requirement is visibly unattested** — the marker is derived from the ledger, not passed
+in, so the document cannot be rendered clean over a specification whose answers nobody
+read — and an **unoracled requirement prints as unverified**, so the document cannot read
+as stronger than the contract it renders.
+
+**FR-172** *(one verb drives the pipeline, stops at every gate, and a notification that
+was not sent is not a notification)* `sofact build` is a **loop over the ledger**, not a
+held process, so `--resume` is the same code path as a cold start and a run killed
+mid-way continues correctly. **It has no code path that advances a gate**: at each gate
+it records a halt, notifies, and returns, naming the command that continues it. Running
+it twice is a no-op the second time, asserted on **ledger length** rather than on the
+outcome. `DriverTerminal` is `GATE_OPEN` / `DELIVERED` / `REFUSED` / `EXHAUSTED` /
+`FAILED`, and `claims_built` is true for `DELIVERED` alone — so a run stopped at a gate
+cannot produce a message reading "built". The notification row is appended whether or not
+a process launched, `delivered` is **derived** from the exit code rather than declared,
+and the body is **digested, not stored**: a notification names the system being built and
+the ledger is durable. `sent=False` is reported as *not notified* everywhere it is read.
+
+**FR-173** *(a model's answer is not an answer)* A model asked to draft the six
+elicitation answers can clear the deterministic floor — `MIN_STEM_CHARS`, ORACLE's
+`required_markers` — with plausible prose that nobody said. That answer would pass P0 and
+become a requirement in a specification the operator then "approved", and nothing
+downstream would fail: the "written and never read" defect with a human's signature on
+it. `answered_by` was already `NonEmptyStr` and nothing distinguished `"operator"` from
+`"model:qwen"`. `MODEL_ANSWER_PREFIX` and `ElicitationAnswer.is_model_proposed` make the
+distinction representable; `ElicitationAttestation` records the human half and **refuses
+an attestation whose `attested_by` is itself model-prefixed**; and `assess(...,
+attested=...)` reports a model-proposed unattested answer as **open**, naming the
+proposal's id and the verb that resolves it. `attested` **defaults to empty** —
+deliberately, so a caller that forgets it gets the refusing answer rather than the
+permissive one. The floor stays deterministic: what changes is that a paragraph a model
+wrote can no longer clear it on the operator's behalf. **Attestation records that a human
+read an answer, not that it is correct** — the same distinction `elicitation.py` already
+draws about the floor.
+
+**FR-174** *(SoFact searches, and a hit is a lead rather than a source)* SoFact must
+**author the queries** from the goal's own words before any provider runs and write them
+into the log, so what was asked is answerable from the ledger alone — a provider asked
+what to search for chooses its own subject list, and the check that the right things were
+searched would then be measuring the provider against itself. The provider is a declared
+argv template, as FR-168's transcriber is. Every hit is recorded at
+`VerificationStatus.REPORTED`, the weakest rung, and `SearchHit` **refuses to be
+constructed at `CONTENT_VERIFIED` at all**: a provider returns a title, a url and a
+snippet it chose and possibly generated, and promoting that to evidence would let a
+machine-written excerpt be cited as a page a human read. A hit with **no url is refused
+outright** — a result nobody can look up is not a lead — and a query that **failed** is
+recorded as failed rather than as a domain with no results, because those two call for
+opposite responses and a hit count alone cannot tell them apart.
+
+**The cost, stated rather than worked around.** Four gates mean four stops for a full
+run, and no single pre-authorization is offered: approving a specification, a
+decomposition and a contract sample before any of them exists is exactly what the gate
+design is for. SoFact **cannot verify an exceedance**, **cannot vouch for the competitive
+baseline**, and **cannot make a model-drafted answer true**. It adds no dependency: both
+external tools are declared argv templates, and a machine with neither configured gets a
+named refusal at the front door rather than an `ImportError`.
+
 **The evidence gap, stated plainly.** [S04] (~78.4%) and [S05] (77.4%) measure
 harnesses on *patch generation against existing repositories with an existing test
 suite* — the Mode M setting. There is **no benchmark evidence for Mode G** (empty
@@ -2346,6 +2471,7 @@ manufactured oracles depend on it.
 | §8.3 termination ≠ verification | [S08] [S18] | Medium — **novel synthesis**; [S08] gives the failure modes, not this conclusion |
 | §8.1 delegation vs apparatus cost | [S08] [S10] | Strong for the costs of building the loop; [S08]'s phrase "harness of harness" means *layered harness for durability*, **not** orchestration of many harnesses — the term is reused here with a different meaning |
 | §18.4 Mode G harness evidence gap | [S04] [S05] | Medium — the cited figures are Mode M settings and do **not** transfer |
+| §18.5 FR-168–FR-174 front door | — | **None. Designed here.** The transcriber and notifier are declared argv templates with no shipped entry, so nothing in this section rests on a source; FR-173's defect is argued from this tree's own `assess`, and FR-170's "no oracle compares two systems" is a statement about O1–O8 rather than a citation |
 | §9.2 oracle manufacturing | [S01] [S15] [S07] | Medium — novel; ranks proposed by this spec |
 | §9.4 O8 integration oracle | [S07] [S09] | Weak — argued |
 | §10 integration is where systems fail | [S09] | Weak — conventional wisdom, not evidenced here |

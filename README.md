@@ -200,6 +200,53 @@ sofact gate --present P2            # the machine half: run the checks, report t
 sofact gate --approve P2 --by you   # the human half: recorded with who and when
 ```
 
+## The front door
+
+The whole pipeline is reachable from one description of what you want:
+
+```sh
+sofact speak interview.m4a        # a recording → a transcript → a goal (FR-168)
+sofact search                     # web search, queries composed from the goal (FR-174)
+sofact research                   # deep research, dispatched to a harness (FR-167)
+sofact competitors                # the competitive baseline, as a cited artefact (FR-169)
+sofact spec-doc                   # SPECIFICATION.md, every requirement annotated (FR-171)
+sofact build                      # drive the pipeline; stop at every gate (FR-172)
+```
+
+**Search is a capability of this product, not a request to someone else.** `sofact search`
+composes queries from the goal's own words *before* any provider runs, asks a **declared**
+provider — an argv template in `SOFACT_SEARCHER_SPECS`, so no engine is bundled and no
+socket is opened by this code — and records every hit as a **lead** at the weakest
+verification rung. A search result is a place to look; it is never evidence. A hit with no
+url is refused outright, and a query that failed is recorded as failed rather than as a
+domain with nothing in it, because those two call for opposite responses.
+
+**A specification document is a rendering of a fact.** `SPECIFICATION.md` is written at P2 —
+the artefact the first gate is a gate *on* — and every requirement carries its provenance:
+the clause stem it descends from, that stem's elicitation answer and **whether a human read
+it**, the research verdict and its evidence, the competitor capabilities it is positioned
+against, the exceedance it belongs to, and its oracle's class. A requirement whose answer a
+human never attested is marked **unattested** in the document, and the marker is derived
+from the ledger rather than passed in — so the document cannot be rendered clean over a
+specification nobody approved.
+
+**A model-proposed answer does not resolve a dimension.** `sofact attest <answer-id> --by
+you` is the human half, and an answer whose `answered_by` is `model:`-prefixed is reported
+as open until a person attests it. The floor under P0 stays deterministic; what changes is
+that a plausible paragraph a model wrote can no longer clear it on the operator's behalf.
+This is the one defect the feature would otherwise introduce — a requirement nobody said,
+in a specification the operator "approved", with nothing downstream failing.
+
+**`sofact build` stops at every gate and says which.** It is a loop over the ledger rather
+than a held process, so `--resume` is the same code path as a cold start and a driver killed
+mid-run resumes correctly. It has **no code path that advances a gate** (FR-061): at each
+gate it records a halt, notifies, and returns. Running it twice is a no-op the second time.
+
+**A notification that was not sent is not a notification.** `delivered` is derived from the
+exit code and never declared, the row is written whether or not a process launched, and the
+subject is composed from the run's terminal state — so a run stopped at a gate can never
+produce a message reading "built".
+
 ## How it works
 
 **The ledger is the system.** Every fact is an append-only, hash-chained event. All state
@@ -378,7 +425,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 1713 tests
+uv run pytest -vxs tests/ci          # 1881 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"
