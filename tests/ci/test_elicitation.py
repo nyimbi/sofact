@@ -32,8 +32,10 @@ from sofact.elicitation import (
 	spec_for,
 )
 from sofact.views import (
+	MODEL_ANSWER_PREFIX,
 	ClauseKind,
 	ElicitationAnswer,
+	ElicitationAttestation,
 	ElicitationDimension,
 	Readiness,
 	SpecificationDraft,
@@ -240,6 +242,157 @@ def test_next_open_returns_the_first_unresolved_dimension() -> None:
 	assert next_open(assess(goal_id, tuple(answers))) is ElicitationDimension.CONSUMER
 
 	assert next_open(assess(goal_id, all_answered(goal_id))) is None
+
+
+# --------------------------------------------------------------------------- #
+# a machine's answer is not a person's (FR-173)
+# --------------------------------------------------------------------------- #
+
+
+def a_proposal(
+	dimension: ElicitationDimension,
+	text: str,
+	*,
+	goal_id: str,
+	by: str = f"{MODEL_ANSWER_PREFIX}qwen",
+) -> ElicitationAnswer:
+	"""One model-proposed answer, otherwise identical to :func:`answered`."""
+	return ElicitationAnswer(
+		id=uuid7str(),
+		goal_id=goal_id,
+		dimension=dimension,
+		text=text,
+		answered_by=by,
+		at=now(),
+	)
+
+
+def proposed_everything(goal_id: str) -> tuple[ElicitationAnswer, ...]:
+	"""Every dimension answered by a model, with text that clears every floor.
+
+	The text is :data:`GOOD_ANSWERS` deliberately: these proposals are *adequate*. If
+	they were thin, a test that reports them open would pass for the wrong reason —
+	the floor would be doing the work, and the authorship rule would be untested.
+	"""
+	return tuple(
+		a_proposal(spec.dimension, GOOD_ANSWERS[spec.dimension], goal_id=goal_id)
+		for spec in DIMENSIONS
+	)
+
+
+def test_is_model_proposed_is_derived_from_answered_by() -> None:
+	"""The reader ``answered_by`` did not have, and the whole of FR-173's mechanism."""
+	goal_id = uuid7str()
+	assert answered(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed is False
+	assert a_proposal(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id).is_model_proposed is True
+
+
+def test_a_model_proposed_answer_that_clears_every_floor_still_does_not_resolve() -> None:
+	"""The defect FR-173 exists for, asserted on the floor it would otherwise clear.
+
+	The same texts through :func:`all_answered` are ready; through a model they are not.
+	That is the whole distinction — specificity is not authorship — and asserting both
+	halves in one test is what stops the second from passing because the texts are thin.
+	"""
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+	assert assess(goal_id, proposals, attested=frozenset(a.id for a in proposals)) .is_ready, (
+		"the proposal texts must be adequate, or this test measures the floor"
+	)
+	assert assess(goal_id, all_answered(goal_id)).is_ready
+
+	readiness = assess(goal_id, proposals)
+	assert not readiness.is_ready
+	assert readiness.open_dimensions == DECLARATION_ORDER
+
+
+def test_the_open_reason_names_the_proposal_and_the_verb_that_resolves_it() -> None:
+	"""A refusal that does not say what to do about it is a wall, not a gate."""
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+	readiness = assess(goal_id, proposals)
+
+	proposal_ids = {a.id for a in proposals}
+	named = 0
+	for status in readiness.statuses:
+		assert not status.resolved
+		reason = " ".join(status.reasons)
+		assert "attested by nobody" in reason
+		assert "sofact attest" in reason
+		named += sum(1 for answer_id in proposal_ids if answer_id in reason)
+	assert named == len(DIMENSIONS), "every open dimension must name its own proposal"
+
+
+def test_attesting_every_proposal_resolves_the_interrogation() -> None:
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+	attested = frozenset(a.id for a in proposals)
+
+	assert assess(goal_id, proposals, attested=attested).is_ready
+
+
+def test_attesting_one_proposal_resolves_one_dimension() -> None:
+	"""Partial attestation is the ordinary case: a person reads what they have read."""
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+	one = proposals[0]
+	readiness = assess(goal_id, proposals, attested=frozenset({one.id}))
+
+	resolved = {s.dimension for s in readiness.statuses if s.resolved}
+	assert resolved == {one.dimension}
+
+
+def test_an_operators_own_answer_supersedes_a_proposal_and_needs_no_attestation() -> None:
+	"""The cheap way out, and it must stay cheap: answering is not a separate ritual."""
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+	mine = answered(
+		ElicitationDimension.ORACLE,
+		GOOD_ANSWERS[ElicitationDimension.ORACLE],
+		goal_id=goal_id,
+	)
+	readiness = assess(goal_id, (*proposals, mine))
+
+	resolved = {s.dimension for s in readiness.statuses if s.resolved}
+	assert resolved == {ElicitationDimension.ORACLE}
+
+
+def test_a_draft_refuses_a_proposal_nobody_attested() -> None:
+	"""``attested`` is threaded through rather than dropped, so a stale readiness
+	reading cannot reach a draft built from a proposal."""
+	goal_id = uuid7str()
+	proposals = proposed_everything(goal_id)
+
+	with pytest.raises(ValueError) as caught:
+		draft_stems(goal_id, proposals)
+	assert "still open:" in str(caught.value)
+
+	attested = frozenset(a.id for a in proposals)
+	assert draft_stems(goal_id, proposals, attested=attested).stems
+
+
+def test_an_attestation_by_a_machine_is_refused() -> None:
+	"""A model signing for a person restores exactly the state the record exists to
+	make visible, so the view refuses it rather than the caller being trusted not to."""
+	goal_id = uuid7str()
+	answer = a_proposal(ElicitationDimension.OUTCOME, "x" * 40, goal_id=goal_id)
+
+	with pytest.raises(ValueError) as caught:
+		ElicitationAttestation(
+			id=uuid7str(),
+			answer_id=answer.id,
+			attested_by=f"{MODEL_ANSWER_PREFIX}qwen",
+			at=now(),
+		)
+	assert "an attestation by a machine is not an attestation" in str(caught.value)
+
+	record = ElicitationAttestation(
+		id=uuid7str(),
+		answer_id=answer.id,
+		attested_by="operator",
+		at=now(),
+	)
+	assert record.answer_id == answer.id
 
 
 # --------------------------------------------------------------------------- #

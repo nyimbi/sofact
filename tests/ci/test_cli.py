@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -2903,3 +2904,375 @@ class TestTheAuthorshipVerb:
 
 		assert result.exit_code == 0, result.output
 		assert "authorship.checked" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# FR-174: the search verb
+# --------------------------------------------------------------------------- #
+
+SEARCH_PROVIDER = '''\
+import json, sys
+from pathlib import Path
+
+mode, query, workspace = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+if mode == "crash":
+	sys.exit(4)
+if mode == "empty":
+	payload = {"results": []}
+else:
+	payload = {"results": [
+		{"title": f"About {query}", "url": "https://example.test/one", "content": "a snippet"},
+	]}
+(workspace / "results.json").write_text(json.dumps(payload))
+'''
+
+
+class TestTheSearchVerb:
+	"""``sofact search`` asks a declared provider and records the scan (FR-174).
+
+	Driven through a real ``SOFACT_SEARCHER_SPECS`` file over a real child process, so
+	what is under test is the configuration seam itself rather than a Python-side stub.
+	"""
+
+	def _configure_search(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		script = tmp_path / "provider.py"
+		script.write_text(SEARCH_PROVIDER, encoding="utf-8")
+		table = tmp_path / "searchers.json"
+		table.write_text(
+			json.dumps(
+				{
+					"searchers": {
+						"synthetic": {
+							"argv": [sys.executable, str(script), mode, "{query}", "{workspace}"],
+							"results_glob": "results.json",
+						}
+					}
+				}
+			),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_SEARCHER_SPECS", str(table))
+		monkeypatch.setenv("SOFACT_SEARCHER", "synthetic")
+
+	def test_search_without_a_goal_says_so(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_search(tmp_path, monkeypatch, "ok")
+		result = RUNNER.invoke(app, ["--home", str(home), "search"])
+		assert result.exit_code == 1
+		assert "no goal yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_search_without_a_provider_is_a_named_refusal(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""This build ships no provider, and the refusal names the variable to set."""
+		monkeypatch.delenv("SOFACT_SEARCHER", raising=False)
+		monkeypatch.delenv("SOFACT_SEARCHER_SPECS", raising=False)
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "search"])
+		assert result.exit_code == 1
+		assert "no search provider is configured" in result.output
+		assert "Traceback" not in result.output
+
+	def test_a_scan_prints_its_hits_as_leads(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_search(tmp_path, monkeypatch, "ok")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "search"])
+		assert result.exit_code == 0, result.output
+		assert "hit(s)" in result.output
+		assert "https://example.test/one" in result.output
+		assert "never as evidence" in result.output
+
+	def test_a_scan_with_no_hits_is_reported_as_a_measurement(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A domain with no results is a finding, not a failure — exit 0 either way."""
+		self._configure_search(tmp_path, monkeypatch, "empty")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "search"])
+		assert result.exit_code == 0, result.output
+		assert "measurement about the domain" in result.output
+
+	def test_a_failed_query_is_reported_as_not_established(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_search(tmp_path, monkeypatch, "crash")
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "search"])
+		assert "FAILED" in result.output
+		assert "has not established that nothing exists" in result.output
+
+	def test_the_scan_is_recorded_in_the_ledger(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		self._configure_search(tmp_path, monkeypatch, "ok")
+		conversation(home)
+		RUNNER.invoke(app, ["--home", str(home), "search"])
+
+		result = RUNNER.invoke(app, ["--home", str(home), "ledger"])
+
+		assert result.exit_code == 0, result.output
+		assert "search_scan.recorded" in result.output
+
+
+# --------------------------------------------------------------------------- #
+# FR-168, FR-170, FR-171, FR-172: the front-door verbs
+# --------------------------------------------------------------------------- #
+
+TRANSCRIBER = '''\
+import sys
+from pathlib import Path
+
+mode, audio, workspace = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+if mode == "crash":
+	sys.exit(3)
+text = "" if mode == "empty" else "A reminder service that shows scheduled reminders."
+(workspace / "transcript.txt").write_text(text)
+'''
+
+NOTIFIER = '''\
+import sys
+
+sys.exit(0 if sys.argv[1] == "ok" else 7)
+'''
+"""A notifier whose only job is its exit code: ``delivered`` is derived from it."""
+
+
+class TestTheFrontDoorVerbs:
+	"""Each new verb refuses with a named reason, an exit code, and no traceback.
+
+	The refusals are the substance rather than the courtesy: this build ships no
+	transcriber and no notifier, so a machine with neither configured must meet a
+	sentence naming the variable to set, not an ``ImportError`` and not a stack. Every
+	assertion here is on the *refusal*, because the happy paths are measured in
+	``test_transcribe.py``, ``test_notify.py`` and ``test_driver.py`` where the objects
+	live — a CLI test that re-drove them would be measuring the fixture.
+	"""
+
+	def _configure_transcriber(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> Path:
+		script = tmp_path / "stt.py"
+		script.write_text(TRANSCRIBER, encoding="utf-8")
+		table = tmp_path / "transcribers.json"
+		table.write_text(
+			json.dumps(
+				{
+					"transcribers": {
+						"synthetic": {
+							"argv": [sys.executable, str(script), mode, "{audio}", "{workspace}"],
+							"text_glob": "transcript.txt",
+						}
+					}
+				}
+			),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_TRANSCRIBER_SPECS", str(table))
+		monkeypatch.setenv("SOFACT_TRANSCRIBER", "synthetic")
+		audio = tmp_path / "note.wav"
+		audio.write_bytes(b"RIFF....WAVEfmt ")
+		return audio
+
+	def _configure_notifier(
+		self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+	) -> None:
+		script = tmp_path / "notify.py"
+		script.write_text(NOTIFIER, encoding="utf-8")
+		table = tmp_path / "notifiers.json"
+		table.write_text(
+			json.dumps(
+				{
+					"notifiers": {
+						"synthetic": {
+							"argv": [sys.executable, str(script), mode, "{subject}", "{body_path}"],
+							"expect_exit_code": 0,
+						}
+					}
+				}
+			),
+			encoding="utf-8",
+		)
+		monkeypatch.setenv("SOFACT_NOTIFIER_SPECS", str(table))
+		monkeypatch.setenv("SOFACT_NOTIFIER", "synthetic")
+
+	# speak ------------------------------------------------------------------ #
+
+	def test_speak_without_a_transcriber_is_a_named_refusal(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""No built-in entry ships, so the refusal has to name the variable."""
+		monkeypatch.delenv("SOFACT_TRANSCRIBER", raising=False)
+		monkeypatch.delenv("SOFACT_TRANSCRIBER_SPECS", raising=False)
+		audio = tmp_path / "note.wav"
+		audio.write_bytes(b"RIFF")
+		result = RUNNER.invoke(app, ["--home", str(home), "speak", str(audio)])
+		assert result.exit_code == 1, result.output
+		assert "transcriber" in result.output.lower()
+		assert "Traceback" not in result.output
+
+	def test_speak_opens_a_goal_from_the_transcript(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		audio = self._configure_transcriber(tmp_path, monkeypatch, "ok")
+		result = RUNNER.invoke(app, ["--home", str(home), "speak", str(audio)])
+		assert result.exit_code == 0, result.output
+		assert "opened from the transcript" in result.output
+		assert "sha256" in result.output, "the audio's digest is what binds it to the recording"
+
+	def test_speak_records_the_transcript_alone_with_no_start(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""A transcript is a record about a statement, so it can be taken on its own."""
+		audio = self._configure_transcriber(tmp_path, monkeypatch, "ok")
+		result = RUNNER.invoke(app, ["--home", str(home), "speak", str(audio), "--no-start"])
+		assert result.exit_code == 0, result.output
+		assert "no goal was opened" in result.output
+		recorded = (home / "ledger.jsonl").read_text(encoding="utf-8")
+		assert "transcript.recorded" in recorded, "the transcript is the record it exists to be"
+		assert "goal.created" not in recorded, "a transcript alone opens no goal"
+
+	def test_a_transcriber_that_produces_no_text_opens_no_goal(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""An empty statement would be interrogated against nothing."""
+		audio = self._configure_transcriber(tmp_path, monkeypatch, "empty")
+		result = RUNNER.invoke(app, ["--home", str(home), "speak", str(audio)])
+		assert result.exit_code == 1, result.output
+		assert "no goal was opened" in result.output
+		assert "Traceback" not in result.output
+
+	# attest ----------------------------------------------------------------- #
+
+	def test_attest_without_a_goal_says_so(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		result = RUNNER.invoke(app, ["--home", str(home), "attest", "--all", "--by", "operator"])
+		assert result.exit_code == 1, result.output
+		assert "no goal yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_attest_with_nothing_to_attest_is_a_named_refusal(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "attest", "--by", "operator"])
+		assert result.exit_code == 1, result.output
+		assert "nothing to attest" in result.output
+		assert "Traceback" not in result.output
+
+	# exceed ---------------------------------------------------------------- #
+
+	def test_exceed_refuses_a_baseline_with_no_evidence(self, home: Path) -> None:
+		"""A claim to exceed something nobody can look up is a wish (FR-170)."""
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home", str(home), "exceed",
+				"--capability", "sub-second reconciliation",
+				"--baseline", "Rival Cloud",
+				"--rationale", "their window is hourly",
+				"--clause-id", "01a14000-0000-7000-8000-000000000000",
+			],
+		)
+		assert result.exit_code == 1, result.output
+		assert "--source-id is required" in result.output
+		assert "Traceback" not in result.output
+
+	def test_exceed_refuses_a_claim_tracing_to_no_clause(self, home: Path) -> None:
+		"""FR-076's rule at the declaration: it must trace to what was asked for."""
+		result = RUNNER.invoke(
+			app,
+			[
+				"--home", str(home), "exceed",
+				"--capability", "sub-second reconciliation",
+				"--baseline", "Rival Cloud",
+				"--rationale", "their window is hourly",
+				"--source-id", "01a14000-0000-7000-8000-000000000000",
+			],
+		)
+		assert result.exit_code == 1, result.output
+		assert "--clause-id is required" in result.output
+		assert "Traceback" not in result.output
+
+	# spec-doc -------------------------------------------------------------- #
+
+	def test_spec_doc_without_a_contract_says_so(self, home: Path) -> None:
+		conversation(home)
+		result = RUNNER.invoke(app, ["--home", str(home), "spec-doc"])
+		assert result.exit_code == 1, result.output
+		assert "no contract yet" in result.output
+		assert "Traceback" not in result.output
+
+	def test_spec_doc_renders_and_writes_the_document(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		conversation(home)
+		assert RUNNER.invoke(
+			app, ["--home", str(home), "contract", "--command", "true"]
+		).exit_code == 0
+		assert RUNNER.invoke(
+			app, ["--home", str(home), "specify", "--approve", *SPECIFY_ARGS]
+		).exit_code == 0
+		root = tmp_path / "out"
+		result = RUNNER.invoke(app, ["--home", str(home), "spec-doc", "--root", str(root)])
+		assert result.exit_code == 0, result.output
+		assert (root / "SPECIFICATION.md").exists(), "the document is the feature (FR-171)"
+		assert "product specification" in result.output
+
+	# notify ---------------------------------------------------------------- #
+
+	def test_notify_without_a_notifier_is_a_named_refusal(
+		self, home: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		monkeypatch.delenv("SOFACT_NOTIFIER", raising=False)
+		monkeypatch.delenv("SOFACT_NOTIFIER_SPECS", raising=False)
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "notify", "--subject", "s", "--body", "b"],
+		)
+		assert result.exit_code == 1, result.output
+		assert "notifier" in result.output.lower()
+		assert "Traceback" not in result.output
+
+	def test_a_notifier_that_exits_non_zero_is_reported_as_not_delivered(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""``delivered`` is derived from the exit code, so this must not print as sent."""
+		self._configure_notifier(tmp_path, monkeypatch, "fail")
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "notify", "--subject", "s", "--body", "b"],
+		)
+		assert result.exit_code == 1, "a script cannot see the prose, so the exit code must carry it"
+		assert "NOT delivered (exit 7)" in result.output
+		assert "no process ran" not in result.output, "a process did run; the prose must not say otherwise"
+		assert "Traceback" not in result.output
+
+	# build ----------------------------------------------------------------- #
+
+	def test_build_with_no_goal_and_no_resume_says_so(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		configure(tmp_path, monkeypatch)
+		result = RUNNER.invoke(app, ["--home", str(home), "build"])
+		assert result.exit_code == 1, result.output
+		assert "no goal" in result.output
+		assert "Traceback" not in result.output
+
+	def test_build_stops_at_the_gate_and_names_the_verb(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The headline property: a run at a gate says so and says what continues it."""
+		configure(tmp_path, monkeypatch)
+		result = RUNNER.invoke(
+			app,
+			["--home", str(home), "build", "--statement", "A reminder dashboard.", "--no-notify"],
+		)
+		assert result.exit_code == 0, result.output
+		assert "NOT built" in result.output, "a stopped run may not read as a build"
+		assert "Traceback" not in result.output

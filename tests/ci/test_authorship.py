@@ -387,6 +387,28 @@ class TestGovernanceAbsenceIsMeasuredInTwoHalves:
 		assert "pricing" not in GOVERNANCE_ABSENT_REASON
 		assert "payment" in GOVERNANCE_ABSENT_REASON
 
+	def test_the_vocabulary_is_read_off_the_enum_rather_than_transcribed(self) -> None:
+		"""Every ledger kind's verb appears, and no verb the enum does not hold does.
+
+		The sentence's whole claim is that it is a *checkable* statement about this tree,
+		and it was the one thing nothing checked: transcribed by hand, it had drifted to
+		naming twenty-eight acts against an enum of thirty-three, having lost ``diff``,
+		``oracle``, ``adversarial`` and ``authorship`` without a single test failing. A
+		list that describes the tree and is not derived from it is a claim wearing a
+		finding's clothes.
+		"""
+		verbs = {kind.value.split(".")[0] for kind in LedgerKind}
+		for verb in verbs:
+			assert verb in GOVERNANCE_ABSENT_REASON, (
+				f"the ledger holds {verb!r} and the absence reason does not name it"
+			)
+		named = GOVERNANCE_ABSENT_REASON.split("vocabulary of acts: ", 1)[1].split(".", 1)[0]
+		for token in (t.strip() for t in named.split(",")):
+			assert token in verbs, (
+				f"the absence reason names {token!r}, which is not a ledger kind: the "
+				"reason is describing a vocabulary the tree does not have"
+			)
+
 
 # --------------------------------------------------------------------------- #
 # the view — the validator, the three-way verdict, and the round trip

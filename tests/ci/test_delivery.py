@@ -77,6 +77,7 @@ from sofact.views import (
 	EnvelopeDimension,
 	EscapeBudget,
 	EscapeReport,
+	ExceedsClaim,
 	GateCheck,
 	GateCost,
 	Handover,
@@ -1611,6 +1612,109 @@ class TestTheHandover:
 # --------------------------------------------------------------------------- #
 # FR-119 — the gate is human, permanent, and not waivable
 # --------------------------------------------------------------------------- #
+
+
+class TestAnExceedanceIsDeclaredAndNeverVerified:
+	"""FR-170's check reports rather than passes, for FR-120's reason.
+
+	No oracle in O1-O8 compares two systems, so an exceedance can never be *verified*
+	here. The defect this class guards is the one the requirement is written against: a
+	report that printed an exceedance under a heading a reader would take as a result.
+	The check therefore passes on every branch and says ``0 verified by oracle`` — and
+	the two branches are asserted separately, because "nothing was declared" and
+	"something was declared and nothing measured it" are different statements that an
+	empty table would collapse into one.
+	"""
+
+	def a_report_with(self, *claims: ExceedsClaim) -> DeliveryReport:
+		contract = one_clause_contract("the ledger records entries", command="true")
+		return report(
+			contract,
+			goal_id=contract.goal_id,
+			plan=compile_plan(contract),
+			decomposition=propose(contract),
+			specification=None,
+			verdicts={},
+			envelope_actuals=None,
+			system="the ledger service",
+			entry_point="/srv/ledger",
+			exceeds=claims,
+		)
+
+	def a_claim(self, contract: Contract) -> ExceedsClaim:
+		clause_id = contract.clauses[0].id
+		return ExceedsClaim(
+			id=uuid7str(),
+			goal_id=contract.goal_id,
+			capability="sub-second reconciliation",
+			baseline="Rival Ledger Cloud",
+			baseline_source_ids=(uuid7str(),),
+			rationale="the rival's published reconciliation window is hourly",
+			clause_ids=(clause_id,),
+			declared_by="operator",
+			declared_at=now(),
+		)
+
+	def check_for(self, rendered: DeliveryReport) -> GateCheck:
+		return next(c for c in rendered.checks if c.name == "exceedance_declared")
+
+	def test_no_declaration_is_reported_as_no_declaration(self) -> None:
+		"""Absence of a declaration is not the same as a met declaration."""
+		check = self.check_for(self.a_report_with())
+
+		assert check.passed
+		assert "no capability was declared" in check.detail
+		assert "absence" in check.detail
+
+	def test_a_declaration_is_reported_as_unverified_and_still_passes(self) -> None:
+		"""A check that cannot pass is one an operator learns to bypass (FR-120)."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		check = self.check_for(self.a_report_with(self.a_claim(contract)))
+
+		assert check.passed, "refusing a delivery for a property no oracle observes would refuse all"
+		assert "0 were verified by an oracle" in check.detail
+		assert "sub-second reconciliation" in check.detail
+		assert "Rival Ledger Cloud" in check.detail
+		assert "unmeasured by type" in check.detail
+		assert "NFR-024" in check.detail
+
+	def test_the_declaration_never_carries_a_measured_margin(self) -> None:
+		"""NFR-024 as a type: there is no measurement, so there is no number."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		claim = self.a_claim(contract)
+
+		assert claim.measured_margin is None
+
+	def a_claim_fields(self, contract: Contract) -> dict[str, object]:
+		"""The claim's own fields, as the mapping a validator refusal is built from.
+
+		Read off ``model_dump`` rather than retyped, so the test varies exactly one field
+		and the other twelve cannot drift out of step with the view.
+		"""
+		return dict(self.a_claim(contract).model_dump())
+
+	def test_a_claim_to_exceed_nothing_is_refused(self) -> None:
+		"""A baseline nobody can look up is a wish, not a claim."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		fields = self.a_claim_fields(contract)
+		fields["baseline_source_ids"] = ()
+		with pytest.raises(ValidationError):
+			ExceedsClaim.model_validate(fields)
+
+	def test_a_claim_traced_to_no_clause_is_refused(self) -> None:
+		"""FR-076's rule at the declaration: it must trace to what the operator asked for."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		fields = self.a_claim_fields(contract)
+		fields["clause_ids"] = ()
+		with pytest.raises(ValidationError):
+			ExceedsClaim.model_validate(fields)
+
+	def test_the_report_does_not_print_an_exceedance_as_a_result(self) -> None:
+		"""The class this guards: a heading a reader would take as a measurement."""
+		contract = one_clause_contract("the ledger records entries", command="true")
+		rendered = render_delivery_document(self.a_report_with(self.a_claim(contract)))
+
+		assert "0 were verified by an oracle" in rendered or "0 verified by oracle" in rendered
 
 
 class TestTheDeployGate:
