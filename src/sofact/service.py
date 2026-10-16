@@ -70,7 +70,7 @@ from sofact.harness import (
 from sofact.harness import (
 	spec_for as harness_spec_for,
 )
-from sofact.integration import attribute_files, integrate
+from sofact.integration import attribute_files, integrate, module_budget_readings, read_sources
 from sofact.intent import attributions_for, build_graph
 from sofact.ledger import LEDGER_FILENAME, LOCK_FILENAME, Ledger, LedgerEntry
 from sofact.llm import DEFAULT_MODEL, LlmClient, LlmUnavailable
@@ -107,6 +107,7 @@ from sofact.research import (
 	parse_classification,
 	parse_ledger,
 )
+from sofact.routing import DEFAULT_THETA, ConcernsFloor, RoutingRefusal, route
 from sofact.search import ConfiguredSearchAdapter as SearchAdapter
 from sofact.search import (
 	SearcherSpec,
@@ -214,6 +215,7 @@ from sofact.views import (
 	ResearchClassification,
 	ResearchMode,
 	ResearchRecord,
+	RouteDecision,
 	SearchScan,
 	SourceLedger,
 	Specification,
@@ -224,6 +226,7 @@ from sofact.views import (
 	StepOutcome,
 	SystemCriterion,
 	SystemModel,
+	ThetaThresholds,
 	Transcript,
 	ValueHypothesis,
 	VerdictOutcome,
@@ -4612,6 +4615,107 @@ class FactoryService:
 		if report_id is None:
 			return state.escapes
 		return state.escapes_for(report_id)
+
+	# ------------------------------------------- FR-024..FR-035: §5.1's routing function
+
+	async def routing_report(
+		self,
+		contract_id: str,
+		*,
+		measured_strength: bool = False,
+		floors: Sequence[ConcernsFloor] = (),
+		thresholds: ThetaThresholds = DEFAULT_THETA,
+	) -> tuple[RouteDecision, ...]:
+		"""§5.1's three lines for every lane of a contract, one decision each (FR-024–FR-035).
+
+		Reads the contract, the *approved* decomposition, the specification and the draft
+		from the log rather than taking any of them from the caller, for
+		:meth:`check_integration`'s reason: a routing decision is a statement about what
+		this project may do unattended, and a caller that could supply the clause-to-module
+		map or the traceability chain could supply one that makes an underivable lane look
+		admissible.
+
+		The decomposition is required rather than optional, and the same argument applies as
+		for integration: §14 makes a *module* the Mode G lane, so without an approved
+		decomposition there is no lane to route. A contract with no decomposition gets a
+		refusal naming the gate rather than an empty tuple, because an empty tuple reads as
+		"every lane is fine".
+
+		``measured_strength`` is FR-105's instrument and is **off by default** for
+		:meth:`render_delivery`'s reason: it launches a process per mutant, and with it off
+		every lane is ``undecided`` on ``f(oracle_strength)`` — which is the honest state,
+		not a missing feature. A caller that wants a decided ladder asks for the
+		measurement.
+
+		The boundary is probed once for the whole report, and only when a lane needs it:
+		``blast_radius_bounded`` reads it, and probing per lane would spend a process launch
+		per module to re-answer a question whose answer is a host property.
+		"""
+		state = await self.state()
+		contract = state.contract(contract_id)
+		if contract is None:
+			raise RoutingRefusal(
+				f"no contract {contract_id} in the log; §5.1 routes lanes, and the lanes are "
+				"the modules of an approved decomposition (FR-024–FR-035)"
+			)
+		try:
+			decomposition = await self.require_approved_decomposition(contract_id)
+		except ValueError as exc:
+			# `require_approved_decomposition` is FR-061's hard stop and raises `ValueError`
+			# for its other callers. Here the refusal is §5.1's, and it is translated rather
+			# than allowed to escape: `sofact route` catches `RoutingRefusal` and prints one
+			# line, and an unconverted `ValueError` would reach the operator as a traceback —
+			# the failure mode every other verb's test asserts against.
+			raise RoutingRefusal(str(exc)) from exc
+		specification = state.latest_specification(contract_id)
+		draft = await self.latest_draft(contract.goal_id)
+		plan = state.latest_plan(contract_id)
+
+		# FR-105's number, keyed by clause, and read through the same call site
+		# `render_delivery` uses so a lane's strength and a clause's rendered strength are
+		# one measurement rather than two runs of the same instrument.
+		strengths: dict[str, float] = {}
+		if measured_strength and plan is not None:
+			strengths = await self._measured_strengths(contract, decomposition, plan, state)
+
+		# The sealed files, attributed per module exactly as FR-026's check attributes them,
+		# so the bound a lane is routed against is the bound P7 would report on.
+		ownership, _ = attribute_files(() if plan is None else state.dispatches_for(plan.id))
+		budgets = {module.name: module.budget for module in decomposition.modules}
+		workspaces = {
+			r.workspace
+			for r in (() if plan is None else state.dispatches_for(plan.id))
+			if r.workspace
+		}
+		root = Path(next(iter(workspaces))) if len(workspaces) == 1 else None
+		# `None` when there is nothing to read, which is a different statement from a bound
+		# that was measured and met — the distinction `module_budget_readings` carries as
+		# `within=None`. A lane that sealed nothing is unmeasured here rather than within.
+		sources = read_sources(root, ownership) if root is not None and ownership else None
+		readings = (
+			module_budget_readings(ownership, budgets, sources=sources)
+			if sources is not None
+			else {}
+		)
+
+		boundary = await self.boundary(root or (self.home / "workspace")) if ownership else None
+		return tuple(
+			route(
+				module,
+				contract=contract,
+				specification=specification,
+				draft=draft,
+				strengths=strengths if measured_strength else None,
+				topology=self.topology(),
+				boundary=boundary,
+				within_budget=(
+					None if (reading := readings.get(module.name)) is None else reading.within
+				),
+				floors=floors,
+				thresholds=thresholds,
+			)
+			for module in decomposition.modules
+		)
 
 	# ------------------------------------------------- FR-127: the intent graph
 

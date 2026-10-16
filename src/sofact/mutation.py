@@ -19,8 +19,9 @@ the operator set can express, never a statement about the code's true test quali
 rate over three surviving mutants is noise dressed as a measurement, and the type carries
 :attr:`MutationReport.measured_strength` as ``None`` with a named
 :class:`StrengthRefusal` rather than a number nobody should act on. That is the same
-discipline :data:`~sofact.views.THETA_GATE_BUILT` encodes one level up: the gate is not
-built, so nothing here may be read as passing it.
+discipline :func:`~sofact.routing.oracle_strength_ceiling` keeps one level up: it returns
+``None`` rather than ``L1`` for a strength this module refused to state, so a lane nobody
+measured is undecided rather than decided at the bottom of FR-009's table.
 
 **Three verdicts per mutant, and they are not interchangeable.**
 

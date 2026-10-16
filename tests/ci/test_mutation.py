@@ -360,18 +360,27 @@ class TestTheOperatorSetIsClosedAndNamed:
 		}
 
 
-class TestTheGateStaysShut:
-	"""The number is recorded and rendered; it does not decide anything."""
+class TestTheMeasurementIsNotTheGate:
+	"""The number is recorded and rendered, and the table it feeds is read elsewhere."""
 
-	def test_the_theta_gate_is_still_not_built(self) -> None:
-		"""``THETA_GATE_BUILT`` stays ``False``. Measuring a strength is not the same as
-		being able to decide FR-024–FR-035's gate, and this build does not consult
-		``L4_GATE_THETA`` anywhere — the number exists so the report can state it, not so
-		a ceiling can move."""
-		from sofact.views import L4_GATE_THETA, THETA_GATE_BUILT
+	def test_measuring_a_strength_does_not_move_a_level(self) -> None:
+		"""FR-105's measurement is an *input* to FR-009's table and not the table itself.
 
-		assert THETA_GATE_BUILT is False
+		This test asserted ``THETA_GATE_BUILT is False`` while the θ half did not exist —
+		the number was recorded and compared against nothing. ADR-0076 built the
+		instrument, so the assertion moves to the property that actually matters and that
+		the old one was standing in for: measuring a strength is not granting a level. The
+		table is read in :mod:`sofact.routing`, and a strength below θ_lo admits L1 rather
+		than the L3 the number's own name might suggest.
+		"""
+		from sofact.routing import DEFAULT_THETA, oracle_strength_ceiling
+		from sofact.views import L4_GATE_THETA, THETA_GATE_BUILT, AutonomyLevel
+
+		assert THETA_GATE_BUILT is True, "the gate can be decided (ADR-0076)"
 		assert pytest.approx(0.80) == L4_GATE_THETA
+		assert oracle_strength_ceiling(0.0) is AutonomyLevel.L1
+		assert oracle_strength_ceiling(None) is None, "and an unmeasured lane is not decided"
+		assert DEFAULT_THETA.hi == L4_GATE_THETA, "one number, not two that agree today"
 
 
 def _splice_unparseable(tree: ast.Module) -> ast.Module | None:

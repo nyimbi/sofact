@@ -60,6 +60,7 @@ from __future__ import annotations
 import ast
 import posixpath
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -83,6 +84,7 @@ from sofact.views import (
 
 __all__ = [
 	"INTEGRATION_CHECKS",
+	"BudgetReading",
 	"attribute_files",
 	"check_boundary_contracts",
 	"check_build_order",
@@ -93,7 +95,9 @@ __all__ = [
 	"check_module_budget",
 	"check_system_criteria",
 	"integrate",
+	"module_budget_readings",
 	"public_surface",
+	"read_sources",
 ]
 
 INTEGRATION_CHECKS: Final[tuple[str, ...]] = (
@@ -239,7 +243,7 @@ def check_imports(
 	assert ownership, "cannot check imports with no attributed files"
 	if sources is None:
 		assert root is not None, "either sources or root must be given"
-		sources = _read(root, ownership)
+		sources = read_sources(root, ownership)
 
 	known = {path for paths in ownership.values() for path in paths}
 	findings: list[IntegrationFinding] = []
@@ -338,40 +342,37 @@ def check_module_budget(
 	measure, and a missing file is not a small one (NFR-024).
 	"""
 	assert budgets, "cannot check budgets without a declared budget per module"
+	readings = module_budget_readings(ownership, budgets, sources=sources)
 	findings: list[IntegrationFinding] = []
-	for module in sorted(ownership):
-		budget = budgets.get(module)
-		if budget is None:
-			continue
-		paths = ownership[module]
-		unread = tuple(path for path in paths if path not in sources)
-		if unread:
+	for module, reading in readings.items():
+		if reading.within is None:
 			findings.append(
 				IntegrationFinding(
 					kind=IntegrationFindingKind.MODULE_OVER_BUDGET,
 					detail=(
-						f"{module} declared a budget of {budget.max_files} file(s) and "
-						f"{budget.max_loc} line(s) and {len(unread)} of its "
-						f"{len(paths)} sealed file(s) could not be read, so the bound is "
-						"unmeasured rather than met (FR-026, NFR-024)"
+						f"{module} declared a budget of {reading.max_files} file(s) and "
+						f"{reading.max_loc} line(s) and {len(reading.unread)} of its "
+						f"{len(ownership[module])} sealed file(s) could not be read, so the "
+						"bound is unmeasured rather than met (FR-026, NFR-024)"
 					),
 					modules=(module,),
-					evidence=unread,
+					evidence=reading.unread,
 				)
 			)
 			continue
-		lines = sum(_count_lines(sources[path]) for path in paths)
-		over_files = len(paths) - budget.max_files
-		over_lines = lines - budget.max_loc
-		if over_files <= 0 and over_lines <= 0:
+		if reading.within:
 			continue
 		exceeded: list[str] = []
-		if over_files > 0:
+		if reading.files > reading.max_files:
 			exceeded.append(
-				f"{len(paths)} file(s) against a bound of {budget.max_files} (+{over_files})"
+				f"{reading.files} file(s) against a bound of {reading.max_files} "
+				f"(+{reading.files - reading.max_files})"
 			)
-		if over_lines > 0:
-			exceeded.append(f"{lines} line(s) against a bound of {budget.max_loc} (+{over_lines})")
+		if reading.lines > reading.max_loc:
+			exceeded.append(
+				f"{reading.lines} line(s) against a bound of {reading.max_loc} "
+				f"(+{reading.lines - reading.max_loc})"
+			)
 		findings.append(
 			IntegrationFinding(
 				kind=IntegrationFindingKind.MODULE_OVER_BUDGET,
@@ -384,11 +385,78 @@ def check_module_budget(
 				),
 				modules=(module,),
 				evidence=tuple(
-					f"{path}: {_count_lines(sources[path])} line(s)" for path in sorted(paths)
+					f"{path}: {_count_lines(sources[path])} line(s)"
+					for path in sorted(ownership[module])
+					if path in sources
 				),
 			)
 		)
 	return tuple(findings)
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetReading:
+	"""One module measured against the budget it declared (FR-026, FR-097).
+
+	``within`` is ``True`` inside the bound, ``False`` over it, and ``None`` when the
+	artefact could not be read — three states rather than two, because a bound nobody
+	measured is not a bound that was met (NFR-024). The counts are carried beside the
+	verdict so the finding's sentence and the verdict cannot be computed twice.
+	"""
+
+	within: bool | None
+	files: int
+	lines: int
+	max_files: int
+	max_loc: int
+	unread: tuple[str, ...] = ()
+
+
+def module_budget_readings(
+	ownership: Mapping[str, tuple[str, ...]],
+	budgets: Mapping[str, ModuleBudget],
+	*,
+	sources: Mapping[str, str],
+) -> dict[str, BudgetReading]:
+	"""FR-026's bound, per module, as one verdict and the counts behind it.
+
+	Separated from :func:`check_module_budget` so the *verdict* has one source.
+	:func:`sofact.routing.admissible` reads ``within`` as §5.1's
+	``blast_radius_bounded`` conjunct, and a second implementation there would be two
+	answers to one question — the defect this repo keeps finding in gates that agree
+	today and drift tomorrow.
+
+	A module absent from ``budgets`` is absent from the result rather than reported as
+	unbounded: every :class:`~sofact.views.Module` carries a required
+	:class:`~sofact.views.ModuleBudget`, so an absent entry means the caller's map is not
+	the contract's, which is not a fact about the module.
+	"""
+	readings: dict[str, BudgetReading] = {}
+	for module in sorted(ownership):
+		budget = budgets.get(module)
+		if budget is None:
+			continue
+		paths = ownership[module]
+		unread = tuple(path for path in paths if path not in sources)
+		if unread:
+			readings[module] = BudgetReading(
+				within=None,
+				files=len(paths),
+				lines=0,
+				max_files=budget.max_files,
+				max_loc=budget.max_loc,
+				unread=unread,
+			)
+			continue
+		lines = sum(_count_lines(sources[path]) for path in paths)
+		readings[module] = BudgetReading(
+			within=len(paths) <= budget.max_files and lines <= budget.max_loc,
+			files=len(paths),
+			lines=lines,
+			max_files=budget.max_files,
+			max_loc=budget.max_loc,
+		)
+	return readings
 
 
 def _count_lines(text: str) -> int:
@@ -401,7 +469,7 @@ def _count_lines_all(sources: Mapping[str, str], paths: tuple[str, ...]) -> int:
 	return sum(_count_lines(sources[path]) for path in paths)
 
 
-def _read(root: Path, ownership: dict[str, tuple[str, ...]]) -> dict[str, str]:
+def read_sources(root: Path, ownership: Mapping[str, tuple[str, ...]]) -> dict[str, str]:
 	"""The text of every produced file that exists under ``root``."""
 	sources: dict[str, str] = {}
 	for paths in ownership.values():
@@ -978,7 +1046,7 @@ def integrate(
 	# The surface check needs the *text*, not only the paths, so it reads once and the
 	# import check reuses what it read -- two passes over the same files would be two
 	# chances for them to disagree about what a file says.
-	text = sources if sources is not None else (_read(root, ownership) if root else {})
+	text = sources if sources is not None else (read_sources(root, ownership) if root else {})
 	# FR-026's bound is checked over the same attribution FR-113 uses, and it needs the
 	# text for the same reason the surface diff does: a line count is a property of bytes.
 	# A caller that supplied neither a root nor sources has not asked for the artefact to

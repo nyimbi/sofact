@@ -405,7 +405,7 @@ class TestTheComparisonIsAReading:
 		report = await service.render_delivery(plan_id)
 
 		assert report.autonomy is AutonomyLevel.L2 or report.autonomy.value <= 2
-		assert THETA_GATE_BUILT is False
+		assert THETA_GATE_BUILT is True, "the gate is built (ADR-0076) and unmoved by a review"
 		assert MODE_M_CEILING is AutonomyLevel.L1
 		assert EVOLVABILITY_DEBT == 1.0
 

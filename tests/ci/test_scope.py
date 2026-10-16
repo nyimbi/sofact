@@ -39,8 +39,10 @@ from typer.testing import CliRunner
 
 from sofact.cli import app
 from sofact.escape import load_deployment_scope, measure_escapes
+from sofact.routing import oracle_strength_ceiling
 from sofact.service import FactoryService
 from sofact.views import (
+	DEFAULT_THETA,
 	L4_GATE_THETA,
 	PERSONAL_AUTONOMY_BAND,
 	AutonomyLevel,
@@ -150,16 +152,26 @@ class TestATargetThisBuildCannotHonour:
 		with pytest.raises(ValueError, match="measuring a level nobody is aiming at"):
 			scope(target=AutonomyLevel.L1)
 
-	def test_a_third_party_target_of_l4_is_refused_because_the_gate_is_not_built(self) -> None:
+	def test_a_third_party_target_of_l4_is_refused_when_the_gate_is_unbuilt(
+		self, monkeypatch: pytest.MonkeyPatch
+	) -> None:
 		"""The gate applies *unchanged* to a third party, so L4 is reachable through it —
-		and the gate is not built, so nothing here measures an oracle strength to decide
-		it. Declaring the target does not discharge it."""
+		and while nothing measures an oracle strength to decide it, declaring the target is
+		the declaration doing the gate's work. Patched back to ``False`` rather than
+		replaced: the branch is what ADR-0076 kept, and a refusal that can only be reached
+		by editing the source is a refusal nobody has run."""
+		monkeypatch.setattr("sofact.views.THETA_GATE_BUILT", False)
+
 		with pytest.raises(ValueError, match="does not discharge the gate"):
 			scope(consumer=THIRD_PARTY, target=AutonomyLevel.L4)
 
-	def test_the_two_l4_refusals_are_not_the_same_refusal(self) -> None:
+	def test_the_two_l4_refusals_are_not_the_same_refusal(
+		self, monkeypatch: pytest.MonkeyPatch
+	) -> None:
 		"""Read together, because the whole reason the type carries two branches is that a
 		reader who saw one message would apply the wrong remedy to the other case."""
+		monkeypatch.setattr("sofact.views.THETA_GATE_BUILT", False)
+
 		with pytest.raises(ValueError) as personal:
 			scope(target=AutonomyLevel.L4)
 		with pytest.raises(ValueError) as third_party:
@@ -182,16 +194,18 @@ class TestATargetThisBuildCannotHonour:
 		with pytest.raises(ValueError, match="no escape-rate tracking"):
 			scope(consumer=THIRD_PARTY, target=AutonomyLevel.L2, escape_tracking=False)
 
-	def test_building_the_gate_opens_the_third_party_band(
-		self, monkeypatch: pytest.MonkeyPatch
-	) -> None:
-		"""FR-024 to FR-035 is one boolean away, and this is the boolean. The refusal is
-		conditional on it rather than unconditional with a self-check arm, because an
-		unconditional raise would mean the flag could never do the one thing its docstring
-		says it does — and a flag that cannot change the behaviour it gates is a comment
-		with a type."""
-		monkeypatch.setattr("sofact.views.THETA_GATE_BUILT", True)
+	def test_building_the_gate_opens_the_third_party_band(self) -> None:
+		"""FR-024 to FR-035 was one boolean away, and ADR-0076 threw it: the instrument that
+		reads FR-009's table against a measured strength now exists, so a third-party scope
+		may declare the L4 target the gate admits.
 
+		The assertion is on the *declaration*, not on any lane's level. A scope that may
+		aim at L4 has not granted one — :func:`sofact.routing.route` decides per lane, and a
+		lane nobody measured is ``undecided`` rather than L4. That separation is the whole
+		content of "a gate that can be decided is not a gate that has been passed", and it
+		is asserted here as well as in ``test_routing.py`` because this is the type a reader
+		would check first.
+		"""
 		admitted = scope(consumer=THIRD_PARTY, target=AutonomyLevel.L4)
 
 		assert admitted.target is AutonomyLevel.L4
@@ -199,6 +213,14 @@ class TestATargetThisBuildCannotHonour:
 		assert scope(target=AutonomyLevel.L3).admits_l4 is False, (
 			"and a personal scope still does not, whatever the gate's state"
 		)
+
+	def test_the_declaration_is_not_the_decision(self) -> None:
+		"""The sentence above, as a fact about the tree rather than a claim in a docstring:
+		the flag admits a *target*, and the routing function is what admits a lane."""
+		assert DEFAULT_THETA.hi == L4_GATE_THETA, (
+			"the gate FR-157 names and the gate routing decides are one number"
+		)
+		assert oracle_strength_ceiling(None) is None, "and an unmeasured lane is decided by neither"
 
 
 class TestTheBandAndTheComparison:
@@ -213,7 +235,7 @@ class TestTheBandAndTheComparison:
 		third_party = scope(consumer=THIRD_PARTY, target=AutonomyLevel.L3)
 
 		assert third_party.band == (AutonomyLevel.L2, AutonomyLevel.L4)
-		assert not third_party.admits_l4, "in principle is not in this build"
+		assert third_party.admits_l4, "and since ADR-0076 the gate that admits it is built"
 
 	def test_no_personal_scope_admits_l4_whatever_the_gates_state(
 		self, monkeypatch: pytest.MonkeyPatch
@@ -485,7 +507,8 @@ class TestTheScopeVerb:
 	) -> None:
 		"""The note names what this *build* can decide, so it is conditional on
 		``admits_l4`` rather than on the consumer alone — a hardcoded sentence would go on
-		saying L4 is out of reach after FR-024 to FR-035 puts it in reach."""
+		saying L4 is out of reach after FR-024 to FR-035 puts it in reach, which ADR-0076
+		then did."""
 		path = tmp_path / "scope.json"
 		path.write_text('{"consumer": "third_party", "target": 2, "escape_tracking": true}')
 		monkeypatch.setenv("SOFACT_SCOPE", str(path))
@@ -495,18 +518,37 @@ class TestTheScopeVerb:
 		assert result.exit_code == 0, result.output
 		assert "leaves the" in result.output and "unchanged" in result.output
 
-	def test_the_note_is_absent_once_the_gate_can_be_decided(
+	def test_the_note_says_the_gate_is_built_and_the_target_is_not_a_level(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:
+		"""The built branch says two things and both are load-bearing: the gate is built,
+		and a declared target is not a lane's level. A screen that printed only the first
+		would let an operator read "L4 is reachable" as "my lanes are L4"."""
 		path = tmp_path / "scope.json"
 		path.write_text('{"consumer": "third_party", "target": 2, "escape_tracking": true}')
 		monkeypatch.setenv("SOFACT_SCOPE", str(path))
-		monkeypatch.setattr("sofact.views.THETA_GATE_BUILT", True)
 
 		result = RUNNER.invoke(app, ["--home", str(home), "scope"])
 
 		assert result.exit_code == 0, result.output
 		assert "not built in this build" not in result.output
+		assert "undecided rather than L4" in result.output
+
+	def test_the_note_returns_to_the_unbuilt_wording_when_the_gate_is_unbuilt(
+		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+	) -> None:
+		"""The other branch, reached the only way it can be now that the flag is ``True``.
+		Kept because the wording is what a reader of an older build's screen saw, and a
+		branch nothing exercises is a branch nobody has read."""
+		path = tmp_path / "scope.json"
+		path.write_text('{"consumer": "third_party", "target": 2, "escape_tracking": true}')
+		monkeypatch.setenv("SOFACT_SCOPE", str(path))
+		monkeypatch.setattr("sofact.views.THETA_GATE_BUILT", False)
+
+		result = RUNNER.invoke(app, ["--home", str(home), "scope"])
+
+		assert result.exit_code == 0, result.output
+		assert "not built in this build" in result.output
 
 
 class TestTheEscapesVerbNamesTheTarget:

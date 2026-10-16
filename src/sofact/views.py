@@ -41,6 +41,8 @@ __all__ = [
 	"CHANGE_COST_REQUIREMENTS",
 	"CHANGE_COST_RISE_FACTOR",
 	"COMPOSITION_REQUIREMENTS",
+	"CONCERNS_FLOOR",
+	"DEFAULT_THETA",
 	"ESCAPE_RATE_READING",
 	"ESCAPE_REQUIREMENTS",
 	"EVOLVABILITY_DEBT",
@@ -51,6 +53,7 @@ __all__ = [
 	"HIGHEST_GRANTABLE",
 	"INTEGRATION_REQUIREMENTS",
 	"INTENT_REQUIREMENTS",
+	"L3_GATE_THETA",
 	"L4_GATE_THETA",
 	"MACHINE_API_VERSION",
 	"MAINTAINABILITY_NOT_VERIFIED",
@@ -205,6 +208,9 @@ __all__ = [
 	"ResearchVerdict",
 	"RivalCapability",
 	"RivalSystem",
+	"RouteDecision",
+	"RouteTerm",
+	"RoutingRefusal",
 	"SearchHit",
 	"SearchOutcome",
 	"SearchQueryResult",
@@ -223,6 +229,7 @@ __all__ = [
 	"SystemInvariant",
 	"SystemModel",
 	"SystemRelationship",
+	"ThetaThresholds",
 	"TraceLink",
 	"Transcript",
 	"UnverifiedClause",
@@ -2298,6 +2305,30 @@ MODULE_CLASS_CEILING: dict[ModuleClass, AutonomyLevel] = {
 """Spec §14's table. G7 is L1 *by class* — FR-126 makes it human-authored."""
 
 
+CONCERNS_FLOOR: dict[ModuleClass, AutonomyLevel] = {
+	ModuleClass.G7: AutonomyLevel.L1,
+}
+"""NFR-018's concerns floor, per §14's class table (FR-024).
+
+NFR-018's sentence is that a change touching "auth, payments, PII, migrations, or
+production configuration" must be "refused **regardless of oracle results**", and it calls
+itself "a concerns floor, not a heuristic (§5.1)". §5.1 renders it as the third term of
+``level(lane) = min(ceiling(lane), floor(concerns))``, and the ``min`` is the
+requirement's whole force: **a concern can only lower a level.**
+
+G7 is the class §14 gives that sentence to — :data:`MODULE_CLASS_CEILING` is L1 for it and
+the class docstring says why. So this table restates a floor the class ceiling already
+carries, and that is deliberate rather than redundant: FR-024's refusal is about a
+*declared* floor, and a refusal needs the built-in one to compare against.
+
+The other concerns NFR-018 names are not classes. A migration is G4's subject and §14
+gives G4 L3, so a floor at L1 for it would be this build inventing policy the spec does not
+state; a deployment that wants one declares it through
+:func:`sofact.routing.load_concerns_floors`, and FR-024's refusal is what stops such a
+declaration from *raising* a lane rather than lowering it.
+"""
+
+
 class ReasoningClass(StrEnum):
 	"""The routing class a module's work needs (FR-050, FR-097).
 
@@ -3490,9 +3521,11 @@ sentence and the number cannot drift into two statements of one fact, which is w
 :data:`MAINTAINABILITY_NOT_VERIFIED` does for the debt term.
 
 It is a *reading*, not a ceiling: nothing in this build refuses a diff that cost more than
-this, for the reason :data:`THETA_GATE_BUILT` and :data:`MODE_M_CEILING` both give — a
-measured actual may not move a bound, and one project's log cannot state §1.4's claim,
-which is about a population.
+this, for the reason :data:`MODE_M_CEILING` gives — a measured actual may not move a bound,
+and one project's log cannot state §1.4's claim, which is about a population. (This
+paragraph cited :data:`THETA_GATE_BUILT` beside it until ADR-0076, when that flag stopped
+being an example of the rule: the θ gate now *does* decide a level, from a measured
+strength rather than from this reading.)
 """
 
 
@@ -5097,21 +5130,92 @@ FR-024–FR-035's gate. It is named here because FR-157 is the requirement that 
 number a reader has to go looking for.
 """
 
-THETA_GATE_BUILT: Final[bool] = False
+L3_GATE_THETA: Final[float] = 0.60
+"""FR-009's θ_lo: the strength below which an oracle is "informational only".
+
+Held beside :data:`L4_GATE_THETA` rather than in :mod:`sofact.routing` because the two are
+one table's two rows, and a reader looking for "what admits L3" should find the pair
+together. FR-009's third row — below θ_lo the oracle is informational — has no threshold
+of its own, which is why there is no third constant.
+"""
+
+
+class RoutingRefusal(Exception):
+	"""A θ calibration or a concerns floor that cannot be read, or that would raise a level.
+
+	Lives here rather than in :mod:`sofact.routing` because :class:`ThetaThresholds` raises
+	it from ``__post_init__`` and that type has to sit above the module that imports this
+	one — a named refusal is worth more than the import direction, so the direction moved.
+	"""
+
+
+class ThetaThresholds(View):
+	"""FR-009's two thresholds, and whether anyone calibrated them (FR-010).
+
+	``calibrated_by`` is ``None`` for the built-in pair, and the field exists so a report
+	can say *assumed* rather than printing two numbers that look measured. FR-010's whole
+	requirement is that these are provisional until escape data calibrates them, and a
+	pair that could not express "nobody has calibrated this" would make the assumption
+	invisible at exactly the moment it is load-bearing.
+	"""
+
+	hi: float
+	lo: float
+	calibrated_by: NonEmptyStr | None = None
+
+	@model_validator(mode="after")
+	def _monotone(self) -> Self:
+		if not 0.0 <= self.lo <= self.hi <= 1.0:
+			raise ValueError(
+				f"θ_lo = {self.lo:g} and θ_hi = {self.hi:g} must satisfy "
+				"0 ≤ θ_lo ≤ θ_hi ≤ 1. A pair that crossed would make FR-009's table "
+				"non-monotone, so a *weaker* oracle would admit a *higher* level — which is "
+				"the one direction a ceiling may never move"
+			)
+		return self
+
+	@property
+	def assumed(self) -> bool:
+		"""Whether these are FR-009's defaults rather than a calibration (FR-010)."""
+		return self.calibrated_by is None
+
+	@property
+	def statement(self) -> str:
+		"""The pair in words, with its provenance, for a report to print."""
+		who = self.calibrated_by or "FR-009's built-in defaults, assumed (FR-010)"
+		return f"θ_hi = {self.hi:g}, θ_lo = {self.lo:g} — {who}"
+
+
+DEFAULT_THETA: Final[ThetaThresholds] = ThetaThresholds(hi=L4_GATE_THETA, lo=L3_GATE_THETA)
+"""FR-009's table as stated, with no calibration claimed.
+
+``hi`` is :data:`L4_GATE_THETA` rather than a second ``0.80``, so the gate FR-157 names in
+a refusal and the gate :mod:`sofact.routing` decides cannot drift into two numbers that
+agree today and disagree after someone edits one of them.
+"""
+
+THETA_GATE_BUILT: Final[bool] = True
 """Whether this build can decide the θ ≥ 0.80 gate (FR-024–FR-035).
 
-``False``, and the roadmap records why: the routing function, the autonomy ladder and the
-θ computation are **Partly** — the ceilings half is built and the θ half is not, so
-nothing in this build measures an oracle strength to compare against
-:data:`L4_GATE_THETA`. It is a named constant rather than a comment so that a third-party
-scope's refusal can say *which* thing is missing, and so that building FR-024–FR-035
-flips one boolean instead of rewriting a sentence in three places.
+**``True`` since ADR-0076**, and what moved it is one instrument rather than a flag:
+:func:`sofact.routing.oracle_strength_ceiling` reads FR-009's table against a *measured*
+oracle strength, and :func:`sofact.routing.route` is §5.1's routing function computing
+``admissible(lane)``, ``ceiling(lane)`` and ``level(lane)`` from terms the log already
+holds.
 
-The routing function's **class** half is built (ADR-0074): a module's declared
-:class:`ReasoningClass` now selects a tier in :func:`~sofact.tiers.resolve_model`. That
-does not move this constant, because the gate is about *theta* -- a measured oracle
-strength -- and what remains absent is section 5.1's ``admissible(lane)`` and
-``ceiling(lane)``, which no declared class supplies.
+It was ``False`` while the θ half did not exist, and the honest part of that state is
+preserved rather than deleted: the flag still means *this build can decide the gate*, and
+:attr:`DeploymentScope.admits_l4` still reads it. What changed is that the answer is now
+yes — so a third-party scope may declare an L4 target, and
+:func:`sofact.routing.oracle_strength_ceiling` returns ``None`` rather than ``L4`` for a
+lane nobody measured, which is the property that makes the gate a gate instead of a
+default.
+
+**A gate that can be decided is not a gate that has been passed.** Nothing here grants a
+lane L4: the function returns ``L4`` only for a strength at or above θ_hi that FR-105
+actually measured over a mutant set that cleared its floor. The two facts this constant
+must not be read as collapsing are "the instrument exists" and "this lane passed it", and
+:attr:`RouteDecision.undecided` is what keeps them apart at the level a caller reads.
 """
 
 
@@ -5134,12 +5238,19 @@ class DeploymentScope(View):
 	the level the gate exists to withhold — declaring the target would be the gate imposed
 	by a side door, with the requirement's own remedy (measure, or do not claim) skipped.
 
-	**A third-party scope may not target L4 either, and for a different reason.** There the
-	gate applies unchanged, so L4 is reachable *through* it — and :data:`THETA_GATE_BUILT`
-	is ``False``, so this build cannot decide it. The two refusals carry different
-	sentences because they have different remedies: one is "you are not aiming at the right
-	band", the other is "the instrument that would admit you is not built yet", and a
-	single message would send the second operator looking for a setting.
+	**A third-party scope may target L4, and only through the gate.** There the gate applies
+	unchanged rather than being raised, so L4 is reachable *through* it — and
+	:data:`THETA_GATE_BUILT` is ``True`` since ADR-0076, so this build can decide it. The
+	personal refusal and this one carry different sentences because they have different
+	remedies: one is "you are not aiming at the right band", the other is "the instrument
+	that would admit you does not exist", and a single message would send the second
+	operator looking for a setting.
+
+	What the third-party case still refuses, when the instrument is absent, is declaring the
+	target *instead of* measuring it: ``target > L3`` with :data:`THETA_GATE_BUILT` false is
+	the declaration doing the gate's work. With the instrument built the declaration is
+	allowed and decides nothing — :func:`sofact.routing.route` decides, and a lane with no
+	measured strength is ``undecided`` rather than L4.
 
 	**Escape-rate tracking is required of both.** FR-157 names it beside the personal band,
 	but its argument is general: with no external market there is no exogenous escape
@@ -5251,6 +5362,132 @@ class DeploymentScope(View):
 			"tracking would be measuring a level nobody aims at — so a target outside the "
 			"band is not one error but one of two",
 		)
+
+
+# --------------------------------------------------------------------------- #
+# FR-024-FR-035 — the routing function
+# --------------------------------------------------------------------------- #
+
+
+class RouteTerm(View):
+	"""One conjunct of §5.1's ``admissible(lane)``, and whether it held (FR-024–FR-027).
+
+	A named term rather than a boolean because the three conjuncts have three different
+	remedies — re-elicit the dimension, assign an executable oracle, or measure a boundary
+	— and a lane refused with one ``False`` would send an operator looking for the wrong
+	one. :class:`GateCheck` makes the same argument about naming *which* precondition
+	failed; this is that shape for the function that decides whether a lane may run at all.
+
+	``requirement`` is carried rather than inferred from ``name``: two terms here are
+	FR-108's and FR-027's, and a reader asking "what do I have to fix" needs the citation
+	rather than a slug they have to look up.
+	"""
+
+	name: NonEmptyStr
+	held: bool
+	detail: NonEmptyStr
+	requirement: NonEmptyStr
+
+	def __bool__(self) -> bool:
+		return self.held
+
+
+class RouteDecision(View):
+	"""§5.1's three lines for one lane, with every term that produced the number (FR-024).
+
+	This is the object the roadmap row said did not exist — *"§5.1's ``admissible(lane)``
+	and ``ceiling(lane)`` remain uncomputed"* — and what makes it worth a type rather than
+	a function returning an :class:`AutonomyLevel` is :attr:`undecided`. Two lanes can
+	reach the same level by two different routes, and one of them can be a lane nobody
+	measured: without that field a reader cannot tell a lane decided *low* from a lane not
+	decided at all, which is NFR-024's forbidden target stated as a type.
+
+	Every term is carried rather than the minimum alone, for FR-030's reason one level up:
+	a number with no account of which term produced it is a number to trust rather than a
+	fact to check.
+	"""
+
+	module: NonEmptyStr
+	module_class: ModuleClass
+	terms: tuple[RouteTerm, ...]
+	"""§5.1's three conjuncts, in the spec's own order."""
+
+	strength: float | None
+	"""FR-105's measured strength for the lane: the **weakest** clause's, or ``None``.
+
+	The weakest, by :attr:`Contract.weakest_oracle_rank`'s rule — a lane is only as
+	verifiable as its least verifiable part. ``None`` when any clause of the lane has no
+	measurement, rather than an average over the ones that do: a mean over a subset nobody
+	chose is a number about that subset.
+	"""
+
+	strength_ceiling: AutonomyLevel | None
+	"""``f(oracle_strength)``: FR-009's table on :attr:`strength`, or ``None``."""
+
+	class_ceiling: AutonomyLevel
+	"""§14's ceiling for :attr:`module_class`, before any modifier (FR-125)."""
+
+	concerns_floor: AutonomyLevel | None
+	"""NFR-018's floor for the class or the deployment's declared one, or ``None`` (FR-024).
+
+	``None`` means **no concern applies to this lane**, and it is not ``L0``. §5.1's third
+	line is ``level = min(ceiling, floor(concerns))``, and where there is no concern the
+	``min`` has no second operand — the level is the ceiling. Rounding the absence to
+	``L0`` would be this function inventing a floor of zero for every lane §14 does not
+	name a concern for, which collapses every lane to L0 and is NFR-018's floor read
+	backwards: a floor is what a *concern* imposes, and a lane without one is not a lane
+	nothing may touch.
+	"""
+
+	ceiling: AutonomyLevel | None
+	"""``min(f(oracle_strength), g(blast_bound), h(deployment_isolation))``, or ``None``.
+
+	``None`` when the lane is inadmissible or unmeasured. §5.1's ``g(blast_bound)`` has no
+	level-valued form in this build and that is stated in :mod:`sofact.routing` rather than
+	filled with an invented table — the bound is a conjunct of admissibility instead.
+	"""
+
+	level: AutonomyLevel | None
+	"""``min(ceiling, floor(concerns))``, ``ceiling`` where no concern applies, or ``None``."""
+
+	topology: DeploymentTopology
+	"""Where this was computed, so FR-030's "reported and attached to every change" holds."""
+
+	thresholds: ThetaThresholds | None = None
+	"""The θ pair the strength was read against, when the caller named one (FR-010).
+
+	``None`` means FR-009's defaults, which is not the same as "calibrated to the
+	defaults" — :attr:`ThetaThresholds.assumed` is the field that says which, and this one
+	says only that the decision was made against a pair nobody wrote down.
+	"""
+
+	undecided: tuple[str, ...] = ()
+	"""Which terms could not be computed, in words (NFR-024).
+
+	Empty for a lane every term decided — including one decided *low*, which is the
+	distinction this field exists for. A reader who saw only ``level = L1`` could not tell
+	FR-009's bottom row from a lane nothing measured.
+	"""
+
+	@property
+	def admissible(self) -> bool:
+		"""Whether §5.1's three conjuncts all held (FR-024–FR-027)."""
+		return all(self.terms)
+
+	@property
+	def refused_by(self) -> tuple[RouteTerm, ...]:
+		"""The conjuncts that failed, each naming its own remedy."""
+		return tuple(t for t in self.terms if not t.held)
+
+	@property
+	def decided(self) -> bool:
+		"""Whether every term produced a number, which is not the same as admissible.
+
+		A lane can be inadmissible and fully decided — the terms ran and one said no — and a
+		lane can be admissible and undecided, because admissibility says nothing about
+		whether a strength was measured.
+		"""
+		return not self.undecided
 
 
 # --------------------------------------------------------------------------- #

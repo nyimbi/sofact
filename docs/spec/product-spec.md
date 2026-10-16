@@ -1712,7 +1712,28 @@ Retained from v0.1 with one addition: autonomy is **per-phase and per-module**, 
 per-lane only.
 
 **FR-024**–**FR-035** (routing function, blast bounds, ladder, per-deployment
-ceilings, staging modes) apply unchanged.
+ceilings, staging modes) apply unchanged. The routing function itself is now
+**computed** rather than restated: `sofact.routing` reads §5.1's three lines against the
+facts the log already holds and reports one decision per lane (ADR-0076). Four readings
+in it are refusals rather than roundings. An **unmeasured oracle strength is `None`, not
+`L1`** — FR-009's table has no row for "nobody measured", and rounding it to the bottom
+would make FR-105's escalation fire on the absence of evidence (NFR-024) — and a lane's
+strength is its **weakest** clause's, so one unmeasured clause makes the lane *undecided*
+rather than slightly weaker. **A concern can only lower**: FR-024's raise-refusal lives
+in the floor loader rather than in the `min`, because a `min` makes a raising declaration
+harmless where the requirement says it must be rejected — and **no concern means no
+floor**, `concerns_floor` being `None` rather than `L0`, since §5.1's third line has no
+second operand where no concern applies. **FR-026 and FR-027 are two facts, not one**:
+FR-026 is a declared number whose breach *fails the lane*, while FR-027 opens
+"**Autonomy L4 requires** that the lane's file scope be declared and enforced by
+permission", so it gates the *level* — enforcing it at admission would refuse the T1
+deployment FR-124 says still runs, and the fix caps below L4 instead of refusing, which
+is FR-031's own distinction. **§5.1 renders a `g(blast_bound)` term and §5.2 supplies no
+table for it**, so there is no `g`: the bound is the third conjunct of `admissible`, and
+exceeding it *refuses* the lane, which is strictly stronger than the reduction a
+fabricated `g` would apply. `THETA_GATE_BUILT` is now `True` because the instrument
+exists — and `RouteDecision.undecided` is what keeps *the instrument exists* and *this
+lane passed it* apart, since the flag grants L4 to no lane.
 
 **FR-122** Autonomy must be computed **per phase** (§3.2) *and* per module, and the
 lower bound must govern. A platform cannot claim an autonomy level that any
@@ -2311,8 +2332,10 @@ deployment named no model for falls through to the phase's tier rather than to a
 tier's model. `dispatch_step` resolves the module **before** the adapter, because the
 class it declared is an input to the model choice — without that ordering a routing
 function nothing calls is the same defect one layer up. The limit, stated: this routes
-between tiers, so it decides *which model*, not *which lane* — §5.1's
-`admissible(lane)` and `ceiling(lane)` remain uncomputed (FR-024–FR-035, ADR-0074).
+between tiers, so it decides *which model*, not *which lane*. §5.1's
+`admissible(lane)`, `ceiling(lane)` and `level(lane)` are computed by
+:mod:`sofact.routing` as of ADR-0076 — this is the other axis, and the two are joined
+only in that a lane's reasoning class picks the model that runs it.
 
 **FR-133's phase key is derived, not stored, and the fold refuses rather than guesses.**
 `DispatchRecord` carries `step_id` and not the step's kind, so `measure_spend` reads the

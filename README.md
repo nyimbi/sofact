@@ -313,6 +313,7 @@ sofact attempts                     # what the repair loop cost: attempts, token
 sofact composition                  # the frozen plugin set, and whether FR-154's freeze holds
 sofact composition --verify a=<sha> # re-check the pins against what is installed now
 sofact scope                        # the autonomy target this deployment declared (FR-157)
+sofact route --contract <id>        # §5.1's ladder per lane: admissible, ceiling, level
 sofact intent                       # the intent graph, and what each escape points at
 sofact intent --attributions        # which clause each escape implicates (FR-127)
 sofact integrity                    # re-verify the pinned hashes
@@ -524,7 +525,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 2009 tests
+uv run pytest -vxs tests/ci          # 2062 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

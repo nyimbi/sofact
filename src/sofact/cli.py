@@ -46,6 +46,15 @@ from sofact.notify import (
 	load_notification_specs,
 	notifier_spec_for,
 )
+from sofact.routing import (
+	CONCERNS_FLOORS_ENV,
+	THETA_THRESHOLDS_ENV,
+	ConcernsFloor,
+	RoutingRefusal,
+	load_concerns_floors,
+	load_theta_thresholds,
+	route_statement,
+)
 from sofact.search import SearcherSpec, SearchRefusal, load_searcher_specs, searcher_spec_for
 from sofact.service import (
 	FactoryService,
@@ -69,6 +78,7 @@ from sofact.transcribe import (
 )
 from sofact.views import (
 	AUTHORSHIP_READING,
+	DEFAULT_THETA,
 	L4_GATE_THETA,
 	PHASE_GATE,
 	PHASE_SEQUENCE,
@@ -134,6 +144,7 @@ from sofact.views import (
 	SystemEntity,
 	SystemInterface,
 	SystemModel,
+	ThetaThresholds,
 	Transcript,
 	ValueHypothesis,
 	VerdictOutcome,
@@ -365,6 +376,44 @@ def _service(home: Path | None) -> FactoryService:
 		notifier=_configured_notifier(),
 		model_tiers=_configured_model_tiers(),
 	)
+
+
+def _configured_concerns_floors() -> tuple[ConcernsFloor, ...]:
+	"""NFR-018's concerns floors this deployment declared, empty when it declared none (FR-024).
+
+	Empty rather than a built-in table: :data:`~sofact.views.CONCERNS_FLOOR` is the floor
+	*the specification* states, and this is the one a deployment adds on top. The rule that
+	a declared floor may only lower is SoFact's and lives in
+	:func:`~sofact.routing.load_concerns_floors`; which concerns are floors here is the
+	deployment's, which is why this half is configuration and that half is not.
+	"""
+	configured = os.environ.get(CONCERNS_FLOORS_ENV)
+	if not configured:
+		return ()
+	try:
+		return load_concerns_floors(Path(configured))
+	except RoutingRefusal as exc:
+		typer.secho(f"cannot read {CONCERNS_FLOORS_ENV}: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_theta() -> ThetaThresholds:
+	"""FR-009's θ pair, calibrated if this deployment calibrated it (FR-010).
+
+	Unlike the other seams this one *has* a default, and that is the specification's
+	choice rather than a convenience: FR-009 states the two numbers and FR-010 says they
+	are "(assumed) and must be calibrated ... before they are trusted". So the default is
+	returned with :attr:`~sofact.views.ThetaThresholds.assumed` true, and every report
+	prints the provenance beside the number rather than the number alone.
+	"""
+	configured = os.environ.get(THETA_THRESHOLDS_ENV)
+	if not configured:
+		return DEFAULT_THETA
+	try:
+		return load_theta_thresholds(Path(configured))
+	except RoutingRefusal as exc:
+		typer.secho(f"cannot read {THETA_THRESHOLDS_ENV}: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
 
 
 def _configured_model_tiers() -> Mapping[str, ModelTier]:
@@ -2927,6 +2976,64 @@ async def _intent(svc: FactoryService, *, contract: str | None, attributions: bo
 		)
 
 
+@app.command(name="route")
+def route_command(
+	ctx: typer.Context,
+	contract: str = typer.Option(..., "--contract", help="The contract whose lanes to route."),
+	home: Path | None = _HOME_OPTION,
+	measured_strength: bool = typer.Option(
+		False,
+		"--measured-strength",
+		help="Measure FR-105's strength per clause (launches a process per mutant).",
+	),
+) -> None:
+	"""Decide §5.1's level for every lane of a contract (FR-024–FR-035)."""
+	asyncio.run(
+		_route(_service(_home_of(ctx, home)), contract, measured_strength=measured_strength)
+	)
+
+
+async def _route(svc: FactoryService, contract_id: str, *, measured_strength: bool) -> None:
+	floors, thresholds = _configured_concerns_floors(), _configured_theta()
+	typer.secho("\nFR-024 to FR-035 — §5.1's routing function", fg="cyan", bold=True)
+	typer.secho(f"  {thresholds.statement}", fg="bright_black")
+	if not measured_strength:
+		# Said before the table rather than after it, because every lane below will be
+		# `undecided` and a reader who met that without this line would read it as a defect.
+		typer.secho(
+			"  f(oracle_strength) not measured: FR-105's instrument launches a process per "
+			"mutant and is off unless asked for, so every lane below is undecided rather "
+			"than decided low. Pass --measured-strength to decide it.",
+			fg="yellow",
+		)
+	try:
+		decisions = await svc.routing_report(
+			contract_id, measured_strength=measured_strength, floors=floors, thresholds=thresholds
+		)
+	except RoutingRefusal as exc:
+		typer.secho(f"cannot route: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	if not decisions:
+		typer.secho("  the decomposition declares no lanes", fg="bright_black")
+	for decision in decisions:
+		colour = "green" if decision.level is not None else "yellow"
+		typer.secho(f"  {route_statement(decision)}", fg=colour)
+		for term in decision.terms:
+			typer.secho(
+				f"    {'held' if term.held else 'FAILED'} {term.name} ({term.requirement}): "
+				f"{term.detail}",
+				fg="bright_black" if term.held else "red",
+			)
+		if decision.level is None:
+			for reason in decision.undecided:
+				typer.secho(f"    undecided: {reason}", fg="yellow")
+	# Exit non-zero when any lane could not be decided: a routing table an operator reads
+	# as a green light must not include a lane nothing decided, and the code is what a
+	# script reads when it does not read the colours.
+	if any(not decision.decided for decision in decisions):
+		raise typer.Exit(code=1)
+
+
 @app.command(name="scope")
 def scope_command(
 	ctx: typer.Context,
@@ -2965,17 +3072,25 @@ async def _scope(svc: FactoryService) -> None:
 		typer.secho(f"  note: {scope.note}", fg="bright_black")
 	for caveat in scope.caveats:
 		typer.secho(f"  note: {caveat}", fg="bright_black")
-	if scope.consumer is Consumer.THIRD_PARTY and not scope.admits_l4:
-		# Conditional on `admits_l4` rather than on the consumer alone: the sentence names
-		# what this *build* can decide, and a hardcoded one would go on saying L4 is out of
-		# reach after FR-024 to FR-035 flips the flag that puts it in reach.
+	if scope.consumer is Consumer.THIRD_PARTY:
+		# Both branches name what this *build* can decide, so the note is conditional on
+		# `admits_l4` rather than on the consumer alone — a hardcoded sentence would go on
+		# saying L4 is out of reach after FR-024 to FR-035 put it in reach, which is exactly
+		# what ADR-0076 did. The built branch says what the instrument is, because "L4 is
+		# reachable" and "your lanes are L4" are the two readings a bare green line invites.
 		typer.secho(
 			f"\n  A third-party consumer leaves the θ_hi = {L4_GATE_THETA:g} gate "
-			"(FR-024 to FR-035) unchanged, so L4 is reachable only through it — and that "
-			"gate is not built in this build, so this scope's target is inside L2 to L3. "
-			"The type refuses to let you declare past it rather than accepting a target "
-			"nothing here could decide.",
-			fg="yellow",
+			"(FR-024 to FR-035) unchanged, so L4 is reachable only through it — "
+			+ (
+				"and that gate is built, so `sofact route` decides it per lane from FR-105's "
+				"measured strength. Declaring the target is not passing the gate: a lane "
+				"nobody measured is undecided rather than L4."
+				if scope.admits_l4
+				else "and that gate is not built in this build, so nothing here measures an "
+				"oracle strength to decide it. The type refuses to let you declare past it "
+				"rather than accepting a target nothing here could decide."
+			),
+			fg="green" if scope.admits_l4 else "yellow",
 		)
 
 
