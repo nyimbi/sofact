@@ -36,6 +36,7 @@ __all__ = [
 	"assess",
 	"draft_stems",
 	"next_open",
+	"propose_prompt",
 	"spec_for",
 ]
 
@@ -190,11 +191,30 @@ def _reasons(spec: DimensionSpec, text: str) -> tuple[str, ...]:
 	return tuple(reasons)
 
 
-def assess(goal_id: str, answers: tuple[ElicitationAnswer, ...]) -> Readiness:
+def assess(
+	goal_id: str,
+	answers: tuple[ElicitationAnswer, ...],
+	*,
+	attested: frozenset[str] = frozenset(),
+) -> Readiness:
 	"""Resolve every dimension against the answers recorded for ``goal_id``.
 
 	Later answers supersede earlier ones for the same dimension, so re-answering is
-	how an operator corrects a thin reply.
+	how an operator corrects a thin reply — and it is also how they take a model's
+	proposal over: their own answer supersedes it and needs no attestation, because
+	the superseding answer is theirs.
+
+	**A model-proposed answer that nobody attested is reported as open** (FR-173). It may
+	clear every floor in :data:`DIMENSIONS` and still not resolve the dimension, because
+	the floors measure specificity and this measures authorship. A machine can write
+	something specific; it cannot have wanted anything. Without this, a proposal that
+	clears ``MIN_STEM_CHARS`` and ORACLE's markers would pass P0 and become a requirement
+	in a specification a human then approved — the "written and never read" defect with a
+	signature on it, which is the one failure this phase exists to prevent.
+
+	``attested`` is the set of answer ids a person has confirmed. Defaulting to empty is
+	deliberate: a caller that forgets it gets the *refusing* answer, not the permissive
+	one, so a forgotten argument makes a gate stricter rather than open.
 	"""
 	latest: dict[ElicitationDimension, ElicitationAnswer] = {}
 	for answer in answers:
@@ -210,6 +230,19 @@ def assess(goal_id: str, answers: tuple[ElicitationAnswer, ...]) -> Readiness:
 					dimension=spec.dimension,
 					resolved=False,
 					reasons=("not answered yet",),
+				),
+			)
+			continue
+		if answer.is_model_proposed and answer.id not in attested:
+			statuses.append(
+				DimensionStatus(
+					dimension=spec.dimension,
+					resolved=False,
+					reasons=(
+						f"proposed by {answer.answered_by!r} and attested by nobody; a person "
+						f"must confirm it or answer the dimension themselves (FR-173): "
+						f"sofact attest {answer.id} --by <you>",
+					),
 				),
 			)
 			continue
@@ -251,7 +284,12 @@ _STEM_KIND: dict[ElicitationDimension, ClauseKind] = {
 drives oracle assignment, not a requirement in its own right."""
 
 
-def draft_stems(goal_id: str, answers: tuple[ElicitationAnswer, ...]) -> SpecificationDraft:
+def draft_stems(
+	goal_id: str,
+	answers: tuple[ElicitationAnswer, ...],
+	*,
+	attested: frozenset[str] = frozenset(),
+) -> SpecificationDraft:
 	"""Turn resolved answers into a draft of unoracled clause stems.
 
 	Statements are kept **verbatim**. No ``MUST`` is prepended and no requirement is
@@ -260,9 +298,11 @@ def draft_stems(goal_id: str, answers: tuple[ElicitationAnswer, ...]) -> Specifi
 	by :class:`~sofact.views.ClauseKind`.
 
 	Raises if the answers are not yet ready, so a draft can never be built from a
-	half-interrogated goal.
+	half-interrogated goal — and ``attested`` is threaded through rather than dropped,
+	because a draft built from a proposal nobody read is exactly the artefact FR-173
+	refuses, and reaching one by way of a stale readiness reading would defeat it.
 	"""
-	readiness = assess(goal_id, answers)
+	readiness = assess(goal_id, answers, attested=attested)
 	if not readiness.is_ready:
 		waiting = ", ".join(d.value for d in readiness.open_dimensions)
 		raise ValueError(f"cannot draft from an unresolved elicitation; still open: {waiting}")
@@ -318,3 +358,39 @@ def advise_prompt(spec: DimensionSpec, answer: str) -> tuple[str, str]:
 		"What is the most important thing this answer leaves unverifiable?"
 	)
 	return _SYSTEM, user
+
+
+_PROPOSE_SYSTEM = (
+	"You are drafting answers inside SoFact, a tool that turns a stated goal into a "
+	"falsifiable specification. A person has described what they want and has not yet "
+	"answered every question the specification needs. Your draft is a **proposal**: it "
+	"will be shown to them, it will be recorded as machine-written, and no dimension it "
+	"fills counts as answered until they read it and confirm it.\n\n"
+	"Write the answer that the goal statement actually supports, in the terms a machine "
+	"could check. Name concrete observable states, real consumers, and bounds you can "
+	"justify from what they said. Where the statement does not support a specific answer, "
+	"say what is missing rather than inventing a plausible one — an invented specific is "
+	"worse than an admitted gap, because it will read as the operator's own intent.\n\n"
+	"Reply with the answer alone. No preamble, no headings, no list of options, no "
+	"restatement of the question."
+)
+
+
+def propose_prompt(spec: DimensionSpec, goal_statement: str) -> tuple[str, str]:
+	"""Build the ``(system, user)`` pair used to draft a proposal for one dimension.
+
+	The goal statement is included and nothing else is: a proposal made without it would
+	be a generic answer to a generic question, and the point of drafting is that the
+	operator gets back something about *their* system. Nothing downstream treats the
+	output as an answer until a person attests it (FR-173), so the prompt's job is to be
+	useful rather than to be safe — the safety is in the attestation, not in the wording.
+	"""
+	assert goal_statement.strip(), "cannot propose an answer to an unstated goal"
+	user = (
+		f"The person's goal, in their own words:\n{goal_statement}\n\n"
+		f"Dimension: {spec.dimension.value}\n"
+		f"Why it matters: {spec.rationale}\n"
+		f"The question to answer: {spec.question}\n\n"
+		"Write the answer, in their terms, as concretely as the statement allows."
+	)
+	return _PROPOSE_SYSTEM, user

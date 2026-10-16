@@ -22,6 +22,7 @@ from collections.abc import Iterable
 from sofact.views import (
 	AdversarialAuditReport,
 	AuthorshipCheck,
+	CompetitiveLandscape,
 	CompletionClaim,
 	Contract,
 	Cut,
@@ -31,10 +32,13 @@ from sofact.views import (
 	DeployRecord,
 	DiffReview,
 	DispatchRecord,
+	DriverRun,
 	ElicitationAnswer,
+	ElicitationAttestation,
 	EscapeEvent,
 	EscapeOverride,
 	Evidence,
+	ExceedsClaim,
 	GateCost,
 	Goal,
 	GoalPlan,
@@ -43,16 +47,20 @@ from sofact.views import (
 	IntegrityCheck,
 	LedgerEntry,
 	LedgerKind,
+	Notification,
 	OracleAuditReport,
 	PhaseAdvance,
+	ProductSpecificationDocument,
 	ProjectState,
 	RepairAttempt,
 	ResearchClassification,
 	ResearchRecord,
+	SearchScan,
 	SourceLedger,
 	Specification,
 	SpecificationDraft,
 	SpecificationGate,
+	Transcript,
 	VerificationReport,
 )
 
@@ -154,6 +162,14 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	authorship_checks: list[AuthorshipCheck] = []
 	escapes: list[EscapeEvent] = []
 	escape_overrides: list[EscapeOverride] = []
+	transcripts: list[Transcript] = []
+	attestations: list[ElicitationAttestation] = []
+	landscapes: list[CompetitiveLandscape] = []
+	exceeds: list[ExceedsClaim] = []
+	product_specs: list[ProductSpecificationDocument] = []
+	driver_runs: list[DriverRun] = []
+	notifications: list[Notification] = []
+	scans: list[SearchScan] = []
 
 	for entry in ordered:
 		if entry.index in hidden:
@@ -276,6 +292,54 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				# "logged and attributed" checkable after the override is revised.
 				escape_overrides.append(EscapeOverride.model_validate(payload["override"]))
 
+			case LedgerKind.TRANSCRIPT_RECORDED:
+				# Appended, never keyed: two transcriptions of one recording are two
+				# attempts, and the second may be the one that worked. `transcript_for`
+				# reads the latest usable one per goal.
+				transcripts.append(Transcript.model_validate(payload["transcript"]))
+
+			case LedgerKind.ELICITATION_ATTESTED:
+				# Appended, never keyed, and here the reason is the opposite of a
+				# measurement's: an attestation is a person's act, so a second one is a
+				# second person having read the answer rather than a revision of the first.
+				attestations.append(ElicitationAttestation.model_validate(payload["attestation"]))
+
+			case LedgerKind.COMPETITIVE_SCAN_RECORDED:
+				# Versioned like the ledger and the classification: a rescan supersedes a
+				# landscape rather than replacing it, and the operative one is `landscape`.
+				landscapes.append(CompetitiveLandscape.model_validate(payload["landscape"]))
+
+			case LedgerKind.EXCEEDS_DECLARED:
+				# Appended, never keyed — `gate_costs`' rule. A declaration and its revision
+				# are two claims someone made, and `exceeds_for` reads the latest per
+				# requirement while the log keeps what was first declared.
+				exceeds.append(ExceedsClaim.model_validate(payload["exceeds"]))
+
+			case LedgerKind.PRODUCT_SPEC_RENDERED:
+				# Versioned like the delivery: the document rendered before the P2 approval
+				# and the one rendered after it are two different documents, and the first
+				# is what the approver was shown.
+				product_specs.append(
+					ProductSpecificationDocument.model_validate(payload["document"])
+				)
+
+			case LedgerKind.DRIVER_ADVANCED:
+				# Appended, never keyed. A driver run is one invocation, so two rows are two
+				# runs — the resumable loop depends on that, since a resumed run is a second
+				# row rather than an amendment of the first.
+				driver_runs.append(DriverRun.model_validate(payload["run"]))
+
+			case LedgerKind.NOTIFICATION_SENT:
+				# Appended, never keyed, and the row exists whether or not it was delivered:
+				# "we told them" and "we meant to tell them" must not print the same line.
+				notifications.append(Notification.model_validate(payload["notification"]))
+
+			case LedgerKind.SEARCH_SCAN_RECORDED:
+				# Appended, never keyed: a scan is one provider's answers to one set of
+				# queries, so a second scan over the same goal is a second measurement
+				# rather than a correction — `scans_for` reads them in order.
+				scans.append(SearchScan.model_validate(payload["scan"]))
+
 	state = ProjectState(
 		goals=tuple(goals),
 		answers=tuple(answers),
@@ -309,6 +373,14 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		authorship_checks=tuple(authorship_checks),
 		escapes=tuple(escapes),
 		escape_overrides=tuple(escape_overrides),
+		transcripts=tuple(transcripts),
+		attestations=tuple(attestations),
+		landscapes=tuple(landscapes),
+		exceeds=tuple(exceeds),
+		product_specs=tuple(product_specs),
+		driver_runs=tuple(driver_runs),
+		notifications=tuple(notifications),
+		scans=tuple(scans),
 	)
 	assert len(state.goals) == len(goals), "fold lost a goal"
 	return state

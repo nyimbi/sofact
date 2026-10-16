@@ -180,14 +180,12 @@ envelope's token and wall-clock accounting, which is what the factory *spends*, 
 
 GOVERNANCE_ABSENT_REASON: Final[str] = (
 	"no module in this tree imports a payment, e-signature or settlement provider, "
-	"and the ledger's kinds are the factory's whole vocabulary of acts: goal, answer, "
-	"draft, contract, evidence, verdict, claim, note, plan, capability, dispatch, "
-	"integrity, integration, reuse, research, classification, source, repair, "
-	"decomposition, specification, phase, cut, delivery, deploy, cost, audit, escape. "
-	"FR-055's five acts — set prices, accept customers, sign agreements, move money, make "
-	"commitments — have no representation, so the factory cannot perform one by any code "
-	"path. This is a finding about the *absence* of a capability rather than a guard that "
-	"refuses one, and the two are not the same claim: a guard can be bypassed and an "
+	"and the ledger's kinds are the factory's whole vocabulary of acts: "
+	+ ", ".join(dict.fromkeys(kind.value.split(".")[0] for kind in LedgerKind))
+	+ ". FR-055's five acts — set prices, accept customers, sign agreements, move money, "
+	"make commitments — have no representation, so the factory cannot perform one by any "
+	"code path. This is a finding about the *absence* of a capability rather than a guard "
+	"that refuses one, and the two are not the same claim: a guard can be bypassed and an "
 	"absent interface cannot be called"
 )
 """FR-055's finding, stated as the tree's own vocabulary rather than as a promise.
@@ -196,6 +194,13 @@ The ledger kinds are named because they *are* the factory's vocabulary of acts �
 makes the log the only mutable thing in the system, so a capability the log cannot record
 is a capability the factory does not have. That is a checkable statement about this tree,
 which a sentence promising restraint would not be.
+
+**The list is read off :class:`~sofact.views.LedgerKind`, not transcribed.** It was
+transcribed, and it drifted: by the time this was noticed the sentence named twenty-eight
+acts while the enum held thirty-three, having lost ``diff``, ``oracle``, ``adversarial``
+and ``authorship`` without anything failing. A sentence whose whole claim is "this is
+checkable" cannot be the one thing in the tree nothing checks — so the vocabulary is
+derived, and adding a kind now moves the sentence with it.
 """
 
 

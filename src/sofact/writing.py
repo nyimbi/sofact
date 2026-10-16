@@ -60,6 +60,8 @@ DELIVERY_HEADINGS: Final[tuple[str, ...]] = (
 	"Escapes",
 	"Escape attribution",
 	"Maintenance handover",
+	"Declared exceedances",
+	"Notifications",
 	"Machine checks",
 )
 """The headings :func:`render_delivery_document` always writes, in order.
@@ -397,6 +399,57 @@ def render_delivery_document(report: DeliveryReport) -> str:
 				else "no command — this oracle cannot be re-run as delivered"
 			)
 			lines.append(f"  - `{oracle.clause_id}` (rank {oracle.rank}): {command}")
+
+	lines += ["", "## Declared exceedances", ""]
+	if not report.exceeds:
+		lines.append(
+			"No capability was declared to exceed a rival's (FR-170). This is not the same "
+			"statement as every declared exceedance being met: it is the absence of a "
+			"declaration, and an empty table here would read as a comparison nobody made."
+		)
+	else:
+		lines.append(
+			f"{len(report.exceeds)} capability(ies) were declared to exceed a cited rival's, "
+			"and **0 were verified by an oracle**: no oracle in O1-O8 compares two systems, "
+			"so there is no measurement behind any of these and `measured_margin` is "
+			"unmeasured by type (FR-170, NFR-024)."
+		)
+		lines.append("")
+		for claim in report.exceeds:
+			lines.append(f"- **{claim.capability}** over {claim.baseline}")
+			lines.append(
+				f"  - {len(claim.baseline_source_ids)} baseline source(s), "
+				f"{len(claim.clause_ids)} intent clause(s), declared by {claim.declared_by}"
+			)
+			lines.append(f"  - rationale: {claim.rationale}")
+
+	lines += ["", "## Notifications", ""]
+	if not report.notifications:
+		lines.append(
+			"No notification was attempted for this delivery (FR-172). This is not the same "
+			"statement as every notification having arrived: it is the absence of an "
+			"attempt, and the delivery may still be complete."
+		)
+	else:
+		delivered = sum(1 for n in report.notifications if n.delivered)
+		lines.append(
+			f"{delivered} of {len(report.notifications)} notification attempt(s) were "
+			"delivered (FR-172). A body is digested rather than reproduced here: it names "
+			"the system being built and this report is a durable artefact."
+		)
+		lines.append("")
+		for notification in report.notifications:
+			state = (
+				f"delivered (exit {notification.exit_code})"
+				if notification.delivered
+				else f"**NOT delivered** (exit {notification.exit_code}): "
+				f"{notification.error or 'no process ran'}"
+			)
+			lines.append(
+				f"- `{notification.subject}` via {notification.notifier}: {state} "
+				f"({notification.body_chars} char(s), "
+				f"sha256 `{notification.body_sha256[:16]}…`)"
+			)
 
 	lines += ["", "## Machine checks", ""]
 	for check in report.checks:

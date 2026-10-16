@@ -53,6 +53,7 @@ __all__ = [
 	"L4_GATE_THETA",
 	"MACHINE_API_VERSION",
 	"MAINTAINABILITY_NOT_VERIFIED",
+	"MODEL_ANSWER_PREFIX",
 	"MODE_G_CEILING",
 	"MODE_M_CEILING",
 	"MODULE_CLASS_CEILING",
@@ -63,8 +64,10 @@ __all__ = [
 	"TOPOLOGY_ISOLATION",
 	"TOPOLOGY_MODIFIER",
 	"TUNED_MODEL_UNREACHABLE",
+	"UNATTESTED_MARKER",
 	"VERDICT_SURFACES",
 	"AdversarialAuditReport",
+	"AnswerProvenance",
 	"Assumption",
 	"AttemptTelemetry",
 	"AttemptTelemetryReport",
@@ -73,6 +76,7 @@ __all__ = [
 	"AuthorshipSurface",
 	"AutonomyLevel",
 	"CapabilityFinding",
+	"CapabilityKind",
 	"ChangeCostReport",
 	"ChangeCostRow",
 	"ChangeFootprint",
@@ -84,6 +88,8 @@ __all__ = [
 	"ClauseKind",
 	"ClauseStem",
 	"ClauseVerdict",
+	"ClauseVerdictProvenance",
+	"CompetitiveLandscape",
 	"CompletionClaim",
 	"Consumer",
 	"Contract",
@@ -105,7 +111,12 @@ __all__ = [
 	"DimensionStatus",
 	"DispatchMode",
 	"DispatchRecord",
+	"DriverOutcome",
+	"DriverRun",
+	"DriverStep",
+	"DriverTerminal",
 	"ElicitationAnswer",
+	"ElicitationAttestation",
 	"ElicitationDimension",
 	"EnvelopeActuals",
 	"EnvelopeDimension",
@@ -118,6 +129,7 @@ __all__ = [
 	"EscapeReport",
 	"Evidence",
 	"EvidenceKind",
+	"ExceedsClaim",
 	"ExploitFix",
 	"GateCheck",
 	"GateCost",
@@ -160,6 +172,7 @@ __all__ = [
 	"ModuleCheckout",
 	"ModuleClass",
 	"NonGoal",
+	"Notification",
 	"OracleAuditFinding",
 	"OracleAuditReport",
 	"OracleAuditSkip",
@@ -174,17 +187,25 @@ __all__ = [
 	"PluginComposition",
 	"PluginVerdict",
 	"ProbeOutcome",
+	"ProductSpecificationDocument",
 	"ProjectState",
 	"Readiness",
 	"RepairAttempt",
 	"RepairOutcome",
 	"Requirement",
+	"RequirementAnnotation",
 	"ResearchAllowance",
 	"ResearchBudget",
 	"ResearchClassification",
 	"ResearchMode",
 	"ResearchRecord",
 	"ResearchVerdict",
+	"RivalCapability",
+	"RivalSystem",
+	"SearchHit",
+	"SearchOutcome",
+	"SearchQueryResult",
+	"SearchScan",
 	"Source",
 	"SourceLedger",
 	"SourcePosture",
@@ -200,6 +221,7 @@ __all__ = [
 	"SystemModel",
 	"SystemRelationship",
 	"TraceLink",
+	"Transcript",
 	"UnverifiedClause",
 	"ValueHypothesis",
 	"VerdictOutcome",
@@ -215,7 +237,6 @@ __all__ = [
 	"topology_ceiling",
 	"topology_refusal",
 ]
-
 GENESIS_HASH = "0" * 64
 """``prev_hash`` of the first ledger entry."""
 
@@ -270,6 +291,22 @@ def _uuid7(value: str) -> str:
 
 NonEmptyStr = Annotated[str, AfterValidator(_non_empty)]
 UUID7 = Annotated[str, AfterValidator(_uuid7)]
+
+
+def is_uuid7(value: str) -> bool:
+	"""Whether ``value`` is a UUID7, by the same validator :data:`UUID7` applies (FR-171).
+
+	Public because a caller holding a producer's string — a research classification's
+	evidence ids, which arrive as free text — has to decide whether it can go into a
+	``UUID7`` field. Delegating to :func:`_uuid7` rather than re-testing the version keeps
+	one definition of "is a UUID7"; a second check would drift the first time either was
+	relaxed, and the two would then disagree about which ids are admissible.
+	"""
+	try:
+		_uuid7(value)
+	except ValueError:
+		return False
+	return True
 
 
 class View(BaseModel):
@@ -1268,8 +1305,24 @@ class Goal(View):
 	created_at: datetime
 
 
+MODEL_ANSWER_PREFIX: Final[str] = "model:"
+"""How ``answered_by`` says a machine wrote an answer rather than a person (FR-173).
+
+A prefix on the existing field rather than a new boolean, because the field already
+carried the identity and nothing read it. ``by="operator"`` and ``by="model:qwen"`` were
+indistinguishable to :func:`sofact.elicitation.assess`, so a model-drafted answer counted
+as a resolved dimension and cleared P0 — the "written and never read" defect with a
+human's signature on it one gate later.
+"""
+
+
 class ElicitationAnswer(View):
-	"""One operator answer to one dimension."""
+	"""One answer to one dimension, and who gave it.
+
+	``answered_by`` is an identity, not a label: it is the whole of what separates an
+	operator's words from a machine's proposal, and :attr:`is_model_proposed` is the
+	reader it did not have until FR-173.
+	"""
 
 	id: UUID7
 	goal_id: UUID7
@@ -1277,6 +1330,575 @@ class ElicitationAnswer(View):
 	text: NonEmptyStr
 	answered_by: NonEmptyStr
 	at: datetime
+
+	@property
+	def is_model_proposed(self) -> bool:
+		"""Whether a machine wrote this answer rather than a person (FR-173).
+
+		Derived from ``answered_by`` rather than stored, for :attr:`OracleDeclaration.held_out`'s
+		reason: a field defaulting to ``False`` would leave the distinction open at every
+		answer built without it, whereas a derivation is correct at every site that reads
+		it. A proposal is not a lie — it is an answer nobody has read yet, which is why
+		:class:`ElicitationAttestation` exists rather than a refusal.
+		"""
+		return self.answered_by.startswith(MODEL_ANSWER_PREFIX)
+
+
+class ElicitationAttestation(View):
+	"""A person confirming a model-proposed answer, or editing it into their own (FR-173).
+
+	Attestation records that a human **read** an answer, not that the answer is *true* —
+	the same distinction :mod:`sofact.elicitation` draws about its deterministic floor. Its
+	job is to make "a machine wrote this and nobody checked" a state the log can express,
+	so it can be refused rather than silently approved.
+
+	An operator who re-answers a dimension instead of attesting the proposal needs no
+	attestation at all: :func:`sofact.elicitation.assess` lets a later answer supersede an
+	earlier one, and the superseding answer is the operator's own.
+	"""
+
+	id: UUID7
+	answer_id: UUID7
+	attested_by: NonEmptyStr
+	at: datetime
+
+	@model_validator(mode="after")
+	def _an_attestation_is_a_person(self) -> Self:
+		if self.attested_by.startswith(MODEL_ANSWER_PREFIX):
+			raise ValueError(
+				f"attested_by {self.attested_by!r} is model-proposed, and an attestation by "
+				"a machine is not an attestation: the whole content of FR-173 is that a "
+				"person read the answer, so a model signing for one restores exactly the "
+				"state this record exists to make visible"
+			)
+		return self
+
+
+class Transcript(View):
+	"""What a transcriber produced from one audio file, and how (FR-168).
+
+	``text`` is a plain ``str`` and not a ``NonEmptyStr``, because a transcription that
+	failed is a real state and rounding it into an empty goal would be the defect: the
+	operator would see a goal with a blank statement rather than a tool that did not run.
+	:attr:`is_usable` is the only predicate any caller should branch on.
+
+	The audio's digest is recorded so a transcript is bound to *the* recording it came
+	from. A transcript whose ``audio_sha256`` is not the digest of the file you passed is
+	not a transcript of it, and without the field there would be no way to tell.
+	"""
+
+	id: UUID7
+	goal_id: UUID7 | None = None
+	audio_path: str
+	audio_sha256: NonEmptyStr
+	audio_bytes: int
+	transcriber: NonEmptyStr
+	model: str | None = None
+	argv: tuple[str, ...] = ()
+	exit_code: int | None = None
+	text: str = ""
+	stderr_tail: str | None = None
+	at: datetime
+
+	@property
+	def is_usable(self) -> bool:
+		"""Whether this is a transcript at all: the tool ran and said something.
+
+		Both conjuncts are required. An exit code of zero with no text is a transcriber
+		that heard nothing, and text beside a non-zero exit is a partial output from a
+		run that failed — neither is a statement an operator made.
+		"""
+		return self.exit_code == 0 and bool(self.text.strip())
+
+
+class CapabilityKind(StrEnum):
+	"""The three words the operator used, kept distinct rather than merged (FR-169).
+
+	FR-169 asks for "the features capabilities and functionality" of the best systems, and
+	those are three different questions about one product: a *feature* is something it
+	does, a *capability* is something it can be relied on to do under load or failure, and
+	*functionality* is the surface those are reached through. Collapsing them into one
+	list would lose the distinction at exactly the point the exceedance declaration needs
+	it — you can exceed a feature by adding one and you cannot exceed a capability without
+	evidence, which is why the type survives.
+	"""
+
+	FEATURE = "feature"
+	CAPABILITY = "capability"
+	FUNCTIONALITY = "functionality"
+
+
+class RivalSystem(View):
+	"""One of the best-known systems for this domain, as the producer identified it (FR-169).
+
+	``source_ids`` is non-empty and that is the whole of what makes this a baseline rather
+	than a rumour: SoFact cannot name the best systems in the world for an arbitrary
+	domain, so the producer does — under a criterion SoFact writes into the research goal
+	— and the identification is admissible only with the evidence behind it.
+	"""
+
+	id: UUID7
+	name: NonEmptyStr
+	vendor: str | None = None
+	url: NonEmptyStr
+	source_ids: tuple[UUID7, ...]
+	posture: SourcePosture
+
+	@model_validator(mode="after")
+	def _a_rival_cites_something(self) -> Self:
+		if not self.source_ids:
+			raise ValueError(
+				f"rival system {self.name!r} cites no source, so it is a rumour rather than "
+				"a baseline: FR-169's comparison is against the best systems in the world, "
+				"and a system nobody can look up is not one of them"
+			)
+		return self
+
+
+class RivalCapability(View):
+	"""One feature, capability or functionality of one rival, with its evidence (FR-169)."""
+
+	id: UUID7
+	system_id: UUID7
+	statement: NonEmptyStr
+	kind: CapabilityKind
+	source_ids: tuple[UUID7, ...]
+
+	@model_validator(mode="after")
+	def _a_capability_cites_something(self) -> Self:
+		if not self.source_ids:
+			raise ValueError(
+				f"capability {self.statement[:40]!r} cites no source: an uncited capability "
+				"cannot be the baseline an exceedance is declared against, because there "
+				"would be nothing to check the claim of exceeding it (FR-169)"
+			)
+		return self
+
+
+class CompetitiveLandscape(View):
+	"""What the competitive research pass found, with its own selection criterion (FR-169).
+
+	``subject`` must equal ``query``: SoFact authors the research subject and the producer
+	echoes it back. Without that check a producer could retitle the scan — research
+	"competitors in X" and return a survey of Y — and every downstream reader would take
+	the landscape as an answer to the question SoFact asked. It is the same failure
+	:func:`sofact.service.research_goal` prevents by writing the clause ids into the
+	prompt rather than letting the producer choose its own subject list.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	query: NonEmptyStr
+	subject: NonEmptyStr
+	version: int = 1
+	systems: tuple[RivalSystem, ...] = ()
+	capabilities: tuple[RivalCapability, ...] = ()
+	scanned_at: datetime
+
+	@model_validator(mode="after")
+	def _the_subject_is_the_one_sofact_asked_for(self) -> Self:
+		if self.subject.strip() != self.query.strip():
+			raise ValueError(
+				f"the scan's subject {self.subject!r} is not the subject SoFact asked for "
+				f"({self.query!r}): a landscape that retitles the question is not an answer "
+				"to it, and every reader downstream would take it as one (FR-169)"
+			)
+		if self.version < 1:
+			raise ValueError(f"version must be >= 1, got {self.version}")
+		return self
+
+	@model_validator(mode="after")
+	def _every_capability_belongs_to_a_system(self) -> Self:
+		known = {s.id for s in self.systems}
+		strangers = tuple(c.system_id for c in self.capabilities if c.system_id not in known)
+		if strangers:
+			raise ValueError(
+				f"{len(strangers)} capability(ies) name a system the scan does not carry: a "
+				"capability of nothing cannot be compared against anything (FR-169)"
+			)
+		return self
+
+	@property
+	def sourced_systems(self) -> tuple[RivalSystem, ...]:
+		"""The rivals that cite at least one source.
+
+		Equal to :attr:`systems` by construction, since :class:`RivalSystem` refuses an
+		uncited one. Exposed anyway because the *count* is what the report prints beside
+		the total, and a reader comparing them should be able to see they agree rather
+		than be told the invariant holds.
+		"""
+		return tuple(s for s in self.systems if s.source_ids)
+
+	@property
+	def unexamined_systems(self) -> tuple[RivalSystem, ...]:
+		"""Rivals with no capability recorded, so the scan looked but found nothing.
+
+		Not a failure and not a pass: it is the measurement FR-169 has to carry, because a
+		landscape of five well-sourced rivals whose capabilities were never enumerated
+		would otherwise read as a stronger baseline than one rival that was examined.
+		"""
+		examined = {c.system_id for c in self.capabilities}
+		return tuple(s for s in self.systems if s.id not in examined)
+
+	@property
+	def found_nothing(self) -> bool:
+		"""Whether the pass returned no rival at all.
+
+		A measurement rather than a failure, and reported as one: a domain with no
+		comparable system is a real finding about the domain, and the alternative —
+		treating it as an error — would push a producer toward inventing rivals to avoid
+		one.
+		"""
+		return not self.systems
+
+
+class ExceedsClaim(View):
+	"""A declared capability that is meant to exceed a cited rival's (FR-170).
+
+	**No oracle in O1–O7 compares two systems, so this is never a verified fact.**
+	``measured_margin`` returns ``None`` always, and that is not an unimplemented method —
+	it is NFR-024 stated as a type. There is no measurement behind the claim, so there is
+	no number to report, and a renderer that printed one would be inventing it.
+
+	``baseline_source_ids`` is non-empty for the reason :class:`RivalSystem`'s is: a claim
+	to exceed something nobody can look up is a wish. ``clause_ids`` is non-empty so the
+	claim traces to something the operator actually asked for (FR-076's rule, applied to
+	the declaration rather than the requirement).
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	capability: NonEmptyStr
+	baseline: NonEmptyStr
+	baseline_source_ids: tuple[UUID7, ...]
+	rationale: NonEmptyStr
+	clause_ids: tuple[UUID7, ...]
+	declared_by: NonEmptyStr
+	declared_at: datetime
+
+	@model_validator(mode="after")
+	def _a_claim_to_exceed_names_what_it_exceeds(self) -> Self:
+		if not self.baseline_source_ids:
+			raise ValueError(
+				f"exceedance {self.capability[:40]!r} cites no source for its baseline "
+				f"({self.baseline!r}): a capability declared to exceed something with no "
+				"evidence behind it cannot be checked by a reader or an oracle, and FR-170 "
+				"asks for a comparison, not an assertion"
+			)
+		if not self.clause_ids:
+			raise ValueError(
+				f"exceedance {self.capability[:40]!r} traces to no intent clause, so nothing "
+				"the operator asked for requires it (FR-076)"
+			)
+		return self
+
+	@property
+	def measured_margin(self) -> None:
+		"""Always ``None``: nothing measures this, so nothing may report a figure (FR-170).
+
+		Returns ``None`` rather than raising, so a renderer reads the same value it reads
+		for every other unmeasured quantity and prints *unmeasured*. A method that raised
+		would invite a caller to wrap it, and the wrapper is where a default would appear.
+		"""
+		return None
+
+
+class AnswerProvenance(View):
+	"""Which answer a requirement descends from, and whether a person ever read it (FR-171)."""
+
+	dimension: ElicitationDimension
+	answer_id: UUID7
+	answered_by: NonEmptyStr
+	attested: bool
+
+	@property
+	def unattested(self) -> bool:
+		"""Whether a machine proposed this and no person has confirmed it (FR-173).
+
+		**Both conjuncts are required.** The attested set holds attestation *rows*, and a
+		row exists only for a model-proposed answer — :meth:`FactoryService.attest` refuses
+		to attest the operator's own words, because a person confirming themselves is not a
+		reading. So ``not self.attested`` alone is true of every operator answer ever
+		written, and the document would print the unattested marker against every
+		requirement in a specification the operator typed themselves. The authorship half is
+		what makes the predicate mean what its name says.
+		"""
+		return not self.attested and self.answered_by.startswith(MODEL_ANSWER_PREFIX)
+
+
+class ClauseVerdictProvenance(View):
+	"""What research concluded about one clause a requirement traces to (FR-171)."""
+
+	clause_id: UUID7
+	verdict: ResearchVerdict
+	source_ids: tuple[UUID7, ...] = ()
+
+
+class RequirementAnnotation(View):
+	"""One requirement, with every fact that explains why it exists (FR-171).
+
+	This is what "annotated" means in the operator's request: a requirement is not a
+	sentence the specification asserts, it is a sentence with a provenance. The annotation
+	carries the elicitation answers it descends from, what research concluded about the
+	clauses it traces to, the oracle class and rank that will check it, the module that
+	owns it, and any exceedance declared against it.
+
+	The requirement is **held**, not referenced. A ``requirement_id`` alone would make the
+	document a join between two collections, and a renderer that failed the join would print
+	an annotation of nothing — the document could then disagree with the record it claims to
+	render. Holding it makes that state unrepresentable.
+
+	:attr:`unattested` is derived from the answers rather than passed in, which is the
+	property that makes the document honest: a requirement built from a model proposal
+	nobody read cannot be rendered as though a person had.
+	"""
+
+	requirement: Requirement
+	clause_ids: tuple[UUID7, ...]
+	elicitation: tuple[AnswerProvenance, ...] = ()
+	research: tuple[ClauseVerdictProvenance, ...] = ()
+	oracle_class: OracleClass | None = None
+	oracle_rank: int | None = None
+	module_id: UUID7 | None = None
+	exceeds_claim_ids: tuple[UUID7, ...] = ()
+
+	@property
+	def requirement_id(self) -> str:
+		"""The requirement's id, so a caller need not reach through the annotation."""
+		return self.requirement.id
+
+	@property
+	def unattested(self) -> bool:
+		"""Whether any answer behind this requirement is a proposal nobody confirmed.
+
+		One unattested answer is enough, and it is not a majority rule: the requirement
+		states what the operator wants, and a single clause of it that a machine wrote and
+		nobody read is a clause of the specification no person has agreed to.
+		"""
+		return any(a.unattested for a in self.elicitation)
+
+	@property
+	def unattested_answers(self) -> tuple[AnswerProvenance, ...]:
+		"""The specific answers behind this requirement that nobody attested (FR-173)."""
+		return tuple(a for a in self.elicitation if a.unattested)
+
+
+UNATTESTED_MARKER: Final[str] = "**UNATTESTED — proposed by a machine, not confirmed by a person**"
+"""What the specification document prints beside an unattested requirement (FR-173).
+
+A constant because the test suite asserts the rendered document against it: the marker
+is the one thing in the document that must never quietly change, since its whole job is
+to be noticed by a human deciding whether to approve the gate.
+"""
+
+
+class ProductSpecificationDocument(View):
+	"""The rendered specification and the facts it was rendered from (FR-171).
+
+	The document is a *rendering* of this record rather than the record itself, which is
+	the arrangement ADR-0044 established for the delivery: two renders of one document are
+	byte-identical, so a diff between two specifications is a diff between two sets of
+	facts rather than between two paraphrases.
+
+	``attested`` is a property and not a field. A stored flag would let a caller render a
+	document as approved without an approval, and the approval is exactly what the first
+	gate is.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	specification_id: UUID7
+	contract_id: UUID7
+	landscape_id: UUID7 | None = None
+	rendered_at: datetime
+	requirements: tuple[RequirementAnnotation, ...] = ()
+	exceeds: tuple[ExceedsClaim, ...] = ()
+	approved_by: NonEmptyStr | None = None
+	approved_at: datetime | None = None
+
+	@property
+	def unattested(self) -> tuple[RequirementAnnotation, ...]:
+		"""The requirements in this document no person has attested (FR-173)."""
+		return tuple(r for r in self.requirements if r.unattested)
+
+	@property
+	def attested(self) -> bool:
+		"""Whether a human has approved this specification, and nothing behind it is open.
+
+		Both conjuncts, and the second is the one that matters: an approval recorded
+		against a document whose requirements include a model proposal nobody read is not
+		an approval of that requirement, so the document stays unattested until either the
+		answer is attested or the requirement is removed.
+		"""
+		return self.approved_by is not None and not self.unattested
+
+
+class DriverOutcome(StrEnum):
+	"""What one step of the driver did (FR-172)."""
+
+	ADVANCED = "advanced"
+	HALTED = "halted"
+	REFUSED = "refused"
+	SKIPPED = "skipped"
+
+
+class DriverTerminal(StrEnum):
+	"""Why the driver stopped, and there is no member for "still going" (FR-172).
+
+	The driver is a loop over the ledger rather than a held process, so every run ends and
+	ends in one of these. ``GATE_OPEN`` is the ordinary case and not an error: FR-061 makes
+	a gate a hard stop, so a run that reaches one has done all the machine work there is.
+	"""
+
+	GATE_OPEN = "gate_open"
+	DELIVERED = "delivered"
+	REFUSED = "refused"
+	EXHAUSTED = "exhausted"
+	FAILED = "failed"
+
+
+class DriverStep(View):
+	"""One thing the driver did, recorded whether it worked or not (FR-172)."""
+
+	id: UUID7
+	phase: Phase
+	action: NonEmptyStr
+	outcome: DriverOutcome
+	detail: NonEmptyStr
+	at: datetime
+
+
+class DriverRun(View):
+	"""One invocation of the driver, from wherever it started to wherever it stopped (FR-172).
+
+	``claims_built`` is a property derived from ``terminal``, and it is the single source
+	of the notification's wording. A body that said "built" while a gate was open is the
+	worst defect this feature can have, so it is made unrepresentable rather than merely
+	avoided: nothing composes that sentence from any field but this one.
+	"""
+
+	id: UUID7
+	goal_id: UUID7
+	started_at: datetime
+	ended_at: datetime
+	steps: tuple[DriverStep, ...] = ()
+	terminal: DriverTerminal
+	terminal_detail: NonEmptyStr
+	open_gate: Phase | None = None
+	gate_failures: tuple[str, ...] = ()
+	"""The machine checks that failed at the open gate, by name, or empty (FR-172).
+
+	Carried as names rather than as :class:`GateCheck` rows because the only thing read
+	off them is whether the gate's machine half failed at all — and a gate whose machine
+	half failed is *not* resumable with ``gate approve``, which refuses it. See
+	:attr:`next_human_verb`.
+
+	The default is empty, and empty is the truthful reading for a run that recorded no
+	failures: an older row in a ledger written before this field existed folds to "the
+	machine half passed", which is what ``gate approve`` did with it at the time.
+	"""
+
+	notification_id: UUID7 | None = None
+
+	@property
+	def claims_built(self) -> bool:
+		"""Whether this run may say the system was built (FR-172).
+
+		``DELIVERED`` and nothing else. Every other terminal names a reason the run
+		stopped, and each of them is a reason the system is not built.
+		"""
+		return self.terminal is DriverTerminal.DELIVERED
+
+	@property
+	def next_human_verb(self) -> str | None:
+		"""The command that would let this run continue, or ``None`` if it is finished.
+
+		Printed beside the terminal state so the operator is never told a run stopped
+		without being told what to type. A ``DELIVERED`` run has no next verb; every other
+		terminal does, including ``FAILED`` — a failure still has a human action, and
+		reporting one without the other is how a stopped run reads as a dead one.
+
+		``EXHAUSTED`` is the one that needs care, because it covers two different waits. A
+		run that stopped with the interrogation still open is waiting on a *person to
+		answer*, and telling it to resume would be telling the operator to re-run a loop
+		that will do nothing until they do — so the verb is read off the steps the run
+		actually took rather than assumed from the terminal alone.
+
+		**An open gate whose machine half failed is not approved with ``gate approve``.**
+		That verb refuses a failed check, so naming it sent the operator to a command that
+		could only refuse — and the fix for a failed machine half is to supply what the
+		checks found missing and produce the artefact again, which is the phase's own verb.
+		:data:`PHASE_PRODUCER_VERB` is that verb, and the branch is keyed on
+		:attr:`gate_failures` rather than on the gate being open at all, because a gate
+		whose machine half passed *is* approved with ``gate approve`` and saying otherwise
+		would be the opposite mistake.
+		"""
+		if self.terminal is DriverTerminal.DELIVERED:
+			return None
+		if self.open_gate is not None:
+			if self.gate_failures:
+				producer = PHASE_PRODUCER_VERB.get(self.open_gate)
+				if producer is not None:
+					return (
+						f"sofact {producer}  (then `sofact gate approve "
+						f"{self.open_gate.value} --by <you>` once the checks pass)"
+					)
+			return f"sofact gate approve {self.open_gate.value} --by <you>"
+		if self.stopped_on == "propose-answers":
+			# ``sofact`` with no subcommand is the questionnaire — the product's own front
+			# door — so the verb really is bare. It is spelled out as ``sofact`` rather than
+			# as an empty string, because the trailing space read as a missing command in a
+			# line whose whole job is to tell the operator what to type.
+			return "sofact   (bare: the questionnaire resumes at the open dimension)"
+		return "sofact build --resume"
+
+	@property
+	def stopped_on(self) -> str | None:
+		"""The action the run stopped on, or ``None`` if it stopped between actions.
+
+		Read from the last step, because that is the only place the reason a run halted is
+		recorded: the terminal names the *kind* of stop and the step names what was being
+		attempted when it happened.
+		"""
+		return self.steps[-1].action if self.steps else None
+
+
+class Notification(View):
+	"""One attempt to tell the operator something, and whether it worked (FR-172).
+
+	**A notification that was not sent is not a notification**, which is why the row is
+	appended whether or not a process launched and ``delivered`` is derived from the exit
+	code rather than declared. A record written only on success would make "we told them"
+	and "we meant to tell them" indistinguishable in the log, and the second is the one
+	worth knowing about.
+
+	The body is **digested, not stored**. A notification body names the system being
+	built, and the ledger is a durable artefact; ``body_sha256`` and ``body_chars`` make
+	"was a notification sent, and was it this one" answerable without the ledger holding
+	a client's words forever.
+	"""
+
+	id: UUID7
+	goal_id: UUID7 | None = None
+	run_id: UUID7 | None = None
+	notifier: NonEmptyStr
+	argv: tuple[str, ...] = ()
+	subject: NonEmptyStr
+	body_sha256: NonEmptyStr
+	body_chars: int
+	exit_code: int | None = None
+	expect_exit_code: int = 0
+	error: str | None = None
+	at: datetime
+
+	@property
+	def delivered(self) -> bool:
+		"""Whether a process ran and reported success (FR-172).
+
+		``None`` is never delivered: an exit code of ``None`` means no process ran, which
+		is the launch failure and not a silent success.
+		"""
+		return self.exit_code is not None and self.exit_code == self.expect_exit_code
 
 
 class DimensionStatus(View):
@@ -2522,6 +3144,33 @@ PHASE_GATE_INVERSE: dict[PhaseGate, Phase] = {gate: phase for phase, gate in PHA
 """The phase a gate belongs to. Derived from :data:`PHASE_GATE`, so the two cannot
 disagree — and derived rather than written out because a second hand-maintained table
 is a second place for a gate to be attached to the wrong phase."""
+
+
+PHASE_PRODUCER_VERB: dict[Phase, str] = {
+	Phase.SPECIFY: "specify",
+	Phase.DECOMPOSE: "decompose",
+	Phase.CONTRACT: "plan",
+	Phase.DELIVER: "deliver",
+}
+"""The verb that produces the artefact a gate is a gate on, per gated phase.
+
+It exists because **a gate can be open with a failed machine half**, and the verb that
+resumes such a run is not ``gate approve``. ``gate approve`` refuses a failed check —
+correctly, since approval cannot make an unsound artefact sound — so a run that stopped
+there and named it sent the operator to a command that could only refuse them, with no
+way forward that did not involve editing the ledger by hand.
+
+The fix for a failed machine half is to supply what the checks found missing and produce
+the artefact again, which is the phase's own verb: ``specify`` takes the operator's system
+model, assumptions and value hypothesis, ``decompose`` re-proposes over a repaired
+specification, ``plan`` re-audits the oracles. Naming that verb is the difference between
+a hard stop and a dead end.
+
+Keyed by phase rather than by gate because the phase is what the operator types, and
+hand-written rather than derived because there is no machine-readable link from a phase to
+a CLI verb — the alternative would be importing the CLI into the view layer, which is the
+dependency arrow pointing the wrong way.
+"""
 
 
 class PhaseStatus(StrEnum):
@@ -6011,6 +6660,25 @@ class DeliveryReport(View):
 
 	checks: tuple[GateCheck, ...]
 
+	exceeds: tuple[ExceedsClaim, ...] = ()
+	"""FR-170's declarations, carried so the report can say what was *claimed* (FR-118).
+
+	A field rather than a property, for :attr:`escapes`' reason: a report must stay
+	readable from the log alone. Empty means *none was declared*, which is a different
+	statement from every declaration being met — no oracle in O1-O8 compares two systems,
+	so nothing here is ever met or unmet, and the check that reads this field says
+	"declared, 0 verified by oracle" rather than printing an empty table that reads as a
+	comparison nobody made.
+	"""
+
+	notifications: tuple[Notification, ...] = ()
+	"""FR-172's attempts to tell the operator, carried so the report says whether it did.
+
+	Empty means *no attempt was made*. The body is not here — it is digested on
+	:class:`Notification` — because a notification names the system being built and this
+	report is a durable artefact a client may hold.
+	"""
+
 	@model_validator(mode="after")
 	def _the_five_statements_are_whole(self) -> Self:
 		if not self.chain:
@@ -8081,6 +8749,177 @@ class DeclarationPrecision(View):
 		return self.corroborated / self.declarations
 
 
+class SearchOutcome(StrEnum):
+	"""What one query returned, which is not the same question as whether it ran (FR-174).
+
+	``OK`` and ``NO_RESULTS`` are both successful executions: a search that found nothing
+	answered the question, and recording it as a failure would push a provider — or a
+	reader — toward treating an empty result as a reason to re-run rather than as the
+	measurement it is. The same distinction :func:`sofact.competitive.parse_competitors`
+	draws about a scan over zero rivals.
+
+	``FAILED`` is the only member that means the tool did not answer, and it is separate
+	from the run-level exit code because one query of six failing does not make the scan
+	unusable — it makes five of six queries usable, and the count is the finding.
+	"""
+
+	OK = "ok"
+	NO_RESULTS = "no-results"
+	FAILED = "failed"
+
+
+class SearchHit(View):
+	"""One result a search provider returned, and how far it was checked (FR-174).
+
+	**A hit is a lead, not a source.** A search provider returns a title, a url and a
+	snippet, and a snippet is a fragment the provider chose and possibly generated. The
+	honest record of that is ``REPORTED`` — neither the text read nor the link resolved —
+	which is why the default is the weakest rung of :class:`VerificationStatus` rather
+	than the strongest. A hit promoted to ``CONTENT_VERIFIED`` by this phase would let a
+	provider's excerpt be cited as though a human had read the page, which is the exact
+	substitution that enum's own docstring exists to prevent.
+
+	``posture`` is recorded for the same reason and with the same default: a provider
+	cannot know whose interest a result serves, and a vendor's own page ranking first is
+	not evidence about the vendor. It is ``POSITIONING`` when the provider says so and
+	``EVIDENCE`` otherwise, and either way
+	:meth:`SourceLedger.unbacked_decisions` is what stops it deciding anything.
+	"""
+
+	rank: int
+	title: NonEmptyStr
+	url: NonEmptyStr
+	snippet: str = ""
+	provider: NonEmptyStr
+	verification: VerificationStatus = VerificationStatus.REPORTED
+	posture: SourcePosture = SourcePosture.EVIDENCE
+	published: date | None = None
+	"""The provider's date for the result, when it gave one. ``None`` is *undated*."""
+
+	@model_validator(mode="after")
+	def _a_rank_is_one_based(self) -> Self:
+		if self.rank < 1:
+			raise ValueError(
+				f"search hit {self.url!r} has rank {self.rank}: ranks are one-based, and a "
+				"zero or negative rank would make 'the top result' unreadable (FR-174)"
+			)
+		return self
+
+	@model_validator(mode="after")
+	def _a_hit_is_not_content_verified(self) -> Self:
+		if self.verification is VerificationStatus.CONTENT_VERIFIED:
+			raise ValueError(
+				f"search hit {self.url!r} is content-verified: a search result is a title, "
+				"a url and a provider's snippet, and no part of this phase read the page. "
+				"Marking one content-verified would let an excerpt be cited as though a "
+				"human had read it (FR-174, FR-069)"
+			)
+		return self
+
+
+class SearchQueryResult(View):
+	"""One authored query and what it returned (FR-174).
+
+	The query is stored verbatim. It is SoFact's own text — authored before any provider
+	ran — so keeping it makes "what was asked" answerable from the log alone, which is
+	the same reason :func:`sofact.service.research_goal` writes the clause ids into the
+	prompt rather than letting a producer choose its subject list.
+	"""
+
+	query: NonEmptyStr
+	outcome: SearchOutcome
+	hits: tuple[SearchHit, ...] = ()
+	provider: NonEmptyStr
+	exit_code: int | None = None
+	error: str | None = None
+	"""The provider's own words, when it failed. Kept because a refusal that drops the
+	tool's message leaves an operator with nothing to act on."""
+
+	duration_seconds: float | None = None
+
+	@model_validator(mode="after")
+	def _a_failed_query_carries_its_reason(self) -> Self:
+		if self.outcome is SearchOutcome.FAILED and not self.error:
+			raise ValueError(
+				f"query {self.query!r} is recorded failed with no reason: a failure whose "
+				"cause was dropped is indistinguishable from a provider that returned "
+				"nothing, and the two need different responses (FR-174)"
+			)
+		return self
+
+	@model_validator(mode="after")
+	def _a_result_without_hits_is_not_ok(self) -> Self:
+		if self.outcome is SearchOutcome.OK and not self.hits:
+			raise ValueError(
+				f"query {self.query!r} is recorded ok with no hits: a provider that "
+				"returned nothing returned no results, and recording that as success "
+				"would inflate the hit count this phase is measured by (FR-174, NFR-024)"
+			)
+		return self
+
+	@property
+	def hit_count(self) -> int:
+		return len(self.hits)
+
+
+class SearchScan(View):
+	"""One search provider's answers to the queries SoFact authored (FR-174).
+
+	This is the phase that makes "web search and deep research" a capability of this
+	product rather than a thing it asks someone else to do. SoFact authors the queries
+	deterministically, a declared provider answers them, and the answers are recorded as
+	leads with the weakest verification rung — so the scan widens what the research phase
+	can cite without ever letting a provider's snippet become the evidence itself.
+
+	``provider`` is recorded per scan as well as per result because a run may consult
+	more than one, and "which engine said this" is part of how a hit is read.
+	"""
+
+	id: UUID7
+	goal_id: UUID7 | None = None
+	provider: NonEmptyStr
+	results: tuple[SearchQueryResult, ...] = ()
+	started_at: datetime
+	finished_at: datetime | None = None
+	exit_code: int | None = None
+	error: str | None = None
+
+	@property
+	def hits(self) -> tuple[SearchHit, ...]:
+		"""Every hit from every query, in query order."""
+		return tuple(hit for result in self.results for hit in result.hits)
+
+	@property
+	def hit_count(self) -> int:
+		return len(self.hits)
+
+	@property
+	def queries_answered(self) -> int:
+		"""Queries the provider actually answered, either way (FR-174).
+
+		A no-results answer counts. It is an answer, and excluding it would make a scan
+		over a narrow domain read as a scan that never ran.
+		"""
+		return sum(1 for r in self.results if r.outcome is not SearchOutcome.FAILED)
+
+	@property
+	def found_nothing(self) -> bool:
+		"""Whether every query was answered and none returned a hit (NFR-024).
+
+		``None``-like: false when any query failed, because a scan with a failed query
+		has not established that there is nothing — it has established that it does not
+		know. Reading a partial scan as "nothing exists" is the inventing-a-measurement
+		failure NFR-024 names.
+		"""
+		return bool(self.results) and self.hit_count == 0 and self.queries_answered == len(
+			self.results
+		)
+
+	@property
+	def unanswered_queries(self) -> tuple[str, ...]:
+		return tuple(r.query for r in self.results if r.outcome is SearchOutcome.FAILED)
+
+
 # --------------------------------------------------------------------------- #
 # ledger
 # --------------------------------------------------------------------------- #
@@ -8122,6 +8961,14 @@ class LedgerKind(StrEnum):
 	AUTHORSHIP_CHECKED = "authorship.checked"
 	ESCAPE_RECORDED = "escape.recorded"
 	ESCAPE_OVERRIDE_RECORDED = "escape_override.recorded"
+	TRANSCRIPT_RECORDED = "transcript.recorded"
+	ELICITATION_ATTESTED = "elicitation.attested"
+	COMPETITIVE_SCAN_RECORDED = "competitive_scan.recorded"
+	EXCEEDS_DECLARED = "exceeds.declared"
+	PRODUCT_SPEC_RENDERED = "product_spec.rendered"
+	DRIVER_ADVANCED = "driver.advanced"
+	NOTIFICATION_SENT = "notification.sent"
+	SEARCH_SCAN_RECORDED = "search_scan.recorded"
 
 
 class LedgerEntry(View):
@@ -8433,6 +9280,140 @@ class ProjectState(View):
 	someone signed.
 	"""
 
+	transcripts: tuple[Transcript, ...] = ()
+	"""Every transcription attempt, oldest first (FR-168).
+
+	Appended, never keyed, and the reason is that a failed transcription is a real row:
+	the attempt that produced nothing is what explains why the goal statement is what it
+	is, and a fold that kept only usable transcripts would make the failure invisible.
+	:meth:`transcript_for` reads the latest usable one per goal.
+	"""
+
+	attestations: tuple[ElicitationAttestation, ...] = ()
+	"""Every human attestation of a model-proposed answer, oldest first (FR-173).
+
+	Appended, never keyed, and for the opposite reason to a measurement: an attestation is
+	a person's act rather than a reading, so a second one is a second person having read
+	the answer. :meth:`attested_answer_ids` is the only intended reader.
+	"""
+
+	landscapes: tuple[CompetitiveLandscape, ...] = ()
+	"""Every competitive scan the log records, oldest first (FR-169).
+
+	Versioned like :attr:`ledgers` and :attr:`classifications`, and for the same reason: a
+	rescan supersedes a landscape rather than replacing it, and what the earlier pass found
+	is part of how the current baseline is read. :attr:`landscape` is the operative one.
+	"""
+
+	exceeds: tuple[ExceedsClaim, ...] = ()
+	"""Every declared exceedance, oldest first (FR-170).
+
+	Appended, never keyed — :attr:`gate_costs`'s rule. A declaration and its revision are
+	two claims someone made, and :meth:`exceeds_for` reads the latest per requirement while
+	the log keeps what was first claimed.
+	"""
+
+	product_specs: tuple[ProductSpecificationDocument, ...] = ()
+	"""Every rendered product specification, oldest first (FR-171).
+
+	Versioned like :attr:`deliveries`, and for a stronger reason: the document rendered
+	before the P2 approval and the one rendered after it differ in exactly the marker the
+	approver was deciding about, so superseding the first would erase what they were shown.
+	:attr:`product_spec` is the operative one.
+	"""
+
+	driver_runs: tuple[DriverRun, ...] = ()
+	"""Every driver invocation, oldest first (FR-172).
+
+	Appended, never keyed: a resumed run is a second row rather than an amendment of the
+	first, and that is what makes the resumable loop honest — the log shows how many times
+	the driver ran and where each run stopped.
+	"""
+
+	notifications: tuple[Notification, ...] = ()
+	"""Every notification attempt, oldest first (FR-172).
+
+	Appended, never keyed, and the row exists whether or not it was delivered: "we told
+	them" and "we meant to tell them" must not print the same line. :meth:`notification`
+	reads the most recent.
+	"""
+
+	scans: tuple[SearchScan, ...] = ()
+	"""Every search scan recorded, oldest first (FR-174).
+
+	Appended, never keyed: a scan is one provider's answers to one set of authored
+	queries, so two scans are two measurements rather than a correction of one.
+	:meth:`scans_for` returns every scan for a goal, because the union of two providers'
+	hits is what the research phase draws on.
+	"""
+
+	def transcript_for(self, goal_id: str) -> Transcript | None:
+		"""The most recent *usable* transcript for one goal, if any (FR-168).
+
+		Usable rather than merely latest: a later attempt that failed must not displace an
+		earlier one that worked, because the goal statement came from the earlier one and
+		the record explaining it would otherwise vanish.
+		"""
+		matching = [t for t in self.transcripts if t.goal_id == goal_id and t.is_usable]
+		return matching[-1] if matching else None
+
+	def attested_answer_ids(self) -> frozenset[str]:
+		"""Every answer a person has attested (FR-173).
+
+		A set rather than a per-answer accessor because that is how
+		:func:`sofact.elicitation.assess` consumes it: the question it asks is "is *this*
+		proposal attested", and a membership test is the whole of the answer.
+		"""
+		return frozenset(a.answer_id for a in self.attestations)
+
+	@property
+	def landscape(self) -> CompetitiveLandscape | None:
+		"""The operative competitive scan, or ``None`` if none was recorded (FR-169)."""
+		return self.landscapes[-1] if self.landscapes else None
+
+	def exceeds_for(self, requirement_id: str) -> tuple[ExceedsClaim, ...]:
+		"""Every exceedance declared against one requirement, oldest first (FR-170).
+
+		All of them rather than the latest, unlike :meth:`gate_cost`: a requirement may
+		exceed two different rivals on two different capabilities, so these are separate
+		claims rather than revisions of one.
+		"""
+		return tuple(e for e in self.exceeds if requirement_id in e.clause_ids)
+
+	@property
+	def product_spec(self) -> ProductSpecificationDocument | None:
+		"""The operative rendered specification, or ``None`` (FR-171)."""
+		return self.product_specs[-1] if self.product_specs else None
+
+	@property
+	def driver_run(self) -> DriverRun | None:
+		"""The most recent driver invocation, or ``None`` (FR-172)."""
+		return self.driver_runs[-1] if self.driver_runs else None
+
+	@property
+	def notification(self) -> Notification | None:
+		"""The most recent notification attempt, or ``None`` (FR-172).
+
+		Most recent and not most recent *delivered*, deliberately: a run whose last
+		notification failed is a run whose operator was not told, and returning the last
+		one that worked would report the opposite.
+		"""
+		return self.notifications[-1] if self.notifications else None
+
+	def scans_for(self, goal_id: str) -> tuple[SearchScan, ...]:
+		"""Every search scan recorded for one goal, oldest first (FR-174).
+
+		All of them, not the latest: two scans are two providers' answers to the same
+		authored queries, and the union of their hits is what the research phase can
+		draw on. Returning the last would silently discard the first provider's results.
+		"""
+		return tuple(s for s in self.scans if s.goal_id == goal_id)
+
+	@property
+	def scan(self) -> SearchScan | None:
+		"""The most recent search scan, or ``None`` (FR-174)."""
+		return self.scans[-1] if self.scans else None
+
 	def latest_oracle_audit(self, contract_id: str) -> OracleAuditReport | None:
 		"""The most recent audit of one contract's oracles, if any was rendered (FR-107).
 
@@ -8738,6 +9719,16 @@ class ProjectState(View):
 	def answers_for(self, goal_id: str) -> tuple[ElicitationAnswer, ...]:
 		"""All answers recorded against a goal, in log order."""
 		return tuple(a for a in self.answers if a.goal_id == goal_id)
+
+	def answer(self, answer_id: str) -> ElicitationAnswer | None:
+		"""Look up one answer by id (FR-173).
+
+		Needed because an attestation names an answer id and the operator attests from
+		the CLI, where the answer was printed in an earlier process. Looking it up here
+		rather than filtering in the service keeps the "which answer is this" question
+		answered in one place.
+		"""
+		return next((a for a in self.answers if a.id == answer_id), None)
 
 	def latest_contract(self, goal_id: str) -> Contract | None:
 		"""Most recent contract for a goal, if one exists."""

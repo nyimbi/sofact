@@ -28,16 +28,31 @@ from sofact.audit import EMPTY_WORKSPACE_INSTRUMENT
 from sofact.changecost import load_change_units, trend_statement
 from sofact.composition import load_composition, verify_composition
 from sofact.contract import ground_truth_debt
+from sofact.driver import DriverRefusal, run_goal
 from sofact.elicitation import DIMENSIONS
 from sofact.envelope import load_envelope, measure
 from sofact.escape import load_deployment_scope, load_escape_budget
 from sofact.execution import DEFAULT_TIMEOUT_SECONDS as DEFAULT_ORACLE_TIMEOUT_SECONDS
+from sofact.specdoc import PRODUCT_SPEC_FILENAME
 from sofact.harness import SPECS, HarnessBinaryMissing, HarnessSpec, load_specs
 from sofact.llm import LlmClient
 from sofact.manufacture import (
 	ManufactureSpec,
 	load_manufacture_specs,
 	manufacture_spec_for,
+)
+from sofact.notify import (
+	NotificationRefusal,
+	NotificationSpec,
+	load_notification_specs,
+	notifier_spec_for,
+)
+from sofact.search import SearcherSpec, SearchRefusal, load_searcher_specs, searcher_spec_for
+from sofact.transcribe import (
+	TranscriberRefusal,
+	TranscriberSpec,
+	load_transcriber_specs,
+	transcriber_spec_for,
 )
 from sofact.service import (
 	FactoryService,
@@ -56,6 +71,7 @@ from sofact.views import (
 	V01_REVIEW_MINUTES_PER_DIFF,
 	AdversarialAuditReport,
 	Assumption,
+	CompetitiveLandscape,
 	BoundaryMechanism,
 	ChangeUnit,
 	ClaimKind,
@@ -67,6 +83,8 @@ from sofact.views import (
 	DeliveryEnvelope,
 	DeploymentScope,
 	DeploymentTopology,
+	DriverOutcome,
+	DriverRun,
 	DispatchRecord,
 	EnvelopeDimension,
 	EscapeBudget,
@@ -80,12 +98,14 @@ from sofact.views import (
 	InterfaceMember,
 	InterfaceMemberKind,
 	MachineRequest,
+	Notification,
 	ModuleClass,
 	OracleAuditReport,
 	Phase,
 	PhaseStatus,
 	PluginComposition,
 	PluginVerdict,
+	ProductSpecificationDocument,
 	ProbeOutcome,
 	RepairOutcome,
 	ResearchBudget,
@@ -93,6 +113,8 @@ from sofact.views import (
 	ResearchMode,
 	ResearchRecord,
 	ResearchVerdict,
+	SearchOutcome,
+	SearchScan,
 	SourceLedger,
 	Specification,
 	SpecificationDraft,
@@ -102,6 +124,7 @@ from sofact.views import (
 	SystemEntity,
 	SystemInterface,
 	SystemModel,
+	Transcript,
 	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
@@ -114,6 +137,9 @@ app = typer.Typer(
 	help="SoFact — turn an imagined product into a verifiable one.",
 )
 
+_QUERY_ARGUMENT = typer.Argument(
+	None, help="Queries to ask. Defaults to queries SoFact composes from the goal."
+)
 _HOME_OPTION = typer.Option(
 	None, "--home", help="State directory (default: ./.sofact or $SOFACT_HOME)."
 )
@@ -280,6 +306,9 @@ def _service(home: Path | None) -> FactoryService:
 		boundary=_configured_boundary(),
 		change_units=_configured_change_units(),
 		manufacture=_configured_manufacture(),
+		searcher=_configured_searcher(),
+		transcriber=_configured_transcriber(),
+		notifier=_configured_notifier(),
 	)
 
 
@@ -418,6 +447,110 @@ def _configured_manufacture_specs() -> Mapping[str, ManufactureSpec] | None:
 		return load_manufacture_specs(Path(configured))
 	except ValueError as exc:
 		typer.secho(f"cannot read SOFACT_MANUFACTURE_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_searcher_specs() -> Mapping[str, SearcherSpec] | None:
+	"""The search provider table this deployment configured, if it configured one (FR-174).
+
+	``None`` means "no providers", which is not the same as an empty table: this build
+	ships none, so a misspelled path has to surface as "no such file" rather than as
+	"no search provider is configured", which reads as a deliberate choice.
+	"""
+	configured = os.environ.get("SOFACT_SEARCHER_SPECS")
+	if not configured:
+		return None
+	try:
+		return load_searcher_specs(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_SEARCHER_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_searcher() -> SearcherSpec | None:
+	"""The search provider this deployment may ask, if it named one (FR-174).
+
+	``None`` means *this deployment searches nothing*, which is not the same as
+	"search with the default engine". A factory that silently adopted an engine would put
+	results into the research ledger with no record of whose index they came from, and
+	the operator would have no way to tell a chosen index from an ambient one.
+
+	A malformed value is refused rather than defaulted, the discipline every reader here
+	uses: a typo that fell back to some other provider would search the wrong index
+	without saying so.
+	"""
+	configured = os.environ.get("SOFACT_SEARCHER")
+	if not configured:
+		return None
+	try:
+		return searcher_spec_for(configured.strip(), _configured_searcher_specs() or {})
+	except SearchRefusal as exc:
+		typer.secho(f"cannot read SOFACT_SEARCHER: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_transcriber_specs() -> Mapping[str, TranscriberSpec] | None:
+	"""The transcriber table this deployment configured, if it configured one (FR-168).
+
+	``None`` means "no transcribers", which is not the same as an empty table: this build
+	ships none, so a misspelled path has to surface as "no such file" rather than as "no
+	transcriber is configured", which reads as a deliberate choice.
+	"""
+	configured = os.environ.get("SOFACT_TRANSCRIBER_SPECS")
+	if not configured:
+		return None
+	try:
+		return load_transcriber_specs(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_TRANSCRIBER_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_transcriber() -> TranscriberSpec | None:
+	"""The speech-to-text tool this deployment may launch, if it named one (FR-168).
+
+	``None`` means *this deployment transcribes nothing*, which is not the same as
+	"transcribe with the default engine". No speech-to-text tool is a dependency of this
+	product, so there is no ambient one to fall back to, and a factory that picked
+	whichever happened to be installed would record a producer nobody chose.
+	"""
+	configured = os.environ.get("SOFACT_TRANSCRIBER")
+	if not configured:
+		return None
+	try:
+		return transcriber_spec_for(configured.strip(), _configured_transcriber_specs() or {})
+	except TranscriberRefusal as exc:
+		typer.secho(f"cannot read SOFACT_TRANSCRIBER: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_notifier_specs() -> Mapping[str, NotificationSpec] | None:
+	"""The notifier table this deployment configured, if it configured one (FR-172)."""
+	configured = os.environ.get("SOFACT_NOTIFIER_SPECS")
+	if not configured:
+		return None
+	try:
+		return load_notification_specs(Path(configured))
+	except ValueError as exc:
+		typer.secho(f"cannot read SOFACT_NOTIFIER_SPECS: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+
+
+def _configured_notifier() -> NotificationSpec | None:
+	"""Where a run's terminal state may be sent, if this deployment named one (FR-172).
+
+	``None`` means *this deployment notifies nobody*. That is reported in words rather
+	than filled in: a factory that silently used an ambient channel would send a client's
+	system name somewhere nobody chose, and the operator would have no way to tell a
+	chosen destination from an incidental one.
+	"""
+	configured = os.environ.get("SOFACT_NOTIFIER")
+	if not configured:
+		return None
+	try:
+		return notifier_spec_for(configured.strip(), _configured_notifier_specs() or {})
+	except NotificationRefusal as exc:
+		typer.secho(f"cannot read SOFACT_NOTIFIER: {exc}", fg="red")
 		raise typer.Exit(code=1) from exc
 
 
@@ -3323,6 +3456,94 @@ async def _run(svc: FactoryService, workspace: Path | None, timeout: float) -> N
 		typer.secho(f"  ran {item.payload.get('command')!r} → {shown}", fg="bright_black")
 
 
+@app.command(name="search")
+def search(
+	ctx: typer.Context,
+	query: list[str] | None = _QUERY_ARGUMENT,
+	home: Path | None = _HOME_OPTION,
+	provider: str | None = typer.Option(
+		None, "--provider", help="A named entry in SOFACT_SEARCHER_SPECS (FR-174)."
+	),
+	limit: int = typer.Option(
+		6, "--limit", help="How many queries to compose from the goal when none are given."
+	),
+	timeout: float = typer.Option(
+		120.0, "--timeout", help="Per-query wall clock for the provider."
+	),
+) -> None:
+	"""Search the web with a declared provider and record the scan (FR-174).
+
+	SoFact authors the queries from the goal's own words before the provider runs, and
+	records every hit as a *lead* at the weakest verification rung — a search result is a
+	place to look, not evidence. A provider that answered nothing is recorded as having
+	answered nothing; a query that failed is recorded as failed, and the two are
+	reported differently because only one of them is about the web.
+	"""
+	asyncio.run(_search(_service(_home_of(ctx, home)), query, provider, limit, timeout))
+
+
+async def _search(
+	svc: FactoryService,
+	query: list[str] | None,
+	provider: str | None,
+	limit: int,
+	timeout: float,
+) -> None:
+	try:
+		scan = await svc.search(
+			queries=tuple(query) if query else None,
+			provider=provider,
+			timeout=timeout,
+			limit=limit,
+		)
+	except (KeyError, ValueError, SearchRefusal) as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="yellow")
+		raise typer.Exit(code=1) from exc
+	_print_scan(scan)
+
+
+def _print_scan(scan: SearchScan) -> None:
+	typer.secho(
+		f"\nsearch scan {scan.id} @ {scan.provider}", fg="green", bold=True
+	)
+	typer.secho(
+		f"  {scan.hit_count} hit(s) over {scan.queries_answered} of {len(scan.results)} "
+		"query/queries answered (FR-174)",
+		fg="bright_black",
+	)
+	for result in scan.results:
+		mark = {
+			SearchOutcome.OK: "ok",
+			SearchOutcome.NO_RESULTS: "no results",
+			SearchOutcome.FAILED: "FAILED",
+		}[result.outcome]
+		style = "red" if result.outcome is SearchOutcome.FAILED else "bright_black"
+		typer.secho(f"  [{mark}] {result.query}", fg=style)
+		if result.error is not None and result.outcome is SearchOutcome.FAILED:
+			typer.secho(f"    {result.error}", fg="red")
+		for hit in result.hits:
+			posture = "" if hit.posture.value == "evidence" else f" ({hit.posture.value})"
+			typer.echo(f"    {hit.rank}. {hit.title}{posture}")
+			typer.echo(f"       {hit.url}")
+	if scan.found_nothing:
+		typer.secho(
+			"  every query was answered and none returned a hit: that is a measurement "
+			"about the domain, not a failure of the run (NFR-024).",
+			fg="yellow",
+		)
+	if scan.unanswered_queries:
+		typer.secho(
+			f"  {len(scan.unanswered_queries)} query/queries failed, so this scan has not "
+			"established that nothing exists — only that it does not know (NFR-024).",
+			fg="yellow",
+		)
+	typer.secho(
+		"  every hit is recorded as a lead (reported), never as evidence: the research "
+		"phase is what reads a page and writes a source (FR-174, FR-069).",
+		fg="bright_black",
+	)
+
+
 @app.command(name="research")
 def research(
 	ctx: typer.Context,
@@ -4217,6 +4438,587 @@ async def _deploy(
 def main() -> None:
 	"""Console-script entry point."""
 	app()
+
+
+# --------------------------------------------------------------------------- #
+# The front door (FR-168, FR-171, FR-172, FR-173): say what you want, and be
+# told when it is built. Each verb below is one step of that; `build` is the
+# loop that carries them as far as the gates allow.
+# --------------------------------------------------------------------------- #
+
+
+@app.command(name="speak")
+def speak(
+	ctx: typer.Context,
+	audio: Path = typer.Argument(..., help="Audio file to transcribe into a goal statement."),
+	home: Path | None = _HOME_OPTION,
+	transcriber: str | None = typer.Option(
+		None, "--transcriber", help="A named entry in SOFACT_TRANSCRIBER_SPECS (FR-168)."
+	),
+	start_goal: bool = typer.Option(
+		True,
+		"--start/--no-start",
+		help="Also open a goal from the transcript. Off records the transcript alone.",
+	),
+	timeout: float = typer.Option(900.0, "--timeout", help="Wall clock for the transcriber."),
+) -> None:
+	"""Transcribe speech and open a goal from it (FR-168).
+
+	The transcript is a record *about* a statement, not a replacement for one: the goal's
+	statement is the transcribed text and the transcript is the evidence of where it came
+	from, with the audio's digest recorded beside it. A transcript whose digest is not the
+	audio you passed is not a transcript of it, and that is checkable from the log alone.
+	"""
+	asyncio.run(_speak(_service(_home_of(ctx, home)), audio, transcriber, start_goal, timeout))
+
+
+async def _speak(
+	svc: FactoryService,
+	audio: Path,
+	transcriber: str | None,
+	start_goal: bool,
+	timeout: float,
+) -> None:
+	try:
+		transcript = await svc.speak(audio, transcriber=transcriber, timeout=timeout)
+	except (TranscriberRefusal, OSError, ValueError) as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	_print_transcript(transcript)
+	if not transcript.is_usable:
+		typer.secho(
+			"the transcriber produced no text, so no goal was opened: a goal with an "
+			"empty statement would be interrogated against nothing (FR-168).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	if not start_goal:
+		typer.secho(
+			"  --no-start: the transcript is recorded and no goal was opened.", fg="bright_black"
+		)
+		return
+	goal = await svc.start(transcript.text)
+	typer.secho(f"\ngoal {goal.id} opened from the transcript", fg="green", bold=True)
+	typer.secho(
+		"  `sofact build` drafts the six dimensions, or `sofact ask` to answer them "
+		"yourself (FR-173).",
+		fg="bright_black",
+	)
+
+
+def _print_transcript(transcript: Transcript) -> None:
+	typer.secho(f"\ntranscript {transcript.id} @ {transcript.transcriber}", fg="green", bold=True)
+	typer.secho(
+		f"  audio {transcript.audio_bytes} byte(s), sha256 {transcript.audio_sha256[:16]}…",
+		fg="bright_black",
+	)
+	if not transcript.is_usable:
+		typer.secho(
+			f"  no text: exit {transcript.exit_code}"
+			+ (f", {transcript.stderr_tail}" if transcript.stderr_tail else ""),
+			fg="red",
+		)
+		return
+	typer.echo("")
+	typer.echo(transcript.text)
+
+
+@app.command(name="attest")
+def attest(
+	ctx: typer.Context,
+	answer_ids: list[str] | None = typer.Argument(
+		None, help="Answer ids to attest. Omit with --all to attest every open proposal."
+	),
+	home: Path | None = _HOME_OPTION,
+	by: str = typer.Option(..., "--by", help="Who read the proposal. Required (FR-173)."),
+	all_open: bool = typer.Option(
+		False, "--all", help="Attest every model-proposed answer for the current goal."
+	),
+) -> None:
+	"""Record that a person read a model-proposed answer (FR-173).
+
+	Attestation records that a human read an answer, not that it is correct — the
+	distinction the elicitation floor already draws about itself. What it buys is that a
+	model's paragraph can no longer clear P0 on the operator's behalf: the dimension stays
+	open until this row exists, and the ledger shows exactly which answers nobody read.
+	"""
+	asyncio.run(_attest(_service(_home_of(ctx, home)), answer_ids, by, all_open))
+
+
+async def _attest(
+	svc: FactoryService,
+	answer_ids: list[str] | None,
+	by: str,
+	all_open: bool,
+) -> None:
+	state = await svc.state()
+	goal = state.latest_goal()
+	if goal is None:
+		typer.secho("no goal yet; `sofact start` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	targets = list(answer_ids or [])
+	if all_open:
+		open_proposals = await svc.unanswered_proposals(goal.id)
+		if not open_proposals:
+			typer.secho("no unattested model proposals for this goal.", fg="bright_black")
+			return
+		targets.extend(a.id for a in open_proposals)
+	if not targets:
+		typer.secho(
+			"nothing to attest: pass an answer id, or --all to attest every open "
+			"proposal (FR-173).",
+			fg="yellow",
+		)
+		raise typer.Exit(code=1)
+	for answer_id in targets:
+		try:
+			attestation = await svc.attest(answer_id, by=by)
+		except (KeyError, ValueError) as exc:
+			typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+			raise typer.Exit(code=1) from exc
+		typer.secho(f"attested {attestation.answer_id} by {attestation.attested_by}", fg="green")
+	readiness = await svc.readiness(goal.id)
+	done, total = readiness.progress
+	typer.secho(f"\nelicitation {done}/{total} dimension(s) resolved (FR-173)", fg="bright_black")
+	for status in readiness.statuses:
+		if not status.resolved:
+			typer.secho(f"  open: {status.dimension.value}", fg="yellow")
+			for reason in status.reasons:
+				typer.secho(f"    {reason}", fg="bright_black")
+
+
+@app.command(name="competitors")
+def competitors(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	from_run: str | None = typer.Option(
+		None, "--from-run", help="Read the scan out of this research run's workspace."
+	),
+	subject: str | None = typer.Option(
+		None, "--subject", help="Defaults to the run's query, then the goal's statement."
+	),
+) -> None:
+	"""Record the competitive baseline a research run produced (FR-169).
+
+	SoFact does not name the best systems in the world and cannot: it authors the criterion
+	and the subject, and the producer identifies the systems under them. A rival with no
+	source is a name rather than a baseline, and a scan whose subject is not the one SoFact
+	asked for is refused — otherwise a producer could answer a different question and every
+	downstream reader would take it as an answer to this one.
+	"""
+	asyncio.run(_competitors(_service(_home_of(ctx, home)), from_run, subject))
+
+
+async def _competitors(svc: FactoryService, from_run: str | None, subject: str | None) -> None:
+	record = None
+	if from_run is not None:
+		runs = [r for r in (await svc.state()).research if r.id == from_run]
+		if not runs:
+			typer.secho(f"no research run {from_run} in this log.", fg="yellow")
+			raise typer.Exit(code=1)
+		record = runs[0]
+	try:
+		landscape = await svc.competitors(record=record, query=subject)
+	except (KeyError, ValueError) as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	_print_landscape(landscape)
+
+
+def _print_landscape(landscape: CompetitiveLandscape) -> None:
+	typer.secho(f"\ncompetitive scan v{landscape.version} ({landscape.id})", fg="green", bold=True)
+	typer.secho(f"  subject: {landscape.subject}", fg="bright_black")
+	if landscape.found_nothing:
+		typer.secho(
+			"  no rival was returned: that is a measurement about the domain, not a "
+			"failure of the run (NFR-024).",
+			fg="yellow",
+		)
+		return
+	typer.secho(
+		f"  {len(landscape.sourced_systems)} of {len(landscape.systems)} system(s) cite a "
+		f"source; {len(landscape.unexamined_systems)} have no capability recorded (FR-169)",
+		fg="bright_black",
+	)
+	for system in landscape.systems:
+		typer.echo(f"  - {system.name} ({system.url})")
+		for capability in landscape.capabilities:
+			if capability.system_id == system.id:
+				typer.echo(f"      {capability.kind.value}: {capability.statement}")
+	typer.secho(
+		"  the producer chose these systems under the criterion SoFact wrote. SoFact "
+		"records that and does not claim the set is the best in the world (FR-169).",
+		fg="bright_black",
+	)
+
+
+@app.command(name="exceed")
+def exceed(
+	ctx: typer.Context,
+	capability: str = typer.Option(..., "--capability", help="What we will exceed."),
+	baseline: str = typer.Option(..., "--baseline", help="The rival's capability exceeded."),
+	source_ids: list[str] | None = typer.Option(
+		None, "--source-id", help="Evidence for the baseline. At least one is required (FR-170)."
+	),
+	clause_ids: list[str] | None = typer.Option(
+		None, "--clause-id", help="The intent clause this traces to. At least one (FR-076)."
+	),
+	rationale: str = typer.Option(..., "--rationale", help="Why this is achievable."),
+	home: Path | None = _HOME_OPTION,
+	by: str = typer.Option("operator", "--by", help="Who declares it."),
+) -> None:
+	"""Declare a capability meant to exceed a cited rival's (FR-170).
+
+	**This is never a verified fact.** No oracle in O1–O7 compares two systems, so the
+	claim is recorded as declared, its margin is unmeasured by type, and the delivery
+	report prints "N declared, 0 verified by oracle". A claim to exceed something nobody
+	can look up is a wish, and one tracing to no clause is a claim nothing the operator
+	asked for requires — both are refused here rather than recorded.
+	"""
+	asyncio.run(
+		_exceed(
+			_service(_home_of(ctx, home)),
+			capability,
+			baseline,
+			source_ids or [],
+			clause_ids or [],
+			rationale,
+			by,
+		)
+	)
+
+
+async def _exceed(
+	svc: FactoryService,
+	capability: str,
+	baseline: str,
+	source_ids: list[str],
+	clause_ids: list[str],
+	rationale: str,
+	by: str,
+) -> None:
+	if not source_ids:
+		typer.secho(
+			"--source-id is required at least once: a capability declared to exceed "
+			"something with no evidence behind it cannot be checked by a reader or an "
+			"oracle (FR-170).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	if not clause_ids:
+		typer.secho(
+			"--clause-id is required at least once: an exceedance tracing to no intent "
+			"clause is a capability nothing the operator asked for requires (FR-076).",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	try:
+		claim = await svc.declare_exceedance(
+			capability=capability,
+			baseline=baseline,
+			baseline_source_ids=source_ids,
+			rationale=rationale,
+			clause_ids=clause_ids,
+			by=by,
+		)
+	except (KeyError, ValueError, ValidationError) as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	typer.secho(f"\ndeclared exceedance {claim.id}", fg="green", bold=True)
+	typer.echo(f"  {claim.capability} exceeds {claim.baseline}")
+	typer.secho(
+		"  declared, not measured: no oracle compares two systems, so the delivery report "
+		"prints this as declared and never as verified (FR-170, NFR-024).",
+		fg="yellow",
+	)
+
+
+@app.command(name="spec-doc")
+def spec_doc(
+	ctx: typer.Context,
+	contract_id: str | None = typer.Argument(None, help="Defaults to the goal's latest contract."),
+	home: Path | None = _HOME_OPTION,
+	root: Path | None = typer.Option(
+		None, "--root", help=f"Also write {PRODUCT_SPEC_FILENAME} under this directory."
+	),
+	approve: bool = typer.Option(
+		False, "--approve", help="Record that you approved the rendered document (FR-171)."
+	),
+	by: str = typer.Option("operator", "--by", help="Who approved it, with --approve."),
+) -> None:
+	"""Render the annotated product specification (FR-171).
+
+	Every requirement carries its provenance: the answer it descends from and whether a
+	person ever read it, what research concluded about the clauses it traces to, the oracle
+	that will check it, and any exceedance declared against it. Two of those are derived
+	from the ledger rather than passed in — so the document cannot be rendered clean over a
+	specification whose answers nobody read, and it cannot read as stronger than the
+	contract it renders.
+	"""
+	asyncio.run(_spec_doc(_service(_home_of(ctx, home)), contract_id, root, approve, by))
+
+
+async def _spec_doc(
+	svc: FactoryService,
+	contract_id: str | None,
+	root: Path | None,
+	approve: bool,
+	by: str,
+) -> None:
+	if contract_id is None:
+		goal = await svc.current_goal()
+		if goal is None:
+			typer.secho("no goal yet; `sofact start` first.", fg="yellow")
+			raise typer.Exit(code=1)
+		contract = await svc.latest_contract(goal.id)
+		if contract is None:
+			typer.secho("no contract yet; `sofact contract` first.", fg="yellow")
+			raise typer.Exit(code=1)
+		contract_id = contract.id
+	try:
+		document = await svc.write_specification(contract_id, root=root)
+	except (KeyError, ValueError) as exc:
+		typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	_print_spec_document(document)
+	if root is not None:
+		typer.secho(f"\nwrote {root / PRODUCT_SPEC_FILENAME}", fg="green")
+	if approve:
+		approved = await svc.approve_specification_document(document.id, by=by)
+		typer.secho(f"approved by {approved.approved_by}", fg="green")
+		if approved.unattested:
+			typer.secho(
+				f"  {len(approved.unattested)} requirement(s) descend from a model proposal "
+				"nobody attested: approving a page is not reading it, and the document stays "
+				"unattested until they are (FR-173).",
+				fg="yellow",
+			)
+
+
+def _print_spec_document(document: ProductSpecificationDocument) -> None:
+	typer.secho(f"\nproduct specification {document.id}", fg="green", bold=True)
+	typer.secho(
+		f"  {len(document.requirements)} requirement(s), "
+		f"{len(document.exceeds)} declared exceedance(s) (FR-171)",
+		fg="bright_black",
+	)
+	for annotation in document.requirements:
+		typer.echo(f"  - {annotation.requirement.statement}")
+		for provenance in annotation.elicitation:
+			mark = "UNATTESTED" if provenance.unattested else "operator-read"
+			typer.secho(
+				f"      from {provenance.dimension.value} by {provenance.answered_by} [{mark}]",
+				fg="yellow" if provenance.unattested else "bright_black",
+			)
+		if annotation.oracle_rank is None:
+			typer.secho("      no oracle: unverified", fg="yellow")
+		else:
+			typer.secho(
+				f"      oracle rank {annotation.oracle_rank} "
+				f"({annotation.oracle_class.value if annotation.oracle_class else '?'})",
+				fg="bright_black",
+			)
+	if document.unattested:
+		typer.secho(
+			f"  {len(document.unattested)} requirement(s) descend from a model proposal "
+			"nobody read; the document says so rather than rendering clean (FR-173).",
+			fg="yellow",
+		)
+
+
+@app.command(name="notify")
+def notify(
+	ctx: typer.Context,
+	subject: str = typer.Option(..., "--subject", help="The message's subject line."),
+	body: str = typer.Option(..., "--body", help="The message's body."),
+	home: Path | None = _HOME_OPTION,
+	notifier: str | None = typer.Option(
+		None, "--notifier", help="A named entry in SOFACT_NOTIFIER_SPECS (FR-172)."
+	),
+) -> None:
+	"""Attempt to tell the operator something, and record the attempt (FR-172).
+
+	The row is appended whether or not a process launched, and ``delivered`` is derived
+	from the exit code rather than declared — because "we told them" and "we meant to tell
+	them" must not print the same line. The body is digested rather than stored: a
+	notification names the system being built, and the ledger is durable.
+	"""
+	asyncio.run(_notify(_service(_home_of(ctx, home)), subject, body, notifier))
+
+
+async def _notify(svc: FactoryService, subject: str, body: str, notifier: str | None) -> None:
+	record = await svc.notify(subject, body, notifier=notifier)
+	_print_notification(record)
+	if not record.delivered:
+		# The service is right to *record* an attempt that launched no process — that is
+		# the fact the operator needs, and a run unable to say it could not tell anyone is
+		# worse off. The *verb* is a different question: its exit code is what a script
+		# branches on, and exiting 0 over "NOT delivered" makes "we told them" and "we
+		# meant to tell them" indistinguishable to the only reader that cannot see the
+		# prose. Every other verb here exits non-zero on the state it could not reach
+		# (FR-172).
+		raise typer.Exit(code=1)
+
+
+def _print_notification(record: Notification) -> None:
+	typer.secho(f"\nnotification {record.id} @ {record.notifier}", fg="green", bold=True)
+	typer.secho(f"  subject: {record.subject}", fg="bright_black")
+	typer.secho(
+		f"  body {record.body_chars} char(s), sha256 {record.body_sha256[:16]}… "
+		"(digested, not stored)",
+		fg="bright_black",
+	)
+	if record.delivered:
+		typer.secho(f"  delivered (exit {record.exit_code})", fg="green")
+	else:
+		# ``exit_code is None`` and a non-zero exit are different failures with different
+		# fixes — nothing launched versus launched-and-refused — and "no process ran" over
+		# an exit of 7 sends the operator to check a path that was never the problem.
+		why = record.error or (
+			"no process ran"
+			if record.exit_code is None
+			else f"the notifier exited {record.exit_code} and wrote nothing to stderr"
+		)
+		typer.secho(f"  NOT delivered (exit {record.exit_code}): {why}", fg="red")
+
+
+@app.command(name="build")
+def build(
+	ctx: typer.Context,
+	home: Path | None = _HOME_OPTION,
+	audio: Path | None = typer.Option(
+		None, "--audio", help="Transcribe this file and open the goal from it (FR-168)."
+	),
+	statement: str | None = typer.Option(
+		None, "--statement", help="Open the goal from this text instead."
+	),
+	resume: bool = typer.Option(
+		False, "--resume", help="Continue the current goal. The same code path as a cold start."
+	),
+	root: Path | None = typer.Option(
+		None, "--root", help="Where the delivery artefacts are written."
+	),
+	no_notify: bool = typer.Option(
+		False, "--no-notify", help="Do not send a notification when the run stops."
+	),
+	harness: str | None = typer.Option(
+		None, "--harness", help="Which configured harness to dispatch the build to."
+	),
+	research_harness: str | None = typer.Option(
+		None, "--research-harness", help="Which configured harness P1's research runs on."
+	),
+	timeout: float = typer.Option(900.0, "--timeout", help="Wall clock per dispatched step."),
+) -> None:
+	"""Drive the pipeline as far as the gates allow, and stop there (FR-172).
+
+	This is a loop over the ledger rather than a held process, so `--resume` is the same
+	code path as a cold start and a run killed mid-way continues correctly. **It stops at
+	every gate and has no code path that advances one**: FR-061 makes a gate a hard stop,
+	and a single pre-authorization covering a specification, a decomposition and a contract
+	sample that do not exist yet is exactly what the gate design prevents. Four gates, four
+	stops, and each one names the command that continues it.
+
+	``--harness`` and ``--research-harness`` are needed only when the configured table is
+	ambiguous, which is the ordinary case for a deployment with more than one producer:
+	the two defaults are named constants, and a table that does not contain them is
+	refused rather than guessed at. The two are separate because P1 and P5 dispatch to
+	different specs — one carries the research extension's tool allowlist, the other the
+	composition the build steps need — so a single option could not name both.
+	"""
+	asyncio.run(
+		_build(
+			_service(_home_of(ctx, home)),
+			audio,
+			statement,
+			resume,
+			root,
+			not no_notify,
+			timeout,
+			harness,
+			research_harness,
+		)
+	)
+
+
+async def _build(
+	svc: FactoryService,
+	audio: Path | None,
+	statement: str | None,
+	resume: bool,
+	root: Path | None,
+	notify_when_done: bool,
+	timeout: float,
+	harness: str | None,
+	research_harness: str | None,
+) -> None:
+	if audio is not None:
+		try:
+			transcript = await svc.speak(audio)
+		except (TranscriberRefusal, OSError, ValueError) as exc:
+			typer.secho(str(exc.args[0] if exc.args else exc), fg="red")
+			raise typer.Exit(code=1) from exc
+		if not transcript.is_usable:
+			typer.secho("the transcriber produced no text, so no goal was opened.", fg="red")
+			raise typer.Exit(code=1)
+		goal = await svc.start(transcript.text)
+		typer.secho(f"goal {goal.id} opened from {audio}", fg="green")
+	elif statement is not None:
+		goal = await svc.start(statement)
+		typer.secho(f"goal {goal.id} opened", fg="green")
+	elif not resume:
+		state = await svc.state()
+		if state.latest_goal() is None:
+			typer.secho(
+				"no goal: pass --audio, --statement, or --resume for the current goal (FR-172).",
+				fg="yellow",
+			)
+			raise typer.Exit(code=1)
+	try:
+		run = await run_goal(
+			svc,
+			root=root,
+			notify=notify_when_done,
+			timeout=timeout,
+			harness=harness,
+			research_harness=research_harness,
+		)
+	except DriverRefusal as exc:
+		typer.secho(str(exc), fg="red")
+		raise typer.Exit(code=1) from exc
+	_print_run(run)
+
+
+def _print_run(run: DriverRun) -> None:
+	typer.secho(f"\ndriver run {run.id}", fg="green", bold=True)
+	for step in run.steps:
+		mark = {
+			DriverOutcome.ADVANCED: "done",
+			DriverOutcome.HALTED: "halted",
+			DriverOutcome.REFUSED: "REFUSED",
+			DriverOutcome.SKIPPED: "skipped",
+		}[step.outcome]
+		style = {
+			DriverOutcome.ADVANCED: "green",
+			DriverOutcome.HALTED: "yellow",
+			DriverOutcome.REFUSED: "red",
+			DriverOutcome.SKIPPED: "bright_black",
+		}[step.outcome]
+		typer.secho(f"  [{mark}] {step.action} ({step.phase.value})", fg=style)
+		typer.secho(f"    {step.detail}", fg="bright_black")
+	typer.secho(f"\nterminal: {run.terminal.value}", fg="green" if run.claims_built else "yellow")
+	typer.echo(f"  {run.terminal_detail}")
+	if run.claims_built:
+		typer.secho("  built and verified.", fg="green", bold=True)
+	else:
+		typer.secho(
+			"  NOT built: this run stopped, and only a DELIVERED run may say otherwise (FR-172).",
+			fg="yellow",
+		)
+	next_verb = run.next_human_verb
+	if next_verb is not None:
+		typer.secho(f"  next: {next_verb}", fg="bright_black")
+	if run.notification_id is not None:
+		typer.secho(f"  notified: {run.notification_id}", fg="bright_black")
 
 
 if __name__ == "__main__":  # pragma: no cover

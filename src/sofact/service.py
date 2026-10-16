@@ -11,6 +11,7 @@ directory: unset, SoFact writes to ``./.sofact``, and ``SOFACT_HOME`` overrides 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -29,17 +30,22 @@ from sofact.authorship import (
 from sofact.boundary import TEMP_DIRNAME
 from sofact.boundary_probe import detect_boundary
 from sofact.changecost import measure_change_costs
+from sofact.competitive import LEDGER_COMPETITORS_FILENAME
+from sofact.competitive import competitor_checks
+from sofact.competitive import parse_competitors
 from sofact.composition import composition_for
 from sofact.contract import ground_truth_debt, suggest_oracle
 from sofact.decomposition import approve, gate, propose
 from sofact.delivery import DELIVERY_ARTIFACT_PATHS
 from sofact.delivery import report as delivery_report
 from sofact.elicitation import (
+	DIMENSIONS,
 	DimensionSpec,
 	advise_prompt,
 	assess,
 	draft_stems,
 	next_open,
+	propose_prompt,
 	spec_for,
 )
 from sofact.envelope import measure
@@ -80,6 +86,11 @@ from sofact.manufacture import (
 	place_artefacts,
 )
 from sofact.mutation import measure_strength
+from sofact.notify import NOTIFIERS
+from sofact.notify import ConfiguredNotifierAdapter
+from sofact.notify import NotificationSpec
+from sofact.notify import NotificationRefusal
+from sofact.notify import notifier_spec_for
 from sofact.planner import (
 	DEFAULT_REPAIR_ATTEMPTS,
 	check_integrity,
@@ -96,11 +107,26 @@ from sofact.research import (
 	parse_classification,
 	parse_ledger,
 )
+from sofact.search import ConfiguredSearchAdapter as SearchAdapter
+from sofact.search import (
+	SearcherSpec,
+	SearchRefusal,
+	authored_queries,
+	scan_checks,
+	searcher_spec_for,
+)
 from sofact.specification import approve as record_specification_approval
 from sofact.specification import gate as gate_specification
 from sofact.specification import specify as propose_specification
+from sofact.specdoc import PRODUCT_SPEC_FILENAME
+from sofact.specdoc import annotate as annotate_requirements
+from sofact.specdoc import render_product_specification
 from sofact.state import fold
 from sofact.telemetry import measure_attempts
+from sofact.transcribe import ConfiguredTranscriberAdapter
+from sofact.transcribe import TRANSCRIBERS
+from sofact.transcribe import TranscriberSpec
+from sofact.transcribe import transcriber_spec_for
 from sofact.verification import verdict_cache_key, verify
 from sofact.views import (
 	COVERING_ORACLE_MAX_RANK,
@@ -120,6 +146,8 @@ from sofact.views import (
 	ChangeUnit,
 	Clause,
 	ClauseVerdict,
+	ClauseVerdictProvenance,
+	CompetitiveLandscape,
 	CompletionClaim,
 	Contract,
 	Cut,
@@ -135,7 +163,9 @@ from sofact.views import (
 	DeployRecord,
 	DiffReview,
 	DispatchRecord,
+	DriverRun,
 	ElicitationAnswer,
+	ElicitationAttestation,
 	ElicitationDimension,
 	EscapeAttribution,
 	EscapeBudget,
@@ -144,6 +174,7 @@ from sofact.views import (
 	EscapeOverride,
 	EscapeReport,
 	Evidence,
+	ExceedsClaim,
 	GateCheck,
 	GateCost,
 	Goal,
@@ -156,8 +187,11 @@ from sofact.views import (
 	IntegrityCheck,
 	IntentGraph,
 	LedgerKind,
+	is_uuid7,
+	MODEL_ANSWER_PREFIX,
 	ModuleClass,
 	NonGoal,
+	Notification,
 	OracleAuditReport,
 	OracleDeclaration,
 	Phase,
@@ -165,6 +199,7 @@ from sofact.views import (
 	PhaseGate,
 	PhaseStatus,
 	PluginComposition,
+	ProductSpecificationDocument,
 	ProjectState,
 	Readiness,
 	RepairAttempt,
@@ -174,6 +209,7 @@ from sofact.views import (
 	ResearchClassification,
 	ResearchMode,
 	ResearchRecord,
+	SearchScan,
 	SourceLedger,
 	Specification,
 	SpecificationDraft,
@@ -182,6 +218,7 @@ from sofact.views import (
 	StepOutcome,
 	SystemCriterion,
 	SystemModel,
+	Transcript,
 	ValueHypothesis,
 	VerdictOutcome,
 	VerificationReport,
@@ -203,6 +240,23 @@ DEFAULT_HOME_DIRNAME = ".sofact"
 
 DEFAULT_HARNESS = "pi"
 DEFAULT_RESEARCH_HARNESS = "pi-research"
+
+TRANSCRIPT_DIRNAME = "transcripts"
+"""Where a transcriber's output file is looked for, under the SoFact home (FR-168).
+
+Beside the ledger rather than in the workspace: a transcript is a record *about* the
+goal, and the workspace is the thing being built. Putting it in the tree would also make
+it a candidate for ``git add`` in a dispatch, which is the one place a machine's
+rendering of someone's speech must not end up silently.
+"""
+
+NOTIFICATION_DIRNAME = "notifications"
+"""Where a notifier's body file is written before the tool is launched (FR-172).
+
+The body is written to a file and the argv names the file, rather than being passed as an
+argument, for ``HarnessSpec``'s reason: a shell-quoted body is a body whose quoting the
+factory got wrong, and a system name with an apostrophe in it is not exotic.
+"""
 
 RESEARCH_TIMEOUT_SECONDS: Final = 900.0
 """Wall clock for one research dispatch **when the scaled allowance is overridden**.
@@ -337,6 +391,19 @@ def research_goal(
 		"every verdict except unverifiable, where it must be empty and settled_by must "
 		"name the observation that would settle the clause. Classify every clause: a "
 		"clause left out is one the research never reached.\n\n"
+		f"Then write {LEDGER_COMPETITORS_FILENAME} in the working directory: an object "
+		"with 'subject' (echo the Subject above, verbatim — it is the subject SoFact "
+		"authored and a scan that renamed it is a scan of a different question), "
+		"'domain', 'selection_criterion' (the criterion you used to decide which systems "
+		"belong, stated so a reader can disagree with it), 'systems' (a list of {id, "
+		"name, vendor, url, source_ids, posture}) and 'capabilities' (a list of {id, "
+		"system_id, statement, kind, source_ids}, where kind is exactly one of feature, "
+		"capability or functionality). Every system and every capability must cite the "
+		"source ids it rests on: a system nobody can look up is a name rather than a "
+		"baseline, and an uncited capability is one no exceedance can be declared "
+		"against. A domain with no comparable system is a finding — record an empty "
+		"'systems' list and say so in 'selection_criterion' rather than inventing "
+		"rivals to fill it.\n\n"
 		"Then reply DONE."
 	)
 
@@ -438,6 +505,9 @@ class FactoryService:
 		compositions: Mapping[str, PluginComposition] | None = None,
 		boundary: Sequence[BoundaryMechanism] | None = None,
 		manufacture: ManufactureSpec | None = None,
+		searcher: SearcherSpec | None = None,
+		transcriber: TranscriberSpec | None = None,
+		notifier: NotificationSpec | None = None,
 	) -> None:
 		"""``specs`` is the harness table this instance may dispatch to.
 
@@ -488,6 +558,12 @@ class FactoryService:
 		sequence measures nothing and reports §5.4's degraded configuration, which is how a
 		deployment opts out of probing without claiming anything it did not check.
 
+		``searcher`` is the web search provider this deployment may ask (FR-174).
+		``None`` means *this deployment searches nothing* rather than "search with the
+		default engine", for the same reason the other seven make the distinction: a scan
+		silently performed against an engine nobody chose would put results into a
+		research ledger with no record of whose index they came from.
+
 		``manufacture`` is the language this factory builds oracles in (FR-103, FR-156).
 		``None`` means *this deployment manufactures nothing* rather than "manufacture in
 		the default language", and the distinction is the same one the other six make:
@@ -497,6 +573,19 @@ class FactoryService:
 		language name because the interpreter is part of it — ``python3`` and
 		``python3.12`` are one language on two hosts — and a name would leave the
 		deployment unable to say which one it has.
+
+		``transcriber`` is the speech-to-text tool this deployment may launch (FR-168),
+		and ``None`` means *this deployment transcribes nothing* rather than "transcribe
+		with the default engine". Same distinction again, and here it is the difference
+		between a transcript whose producer is recorded and one whose producer is
+		whatever happened to be installed — the second is a statement about the machine
+		rather than about the goal.
+
+		``notifier`` is where a run's terminal state may be sent (FR-172), and ``None``
+		means *this deployment notifies nobody*. That is not a degraded mode to be
+		worked around: a factory that silently used some ambient channel would send a
+		client's system name somewhere nobody chose, so the absence is reported in words
+		by :meth:`notify` and by the driver rather than filled in.
 		"""
 		self.home = resolve_home(home)
 		self.ledger = Ledger(self.home / LEDGER_FILENAME)
@@ -513,6 +602,9 @@ class FactoryService:
 		)
 		self._boundary: DeploymentBoundary | None = None
 		self._manufacture_spec = manufacture
+		self._searcher_spec = searcher
+		self._transcriber_spec = transcriber
+		self._notifier_spec = notifier
 		self._state: ProjectState | None = None
 
 	def envelope(self) -> DeliveryEnvelope | None:
@@ -768,6 +860,23 @@ class FactoryService:
 		— and it refuses a failed check for the same reason
 		:class:`~sofact.views.DecompositionGate` does: approval cannot make an unsound
 		artefact sound.
+
+		**The checks it decides on are recomputed from the artefact as it is**, not read
+		back from the presented row, and that is the same rule
+		:meth:`approve_specification` and :meth:`approve_decomposition` already state one
+		level down. The presented row is a *record of what was shown*; the artefact can
+		have been revised since — which is the ordinary course of a gate the machine half
+		failed, because the operator's fix is to supply what was missing and propose
+		again. Deciding on the frozen row made that repair unapprovable: the operator
+		could supply the missing halves, watch every check pass, and still be told the gate
+		had failed, with no path forward but a hand-edited ledger. A gate that cannot be
+		passed after the defect is fixed is not a hard stop, it is a dead end, and the
+		operator's only exit is the one thing a gate may not require.
+
+		When there is no artefact to recompute from — the ``gate --present`` path, which
+		presents a phase with no checks because the phase's own command is where checks
+		are computed — the presented row is the only statement of the machine half there
+		is, and it is used.
 		"""
 		assert by.strip(), "a gate approval names who approved it"
 		state = await self.state()
@@ -782,7 +891,9 @@ class FactoryService:
 				f"{phase.value} is not awaiting {gate.value}; there is nothing to approve "
 				"until the phase has presented its machine checks (FR-080)"
 			)
-		failed = tuple(c for c in pending.checks if not c.passed)
+		current = await self.current_gate_checks(phase)
+		checks = current if current is not None else pending.checks
+		failed = tuple(c for c in checks if not c.passed)
 		if failed:
 			names = ", ".join(c.name for c in failed)
 			raise ValueError(
@@ -795,10 +906,125 @@ class FactoryService:
 				"approved_by": by,
 				"approved_at": now(),
 				"by": by,
+				"checks": checks,
 			}
 		)
 		self._commit(LedgerKind.PHASE_ADVANCED, {"advance": approved.model_dump(mode="json")})
+		await self._approve_artefact(phase, by=by)
 		return approved
+
+	async def current_gate_checks(self, phase: Phase) -> tuple[GateCheck, ...] | None:
+		"""The machine half of ``phase``'s gate, recomputed from the current artefact.
+
+		``None`` when the phase has no artefact to recompute from, which is a different
+		answer from an empty tuple: empty means the artefact exists and the machine found
+		nothing to check, and ``None`` means there is nothing to check it against. The
+		caller falls back to the presented row in the second case and must not in the
+		first — an empty recomputation over a real artefact is the machine's verdict.
+
+		Each arm reads the artefact the phase's own proposal path produced and calls the
+		same gate function that path called, so the number the operator approves against
+		is the number the producer computed rather than a second opinion about it.
+
+		**Public because the driver reads it too**, and for the same reason
+		:meth:`record_driver_run` is public: the presented row is a record of what was
+		*shown*, and a driver that reported the stop off that row told an operator whose
+		repair had made every check pass to go and re-produce the artefact anyway. A gate
+		whose machine half now passes is approved with ``gate approve``, and the run that
+		says otherwise sends them to the one verb that cannot help.
+		"""
+		state = await self.state()
+		goal = state.latest_goal()
+		if goal is None:
+			return None
+		contract = state.latest_contract(goal.id)
+		if contract is None:
+			return None
+		if phase is Phase.SPECIFY:
+			latest = state.latest_specification(contract.id)
+			if latest is None:
+				return None
+			return gate_specification(latest, contract).checks
+		if phase is Phase.DECOMPOSE:
+			decomposition = state.latest_decomposition(contract.id)
+			if decomposition is None:
+				return None
+			specification = state.latest_specification(contract.id)
+			if specification is None:
+				return None
+			return self._gate_decomposition(decomposition, contract, specification).checks
+		if phase is Phase.CONTRACT:
+			return await self.audit_gate_checks(contract.id)
+		if phase is Phase.DELIVER:
+			delivered = state.delivery
+			if delivered is None:
+				return None
+			return delivered.checks
+		return None
+
+	async def audit_gate_checks(self, contract_id: str) -> tuple[GateCheck, ...] | None:
+		"""FR-107's oracle audit as the one check P4's sampled gate presents (FR-061, FR-103).
+
+		One check rather than a check per clause, because the gate is *sampled* (§3.3):
+		what it asks the operator to look at is whether the oracles measure the right
+		thing, and an oracle satisfied by nothing is the machine-visible half of that
+		question. ``None`` when no audit has run, so a caller can tell "not audited" from
+		"audited and clean".
+
+		It lives here rather than in the driver because there are now two callers — the
+		driver, which presents the gate, and :meth:`approve_gate`, which recomputes it —
+		and a second copy of this sentence would be the second place for it to drift.
+		"""
+		state = await self.state()
+		contract = state.contract(contract_id)
+		audit = state.latest_oracle_audit(contract_id)
+		if contract is None or audit is None:
+			return None
+		return (
+			GateCheck(
+				name="oracles_are_not_satisfied_by_nothing",
+				passed=audit.passed,
+				detail=(
+					f"{len(audit.probed)} of {len(contract.clauses)} oracle(s) run against an "
+					f"empty workspace, {len(audit.findings)} satisfied by nothing"
+					+ (f"; {len(audit.skipped)} not reached" if audit.skipped else "")
+				),
+			),
+		)
+
+	async def _approve_artefact(self, phase: Phase, *, by: str) -> None:
+		"""Record the gate's artefact-level approval, when there is an artefact (FR-061).
+
+		**One gate, one human act.** The phase machine and the artefact each carry their
+		own approval row, because they answer different questions: the phase says machine
+		work may proceed, and the artefact's own gate says *this* specification — the one
+		the approver was shown — expresses the intent. Those are two rows and they are not
+		two decisions, so a caller who has to pass the gate twice has been given a gate
+		that is hard to get wrong only if they read the source.
+
+		The artefact approval is recorded only when an artefact exists, and the condition
+		is not a convenience: :meth:`~sofact.views.PhaseAdvance` lets a phase be presented
+		with no checks, which is how a project with no specification yet moves the machine,
+		and requiring an artefact here would make that path raise a ``KeyError`` naming
+		the wrong problem. The absence is already reported where it matters — the artefact
+		gates refuse, by name, one phase later.
+
+		P4 has no artefact-level approval to record: §3.3 makes that gate *sampled*, and
+		what it presents is the oracle audit rather than an approvable document.
+		"""
+		state = await self.state()
+		if phase is Phase.SPECIFY:
+			latest = state.specifications[-1] if state.specifications else None
+			if latest is not None:
+				await self.approve_specification(latest.id, by=by)
+		elif phase is Phase.DECOMPOSE:
+			latest_decomposition = state.decompositions[-1] if state.decompositions else None
+			if latest_decomposition is not None:
+				await self.approve_decomposition(latest_decomposition.id, by=by)
+		elif phase is Phase.DELIVER:
+			latest_delivery = state.deliveries[-1] if state.deliveries else None
+			if latest_delivery is not None:
+				await self.approve_deploy(latest_delivery.id, by=by)
 
 	async def record_gate_cost(
 		self,
@@ -968,9 +1194,15 @@ class FactoryService:
 		return answer
 
 	async def readiness(self, goal_id: str) -> Readiness:
-		"""The gate's verdict on ``goal_id``."""
+		"""The gate's verdict on ``goal_id``.
+
+		The attested set is read from the folded state rather than taken from the caller,
+		and that is the whole of FR-173's enforcement: an attestation is a ledger event,
+		so a caller who wants a model's proposal to count has to record one, and there is
+		no argument that would let them say so without it.
+		"""
 		state = await self.state()
-		return assess(goal_id, state.answers_for(goal_id))
+		return assess(goal_id, state.answers_for(goal_id), attested=state.attested_answer_ids())
 
 	async def open_question(
 		self,
@@ -1004,6 +1236,211 @@ class FactoryService:
 		self._commit(LedgerKind.ADVISOR_NOTE, {"dimension": dimension.value, "text": text})
 		return Advice(dimension=dimension, text=text)
 
+	# ------------------------------------------------ FR-168: voice to a statement
+
+	async def speak(
+		self,
+		audio: Path,
+		*,
+		by: str = "operator",
+		transcriber: str | None = None,
+		timeout: float = 900.0,
+		goal_id: str | None = None,
+	) -> Transcript:
+		"""Transcribe ``audio`` with the configured tool and record the transcript (FR-168).
+
+		The transcript is a record *about* a statement, not a replacement for one: the
+		caller still calls :meth:`start` with the text, so the goal's statement is the
+		operator's words and the transcript is the evidence of where they came from. A
+		transcript that created a goal would put a machine's rendering of speech in the
+		position the whole interrogation exists to treat as suspect.
+
+		``goal_id`` is optional because transcription normally happens *before* there is
+		a goal. A caller who has one passes it so the transcript is attributable to it.
+
+		The audio is digested before the tool runs, so a transcript whose digest is not
+		the audio you passed is not a transcript of it — and the digest is taken here
+		rather than read from the tool's own report, because a tool that hashed its input
+		would be vouching for itself.
+		"""
+		if goal_id is not None:
+			await self.goal(goal_id)
+		spec = self._transcriber(transcriber)
+		workdir = self.home / TRANSCRIPT_DIRNAME
+		workdir.mkdir(parents=True, exist_ok=True)
+		adapter = ConfiguredTranscriberAdapter(spec)
+		transcript = await adapter.transcribe(
+			audio, workdir=workdir, timeout=timeout, goal_id=goal_id
+		)
+		self._commit(
+			LedgerKind.TRANSCRIPT_RECORDED,
+			{"transcript": transcript.model_dump(mode="json"), "by": by},
+		)
+		return transcript
+
+	async def transcripts(self, goal_id: str | None = None) -> tuple[Transcript, ...]:
+		"""Every transcription attempt, oldest first (FR-168).
+
+		All of them, including the failures — the attempt that produced nothing is what
+		explains why the goal statement is what it is.
+		"""
+		state = await self.state()
+		if goal_id is None:
+			return state.transcripts
+		return tuple(t for t in state.transcripts if t.goal_id == goal_id)
+
+	async def current_transcript(self, goal_id: str) -> Transcript | None:
+		"""The most recent *usable* transcript for one goal (FR-168)."""
+		return (await self.state()).transcript_for(goal_id)
+
+	def _transcribers(self) -> Mapping[str, TranscriberSpec]:
+		"""The transcriber table this deployment may launch (FR-168)."""
+		return TRANSCRIBERS
+
+	def _default_transcriber(self) -> TranscriberSpec:
+		"""The transcriber to use when the caller names none (FR-168).
+
+		There is no built-in fallback, and the refusal says which variable to set. A
+		machine with no transcriber configured has not failed — it has simply not been
+		told where one is, and the two are different messages.
+		"""
+		return transcriber_spec_for(None, self._transcribers())
+
+	def _transcriber(self, name: str | None) -> TranscriberSpec:
+		"""Resolve ``name``, defaulting to this deployment's declared transcriber."""
+		if name is None and self._transcriber_spec is not None:
+			return self._transcriber_spec
+		return transcriber_spec_for(name, self._transcribers())
+
+	# --------------------------------------------- FR-173: proposals and attestation
+
+	async def propose_answers(
+		self,
+		goal_id: str,
+		*,
+		model: str | None = None,
+	) -> tuple[ElicitationAnswer, ...]:
+		"""Ask the model to draft the open dimensions, and record the drafts as proposals.
+
+		Every answer written here carries :data:`~sofact.views.MODEL_ANSWER_PREFIX` in
+		``answered_by``, which is what makes :func:`sofact.elicitation.assess` report the
+		dimension **open** until a person attests it (FR-173). This method cannot write
+		an operator answer, by construction: the prefix is not a parameter.
+
+		Dimensions the operator has already answered are skipped. A proposal that
+		superseded an operator's own words would be the model talking over the person it
+		is meant to be helping, and the operator's answer is the thing the whole phase is
+		for.
+
+		Unavailability is raised rather than returned as a value, unlike :meth:`advise`:
+		advice is optional and a proposal is the caller's explicit request, so a caller
+		who asked for proposals and got silence must be told.
+
+		**Every completion is taken before any of them is written.** The loop used to
+		append each answer as it arrived, which made the method *partial*: a model that
+		answered three dimensions and then failed left three proposals on the log and
+		raised, so the caller saw an exception and the ledger held work. That is not a
+		cosmetic difference — the driver decides whether a step advanced by comparing
+		ledger lengths, and a partial write makes a failed step look like one that did
+		something, so it retries the step and the log grows again on every attempt. Taking
+		the completions first makes the method all-or-nothing: it either returns the
+		proposals it wrote or writes none of them, and either way the log length tells the
+		truth about what happened.
+		"""
+		goal = await self.goal(goal_id)
+		if self.llm is None:
+			raise LlmUnavailable("no model configured; pass one to propose answers (FR-173)")
+		statement = goal.statement
+		state = await self.state()
+		answered = {a.dimension for a in state.answers_for(goal_id)}
+		name = model or DEFAULT_MODEL
+		drafted: list[tuple[ElicitationDimension, str]] = []
+		for spec in DIMENSIONS:
+			if spec.dimension in answered:
+				continue
+			system, user = propose_prompt(spec, statement)
+			try:
+				text = await self.llm.complete(system=system, user=user)
+			except LlmUnavailable as exc:
+				raise LlmUnavailable(
+					f"{spec.dimension.value}: {exc}. Nothing was recorded; the dimensions "
+					f"already answered are untouched and the rest are still open (FR-173)"
+				) from exc
+			drafted.append((spec.dimension, text.strip()))
+		proposals: list[ElicitationAnswer] = []
+		for dimension, text in drafted:
+			answer = ElicitationAnswer(
+				id=uuid7str(),
+				goal_id=goal_id,
+				dimension=dimension,
+				text=text,
+				answered_by=f"{MODEL_ANSWER_PREFIX}{name}",
+				at=now(),
+			)
+			self._commit(
+				LedgerKind.ANSWER_RECORDED,
+				{"answer": answer.model_dump(mode="json")},
+			)
+			proposals.append(answer)
+		return tuple(proposals)
+
+	async def attest(self, answer_id: str, *, by: str) -> ElicitationAttestation:
+		"""Record that a person read a model-proposed answer (FR-173).
+
+		**Attestation records that a human read an answer, not that the answer is
+		correct** — the same distinction :mod:`sofact.elicitation` draws about its floor.
+		What it buys is that a machine's paragraph can no longer clear P0 on the
+		operator's behalf, because the dimension stays open until this row exists.
+
+		Only a model-proposed answer can be attested. An attestation of the operator's own
+		answer would be a person confirming themselves, and it would put a row in the log
+		that says a human read something they wrote.
+		"""
+		assert by.strip(), "an attestation names who made it"
+		state = await self.state()
+		answer = state.answer(answer_id)
+		if answer is None:
+			raise KeyError(f"no such answer: {answer_id}")
+		if not answer.is_model_proposed:
+			raise ValueError(
+				f"answer {answer_id} was written by {answer.answered_by!r}, not proposed by "
+				"a model: an attestation of the operator's own words is a person confirming "
+				"themselves, and it would record that a human read what they wrote (FR-173)"
+			)
+		attestation = ElicitationAttestation(
+			id=uuid7str(),
+			answer_id=answer_id,
+			attested_by=by,
+			at=now(),
+		)
+		self._commit(
+			LedgerKind.ELICITATION_ATTESTED,
+			{"attestation": attestation.model_dump(mode="json")},
+		)
+		return attestation
+
+	async def attestations(self, goal_id: str | None = None) -> tuple[ElicitationAttestation, ...]:
+		"""Every attestation, oldest first (FR-173)."""
+		state = await self.state()
+		if goal_id is None:
+			return state.attestations
+		answers = {a.id for a in state.answers_for(goal_id)}
+		return tuple(a for a in state.attestations if a.answer_id in answers)
+
+	async def unanswered_proposals(self, goal_id: str) -> tuple[ElicitationAnswer, ...]:
+		"""Model-proposed answers nobody has attested (FR-173).
+
+		The list the operator is asked to read, and the reason it is a method rather than
+		a filter at the call site: a CLI that printed proposals without this would have to
+		re-derive "which of these did a human read", and the two derivations would drift.
+		"""
+		state = await self.state()
+		attested = state.attested_answer_ids()
+		latest = {a.dimension: a for a in state.answers_for(goal_id)}
+		return tuple(
+			a for a in latest.values() if a.is_model_proposed and a.id not in attested
+		)
+
 	# ------------------------------------------------------------ P2: drafting
 
 	async def draft(self, goal_id: str) -> SpecificationDraft:
@@ -1014,7 +1451,7 @@ class FactoryService:
 		that produced it.
 		"""
 		state = await self.state()
-		draft = draft_stems(goal_id, state.answers_for(goal_id))
+		draft = draft_stems(goal_id, state.answers_for(goal_id), attested=state.attested_answer_ids())
 		self._commit(LedgerKind.DRAFT_CREATED, {"draft": draft.model_dump(mode="json")})
 		return draft
 
@@ -2654,6 +3091,474 @@ class FactoryService:
 			goal_id=record.goal_id, query=record.query, documents=documents, claims=claims
 		)
 
+	# ------------------------------------------------------- FR-174: web search
+
+	async def search(
+		self,
+		*,
+		queries: Sequence[str] | None = None,
+		provider: str | None = None,
+		timeout: float = 120.0,
+		limit: int = 6,
+	) -> SearchScan:
+		"""Ask a declared provider the queries SoFact authored, and record the scan.
+
+		This is the capability the operator asked for: SoFact *looking something up*
+		rather than only dispatching a harness that might. The division of labour is the
+		design — SoFact composes the queries from the goal's own elicitation answers, in
+		the operator's own words, and writes them into the log *before* the provider runs,
+		so "what was asked" is answerable from the ledger alone. A provider asked what to
+		search for chooses its own subject list, and the check that the right things were
+		searched would then be measuring the provider against itself — the same failure
+		:func:`research_goal` prevents by writing the clause ids into the prompt.
+
+		Every hit is recorded as a lead at the weakest verification rung, never as
+		evidence. The scan widens what the research phase can go and verify; it does not
+		stand in for the verifying.
+
+		A provider that answers nothing is recorded as having answered nothing, and a
+		query that failed is recorded as failed with its reason. The two are different
+		findings and only one of them is about the web.
+		"""
+		goal = await self.current_goal()
+		if goal is None:
+			raise KeyError("no goal yet; a search answers a question about a goal")
+		if provider is not None:
+			resolved = provider
+			spec = searcher_spec_for(provider, self._searchers())
+		else:
+			spec = self._default_searcher()
+			resolved = spec.name
+		if queries is None:
+			answers = (await self.state()).answers_for(goal.id)
+			dimensions: dict[str, str] = {
+				a.dimension.value: a.text for a in answers if a.text.strip()
+			}
+			authored = authored_queries(goal.statement, dimensions=dimensions, limit=limit)
+		else:
+			authored = tuple(q.strip() for q in queries if q.strip())
+		if not authored:
+			raise ValueError(
+				"no queries to search: the goal has no statement and none were given, so "
+				"there is no question to put to a provider (FR-174)"
+			)
+		workdir = self.home / "search" / goal.id / uuid7str()[:8]
+		adapter = SearchAdapter(spec)
+		scan = await adapter.search(
+			authored, workdir=workdir, timeout=timeout, goal_id=goal.id
+		)
+		# The provider name is recorded from the spec that ran, never from the argument,
+		# so a caller that named a provider cannot make the log disagree with the argv.
+		scan = scan.model_copy(update={"provider": resolved})
+		self._commit(
+			LedgerKind.SEARCH_SCAN_RECORDED, {"scan": scan.model_dump(mode="json")}
+		)
+		return scan
+
+	async def current_scan(self) -> SearchScan | None:
+		"""The most recent search scan, or ``None`` (FR-174)."""
+		return (await self.state()).scan
+
+	async def scans_for(self, goal_id: str | None = None) -> tuple[SearchScan, ...]:
+		"""Every scan recorded for a goal — the current one when none is named (FR-174).
+
+		All of them rather than the latest: two providers' answers to the same authored
+		queries are two measurements, and the union of their hits is what research draws
+		on. Returning the last would silently discard the first provider's results.
+		"""
+		goal = await self.current_goal() if goal_id is None else None
+		resolved = goal_id if goal_id is not None else (goal.id if goal is not None else None)
+		if resolved is None:
+			return ()
+		return (await self.state()).scans_for(resolved)
+
+	async def search_gate(self) -> tuple[GateCheck, ...]:
+		"""What a machine can check about the latest scan (FR-174).
+
+		No scan at all yields an empty tuple rather than a failing check, the rule
+		:meth:`ledger_gate` follows: a project that has not searched yet has not failed a
+		search check, and a gate that failed there would make the phase look blocked when
+		it is simply unstarted.
+		"""
+		scan = await self.current_scan()
+		if scan is None:
+			return ()
+		return scan_checks(scan, await self.current_ledger())
+
+	def _searchers(self) -> Mapping[str, SearcherSpec]:
+		"""The searcher table this instance may ask (FR-174)."""
+		return {} if self._searcher_spec is None else {self._searcher_spec.name: self._searcher_spec}
+
+	def _default_searcher(self) -> SearcherSpec:
+		spec = self._searcher_spec
+		if spec is None:
+			raise SearchRefusal(
+				"no search provider is configured: this build ships none, and a scan "
+				"against an engine nobody chose would put results into the ledger with no "
+				"record of whose index they came from. Pass a SearcherSpec to "
+				"FactoryService, or set SOFACT_SEARCHER_SPECS (FR-174)"
+			)
+		return spec
+
+	# ------------------------------------------------- FR-169: the competitive baseline
+
+	async def competitors(
+		self,
+		*,
+		record: ResearchRecord | None = None,
+		payload: object | None = None,
+		query: str | None = None,
+	) -> CompetitiveLandscape:
+		"""Parse a producer's competitive scan and record it (FR-169).
+
+		Read from the run's own workspace when ``payload`` is not given, the rule
+		:meth:`ledger_from` and :meth:`classification_from` follow: the scan is a finding
+		about a dispatch rather than something a caller can assert, and the version is
+		read off the folded state so two scans cannot share a number.
+
+		SoFact does not name the rivals. It authors the *criterion* and the subject, the
+		producer identifies the systems, and :class:`~sofact.views.CompetitiveLandscape`
+		refuses a scan whose subject is not the one SoFact asked for — so a producer
+		cannot answer a different question and have it read as an answer to this one.
+		"""
+		if record is not None:
+			goal = await self.goal(record.goal_id)
+			subject = query if query is not None else record.query
+			if payload is None:
+				path = Path(record.workspace) / LEDGER_COMPETITORS_FILENAME
+				if not path.is_file():
+					raise ValueError(
+						f"research run {record.id} left no {LEDGER_COMPETITORS_FILENAME} in "
+						f"{record.workspace}: there is no scan to record, and an empty one "
+						"would read as a producer that looked and found no rival — a real "
+						"finding — rather than one that was never asked (FR-169, NFR-024)"
+					)
+				payload = json.loads(path.read_text(encoding="utf-8"))
+		else:
+			current = await self.current_goal()
+			if current is None:
+				raise KeyError("no goal yet; a competitive scan is research about a goal")
+			goal = current
+			subject = query if query is not None else goal.statement
+		state = await self.state()
+		landscape = parse_competitors(
+			payload,
+			goal_id=goal.id,
+			query=subject,
+			version=len([x for x in state.landscapes if x.goal_id == goal.id]) + 1,
+		)
+		self._commit(
+			LedgerKind.COMPETITIVE_SCAN_RECORDED,
+			{"landscape": landscape.model_dump(mode="json")},
+		)
+		return landscape
+
+	async def current_landscape(self) -> CompetitiveLandscape | None:
+		"""The operative competitive scan, or ``None`` (FR-169)."""
+		return (await self.state()).landscape
+
+	async def competitive_gate(self) -> tuple[GateCheck, ...]:
+		"""What a machine can check about the current landscape (FR-169).
+
+		Empty when there is no scan, the rule :meth:`ledger_gate` follows — and the
+		refusal inside :func:`sofact.competitive.competitor_checks` is what makes a scan
+		over zero sourced rivals report nothing rather than a clean baseline.
+		"""
+		landscape = await self.current_landscape()
+		if landscape is None:
+			return ()
+		return competitor_checks(landscape, await self.current_ledger())
+
+	# --------------------------------------------------- FR-170: declared exceedance
+
+	async def declare_exceedance(
+		self,
+		*,
+		capability: str,
+		baseline: str,
+		baseline_source_ids: Sequence[str],
+		rationale: str,
+		clause_ids: Sequence[str],
+		by: str = "operator",
+		goal_id: str | None = None,
+	) -> ExceedsClaim:
+		"""Record a capability declared to exceed a cited rival's (FR-170).
+
+		**Nothing here measures the comparison**, because no oracle in O1–O7 compares two
+		systems. The declaration is recorded as a declaration, ``measured_margin`` is
+		``None`` by type, and the delivery check reports it as declared rather than
+		verified. A method that returned a number would be inventing it.
+
+		The validator on :class:`~sofact.views.ExceedsClaim` refuses a claim with no
+		baseline source and one tracing to no clause, so both refusals happen at
+		construction rather than here — a caller cannot build one of these by any route.
+		"""
+		goal = await self.current_goal() if goal_id is None else await self.goal(goal_id)
+		if goal is None:
+			raise KeyError("no goal yet; an exceedance is declared against a goal's intent")
+		claim = ExceedsClaim(
+			id=uuid7str(),
+			goal_id=goal.id,
+			capability=capability.strip(),
+			baseline=baseline.strip(),
+			baseline_source_ids=tuple(baseline_source_ids),
+			rationale=rationale.strip(),
+			clause_ids=tuple(clause_ids),
+			declared_by=by,
+			declared_at=now(),
+		)
+		self._commit(LedgerKind.EXCEEDS_DECLARED, {"claim": claim.model_dump(mode="json")})
+		return claim
+
+	async def exceedances(self, goal_id: str | None = None) -> tuple[ExceedsClaim, ...]:
+		"""Every declared exceedance, oldest first (FR-170)."""
+		state = await self.state()
+		if goal_id is None:
+			return state.exceeds
+		return tuple(e for e in state.exceeds if e.goal_id == goal_id)
+
+	# ------------------------------------- FR-171: the annotated specification document
+
+	async def write_specification(
+		self,
+		contract_id: str,
+		*,
+		root: Path | None = None,
+	) -> ProductSpecificationDocument:
+		"""Render the annotated product specification at P2 and write it (FR-171).
+
+		At P2 rather than P8, because P2 is the artefact the first gate is a gate *on*: a
+		specification nobody can read is not gated by anything a human did, and rendering
+		it at delivery would mean the gate approved a structure while the prose arrived
+		four phases later.
+
+		Every requirement carries its provenance. Two facts are **derived from the ledger
+		and not passed in**: whether an answer was operator-written or a model's proposal,
+		and whether a person attested it. A marker a caller supplies is a marker that can
+		be supplied wrongly, and the one thing this document must not do is render clean
+		over a specification whose answers nobody read.
+		"""
+		state = await self.state()
+		contract = state.contract(contract_id)
+		if contract is None:
+			raise KeyError(f"no such contract: {contract_id}")
+		specification = await self.require_approved_specification(contract_id)
+		goal_id = contract.goal_id
+		draft = await self.latest_draft(goal_id)
+		answers = state.answers_for(goal_id)
+		attested = state.attested_answer_ids()
+		landscape = state.landscape
+		exceeds = tuple(e for e in state.exceeds if e.goal_id == goal_id)
+		verdicts = self._verdict_provenance(state, contract)
+		modules = self._module_by_clause(state, contract)
+		annotations = annotate_requirements(
+			specification,
+			contract,
+			draft,
+			answers,
+			attested,
+			verdicts,
+			exceeds,
+			modules,
+		)
+		document = ProductSpecificationDocument(
+			id=uuid7str(),
+			goal_id=goal_id,
+			specification_id=specification.id,
+			contract_id=contract_id,
+			landscape_id=None if landscape is None else landscape.id,
+			rendered_at=now(),
+			requirements=annotations,
+			exceeds=exceeds,
+		)
+		self._commit(
+			LedgerKind.PRODUCT_SPEC_RENDERED,
+			{"document": document.model_dump(mode="json")},
+		)
+		if root is not None:
+			target = root / PRODUCT_SPEC_FILENAME
+			target.parent.mkdir(parents=True, exist_ok=True)
+			target.write_text(render_product_specification(document))
+		return document
+
+	def _verdict_provenance(
+		self,
+		state: ProjectState,
+		contract: Contract,
+	) -> dict[str, ClauseVerdictProvenance]:
+		"""What research concluded about each clause, keyed by clause id (FR-171).
+
+		Read from the latest classification the log holds rather than from the artefact,
+		because the classification is already a parsed, recorded fact and re-reading the
+		file would let the document disagree with the ledger it renders.
+
+		The classification's ``evidence`` is a tuple of source-id *strings*, and only the
+		ones that are well-formed UUID7 are carried: a producer's malformed id cannot be
+		put into a field typed ``UUID7``, and dropping it silently would make a clause look
+		less evidenced than the classification says. So the count of dropped ids is what
+		:func:`sofact.specdoc.render_product_specification` reports — this method keeps
+		only what the type admits and the document says so.
+		"""
+		classification = state.classification
+		if classification is None:
+			return {}
+		known = {c.id for c in contract.clauses}
+		out: dict[str, ClauseVerdictProvenance] = {}
+		for classified in classification.classifications:
+			if classified.clause_id not in known:
+				continue
+			out[classified.clause_id] = ClauseVerdictProvenance(
+				clause_id=classified.clause_id,
+				verdict=classified.verdict,
+				source_ids=tuple(sid for sid in classified.evidence if is_uuid7(sid)),
+			)
+		return out
+
+	def _module_by_clause(self, state: ProjectState, contract: Contract) -> dict[str, str]:
+		"""Which module owns each clause, from the latest approved decomposition (FR-171).
+
+		Empty when nothing is decomposed yet, which is the ordinary case at P2: the
+		document is rendered before the plan exists, so a requirement's owning module is
+		usually unknown and the annotation says so rather than guessing.
+		"""
+		decomposition = state.latest_decomposition(contract.id)
+		if decomposition is None:
+			return {}
+		out: dict[str, str] = {}
+		for module in decomposition.modules:
+			for clause_id in module.clause_ids:
+				out[clause_id] = module.id
+		return out
+
+	async def current_product_spec(self) -> ProductSpecificationDocument | None:
+		"""The operative rendered specification, or ``None`` (FR-171)."""
+		return (await self.state()).product_spec
+
+	async def approve_specification_document(
+		self,
+		document_id: str,
+		*,
+		by: str,
+	) -> ProductSpecificationDocument:
+		"""Record that a person approved the rendered specification (FR-171).
+
+		The approval is recorded against the *document* the approver was shown, so the
+		marker they decided about is preserved. Approving does not attest: a document
+		whose requirements include a model proposal nobody read stays unattested
+		(FR-173), and that is the distinction the whole feature rests on — a signature on
+		a page is not a reading of the page.
+		"""
+		assert by.strip(), "an approval names who approved it"
+		state = await self.state()
+		document = next((d for d in state.product_specs if d.id == document_id), None)
+		if document is None:
+			raise KeyError(f"no such rendered specification: {document_id}")
+		approved = document.model_copy(update={"approved_by": by, "approved_at": now()})
+		self._commit(
+			LedgerKind.PRODUCT_SPEC_RENDERED,
+			{"document": approved.model_dump(mode="json")},
+		)
+		return approved
+
+	# --------------------------------------------------- FR-172: the notification
+
+	async def notify(
+		self,
+		subject: str,
+		body: str,
+		*,
+		notifier: str | None = None,
+		goal_id: str | None = None,
+		run_id: str | None = None,
+		timeout: float = 60.0,
+	) -> Notification:
+		"""Attempt to tell the operator something, and record the attempt (FR-172).
+
+		The row is appended whether or not a process launched, and ``delivered`` is
+		*derived* from the exit code rather than declared. A record written only on
+		success would make "we told them" and "we meant to tell them" print the same line.
+
+		No notifier configured is **not** an exception here: it is a recorded attempt with
+		no process, which is exactly the fact the operator needs. A caller that raised
+		would leave the run unable to say it could not tell anyone.
+		"""
+		assert subject.strip(), "a notification needs a subject"
+		workdir = self.home / NOTIFICATION_DIRNAME
+		workdir.mkdir(parents=True, exist_ok=True)
+		try:
+			spec = self._notifier(notifier)
+		except NotificationRefusal as exc:
+			record = Notification(
+				id=uuid7str(),
+				goal_id=goal_id,
+				run_id=run_id,
+				notifier="none",
+				subject=subject.strip(),
+				body_sha256=hashlib.sha256(body.encode()).hexdigest(),
+				body_chars=len(body),
+				exit_code=None,
+				error=str(exc),
+				at=now(),
+			)
+			self._commit(
+				LedgerKind.NOTIFICATION_SENT, {"notification": record.model_dump(mode="json")}
+			)
+			return record
+		adapter = ConfiguredNotifierAdapter(spec)
+		record = await adapter.send(
+			subject=subject.strip(),
+			body=body,
+			workdir=workdir,
+			timeout=timeout,
+			goal_id=goal_id,
+			run_id=run_id,
+		)
+		self._commit(
+			LedgerKind.NOTIFICATION_SENT, {"notification": record.model_dump(mode="json")}
+		)
+		return record
+
+	async def notifications(self, goal_id: str | None = None) -> tuple[Notification, ...]:
+		"""Every notification attempt, oldest first (FR-172)."""
+		state = await self.state()
+		if goal_id is None:
+			return state.notifications
+		return tuple(n for n in state.notifications if n.goal_id == goal_id)
+
+	def _notifiers(self) -> Mapping[str, NotificationSpec]:
+		"""The notifier table this deployment may use (FR-172)."""
+		return NOTIFIERS
+
+	def _default_notifier(self) -> NotificationSpec:
+		return notifier_spec_for(None, self._notifiers())
+
+	def _notifier(self, name: str | None) -> NotificationSpec:
+		if name is None and self._notifier_spec is not None:
+			return self._notifier_spec
+		return notifier_spec_for(name, self._notifiers())
+
+	async def record_driver_run(self, run: DriverRun) -> DriverRun:
+		"""Append one driver invocation to the log (FR-172).
+
+		A public method rather than ``_commit`` from the driver, because the driver is a
+		separate module and a cross-module call to a private one is the kind of shortcut
+		that turns a boundary into a convention. It is also the only writer of
+		``DRIVER_ADVANCED``, so "what appends a driver run" has one answer.
+		"""
+		self._commit(LedgerKind.DRIVER_ADVANCED, {"run": run.model_dump(mode="json")})
+		return run
+
+	async def driver_runs(self, goal_id: str | None = None) -> tuple[DriverRun, ...]:
+		"""Every driver invocation, oldest first (FR-172)."""
+		state = await self.state()
+		if goal_id is None:
+			return state.driver_runs
+		return tuple(r for r in state.driver_runs if r.goal_id == goal_id)
+
+	async def current_driver_run(self) -> DriverRun | None:
+		"""The most recent driver invocation, or ``None`` (FR-172)."""
+		return (await self.state()).driver_run
+
 	async def record_ledger(
 		self,
 		*,
@@ -3269,6 +4174,14 @@ class FactoryService:
 				escapes_recorded=state.escapes,
 				change_cost=change_cost,
 				strengths=strengths,
+				# FR-170 and FR-172: what was *claimed* and whether anyone was told. Both
+				# are read from the folded state rather than passed in by the caller, so a
+				# report cannot be rendered that omits a declaration the log holds — the
+				# same rule the annotation follows, and for the same reason: the operator
+				# approving the deploy gate is the last person who can notice that the
+				# exceedances they declared are absent from the page in front of them.
+				exceeds=tuple(e for e in state.exceeds if e.goal_id == plan.goal_id),
+				notifications=tuple(n for n in state.notifications if n.goal_id == plan.goal_id),
 			)
 
 		# The documents and the report describe each other: the report's artefact check

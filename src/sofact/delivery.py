@@ -65,6 +65,7 @@ from sofact.views import (
 	DeploymentTopology,
 	DiffReview,
 	EnvelopeActuals,
+	ExceedsClaim,
 	EscapeEvent,
 	EscapeReport,
 	GateCheck,
@@ -74,6 +75,7 @@ from sofact.views import (
 	InheritedOracle,
 	MaintenanceLane,
 	ModuleClass,
+	Notification,
 	ProbeOutcome,
 	Specification,
 	TraceLink,
@@ -608,6 +610,8 @@ def report(
 	escapes_recorded: tuple[EscapeEvent, ...] = (),
 	change_cost: ChangeCostReport | None = None,
 	strengths: Mapping[str, float] | None = None,
+	exceeds: tuple[ExceedsClaim, ...] = (),
+	notifications: tuple[Notification, ...] = (),
 ) -> DeliveryReport:
 	"""Render FR-118's report from the log (FR-117, FR-118, FR-121).
 
@@ -966,6 +970,55 @@ def report(
 			),
 		),
 		GateCheck(
+			name="exceedance_declared",
+			passed=True,
+			detail=(
+				"no capability was declared to exceed a rival's (FR-170). This is not the "
+				"same statement as every declared exceedance being met: it is the absence "
+				"of a declaration, and a report that printed an empty table here would read "
+				"as a comparison nobody made"
+				if not exceeds
+				else (
+					f"{len(exceeds)} capability(ies) were declared to exceed a cited rival's, "
+					"and **0 were verified by an oracle** (FR-170): "
+					+ "; ".join(
+						f"{c.capability} over {c.baseline} "
+						f"({len(c.baseline_source_ids)} baseline source(s), "
+						f"{len(c.clause_ids)} clause(s)) by {c.declared_by}"
+						for c in exceeds
+					)
+					+ ". No oracle in O1-O8 compares two systems, so there is no measurement "
+					"behind any of these and `measured_margin` is unmeasured by type "
+					"(NFR-024). This check reports rather than fails for "
+					"`machine_surface_not_verified`'s reason: refusing a delivery for a "
+					"property no oracle observes would refuse all of them, and the "
+					"obligation belongs in the report a human reads rather than in a gate "
+					"that can never pass"
+				)
+			),
+		),
+		GateCheck(
+			name="notification_reported",
+			passed=True,
+			detail=(
+				"no notification was attempted for this delivery (FR-172). This is not the "
+				"same statement as every notification having arrived: it is the absence of "
+				"an attempt, and the delivery may still be complete"
+				if not notifications
+				else (
+					f"{sum(1 for n in notifications if n.delivered)} of "
+					f"{len(notifications)} notification attempt(s) were delivered (FR-172): "
+					+ "; ".join(
+						f"{n.subject!r} via {n.notifier} "
+						+ (f"exit {n.exit_code}" if n.delivered else "NOT delivered")
+						for n in notifications
+					)
+					+ ". The body is digested rather than carried here, because it names "
+					"the system being built and the report is a durable artefact"
+				)
+			),
+		),
+		GateCheck(
 			name="escape_budget_declared",
 			passed=True,
 			detail=(
@@ -1010,6 +1063,8 @@ def report(
 		boundary=boundary,
 		escapes=escapes,
 		change_cost=change_cost,
+		exceeds=exceeds,
+		notifications=notifications,
 		# FR-127's attribution, against the graph this report's chain was projected from
 		# rather than one rebuilt now. A graph rebuilt at read time would attribute an
 		# escape to whatever the decomposition says *today*, and after a repair that is a
