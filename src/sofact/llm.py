@@ -36,7 +36,8 @@ DEFAULT_MODEL = "deepseek-v4.1-flash:cloud"
 DEFAULT_MAX_TOKENS: Final[int] = 4096
 """Enough for the deepest prompt this product writes, measured rather than guessed.
 
-The default was 1024, and on the default model two of P0's six dimension prompts —
+The default was 1024, and on the default model two of the six dimension prompts P0
+then asked —
 ``boundary`` and ``failure`` — spent all 1024 inside the reasoning channel and
 returned ``content: ""`` with ``finish_reason: length``. So the shipped default
 could not complete the interrogation the front door exists to run, and the failure

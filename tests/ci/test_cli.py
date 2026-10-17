@@ -1100,20 +1100,20 @@ class TestTheResearchVerb:
 			app, ["--home", str(home), "research", "--max-sources", "7", "--max-calls", "4"]
 		)
 		assert result.exit_code == 0, result.output
-		assert "35 source(s), 20 call(s)" in result.output, "5 stems x the per-clause caps"
-		assert "5 intent clause(s), FR-072" in result.output
+		assert "49 source(s), 28 call(s)" in result.output, "7 stems x the per-clause caps"
+		assert "7 intent clause(s), FR-072" in result.output
 		assert "calls    3" in result.output
 		assert "over budget" not in result.output, "3 calls is inside 20"
 
 	def test_an_overspent_run_says_which_cap_it_broke(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 	) -> None:
-		"""The loop's meta reports 9 turns; a per-clause cap of 1 over 5 stems allows 5."""
+		"""The loop's meta reports 9 turns; a per-clause cap of 1 over 7 stems allows 7."""
 		self._configure_research(tmp_path, monkeypatch, "research-greedy")
 		conversation(home)
 		result = RUNNER.invoke(app, ["--home", str(home), "research", "--max-calls", "1"])
 		assert result.exit_code == 0, result.output
-		assert "over budget: model-call cap 5 exceeded: 9 observed" in result.output
+		assert "over budget: model-call cap 7 exceeded: 9 observed" in result.output
 		assert "calls    9" in result.output
 
 	def test_an_unmeasured_call_count_is_printed_as_unmeasured(
@@ -1306,8 +1306,8 @@ class TestTheClassifyVerb:
 		result = RUNNER.invoke(app, ["--home", str(home), "classify"])
 
 		assert result.exit_code == 0, result.output
-		assert "5 clause(s) classified" in result.output
-		assert result.output.count("[validated]") == 5
+		assert "7 clause(s) classified" in result.output
+		assert result.output.count("[validated]") == 7
 		assert "action: proceed" in result.output
 		assert "0 invalidated" in result.output
 		assert "every-clause-is-classified" in result.output
@@ -1361,7 +1361,7 @@ class TestTheClassifyVerb:
 		assert result.exit_code == 1, result.output
 		assert "1 clause(s) classified" in result.output
 		assert "every-clause-is-classified" in result.output
-		assert "4 clause(s) unclassified" in result.output, "the missing four are named"
+		assert "6 clause(s) unclassified" in result.output, "the missing six are named"
 
 	def test_a_run_that_left_no_classification_is_refused_without_a_traceback(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1813,7 +1813,7 @@ class TestTheIntegrateVerb:
 
 		assert result.exit_code == 1
 		assert "bad option" in result.output
-		assert "the contract has 5 clause(s)" in result.output
+		assert "the contract has 7 clause(s)" in result.output
 
 	def test_an_interface_member_with_an_unknown_kind_is_refused(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1909,7 +1909,7 @@ class TestTheEnvelopeVerb:
 		assert result.exit_code == 0, result.output
 		assert "1-25 modules" in result.output
 		assert "actuals (NFR-025)" in result.output
-		assert "modules: 5 modules (within 1-25 modules)" in result.output
+		assert "modules: 7 modules (within 1-25 modules)" in result.output
 
 	def test_an_unmeasured_dimension_is_named_rather_than_counted_as_satisfied(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1942,7 +1942,7 @@ class TestTheEnvelopeVerb:
 
 		assert result.exit_code == 1, result.output
 		assert "over the envelope" in result.output
-		assert "modules: 5 modules (OUTSIDE 1-2 modules)" in result.output
+		assert "modules: 7 modules (OUTSIDE 1-2 modules)" in result.output
 
 	def test_a_bad_dimension_name_is_refused_by_the_reader(
 		self, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

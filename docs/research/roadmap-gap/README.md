@@ -45,7 +45,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-061 gate is a hard stop | **Implemented** | `require_approved_decomposition` (`service.py`) for P3, and now structural for all four gates: `PhaseAdvance` refuses a completed gate phase with no approver, `advance_phase` cannot complete a gate, and it refuses when any earlier phase is incomplete — so P5 is unreachable without P2 and P3. Canaried by deleting the forward check. |
 | FR-062 every phase emits a durable artifact | **Implemented** (2026-10-13, ADR-0037) | Decomposition/contract/plan/verdict are ledger rows, a phase transition is one (`LedgerKind.PHASE_ADVANCED`), P2 emits `SPECIFICATION_PROPOSED`/`SPECIFICATION_GATED`, P1 emits `SOURCE_LEDGER_RECORDED` (FR-070/ADR-0035) **and now `RESEARCH_CLASSIFIED`** (FR-068/ADR-0037), so every phase P0–P3 has an artefact a resume lands on. |
 | FR-063 goal not accepted until reduced to falsifiable | **Implemented** | `Readiness.is_ready` (`views.py:290`); `test_progress_counts_resolved_dimensions_and_readiness_flips_at_the_end` (`test_elicitation.py:217`). |
-| FR-064 adversarial elicitation, 7 dimensions | **Partly** | `ElicitationDimension` (`views.py:763`) has **6** members; the spec's *Scale* and *Non-negotiables* are absent. `test_readiness_covers_every_dimension_in_declaration_order` (`test_elicitation.py:212`). |
+| FR-064 adversarial elicitation, 8 dimensions | **Implemented** (2026-10-17, ADR-0077) | `ElicitationDimension` (`views.py:1293`) has **8** members and the spec's two rows it lacked — *Scale* and *Non-negotiables* — are among them; the count is eight rather than the table's seven because `CONSUMER` is split out of the table's single *Success* row and `ORACLE` is FR-067's `verification_method`, which the module documents as producing no clause, so no member order reproduces the table and the ADR says so. `SCALE` carries a second content floor (`requires_quantity`, `test_only_the_scale_dimension_demands_a_quantity`), and the *Non-negotiables* row is its own question rather than folded into `CONSTRAINT`'s, which is where it had been. **The limit is inside the requirement and is the requirement's own word:** a scale clause's oracle is prose, so `execution.run_all` skips it and P6 records `INSUFFICIENT` — the obligation is declared and visibly unmet, and R19's second half is a question here rather than a bound. `test_the_spec_rows_the_enum_dropped_are_now_present` (`test_elicitation.py`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
 | FR-066 elicitation proposes no implementation | **Implemented** | `_SHARED_CONSTRAINTS` (`planner.py:110`) + `draft_stems` polarity (`elicitation.py:254`); `test_polarity_follows_the_dimension` (`test_elicitation.py:281`). |
 | FR-067 each clause carries `confidence` and `verification_method` | **Partly** | `Clause` (`views.py:351`) carries **neither**; ambiguity is not quantified per clause. `test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite* rule. |
@@ -257,8 +257,8 @@ table has 126.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 101 |
-| Partly | 25 |
+| Implemented | 102 |
+| Partly | 24 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 0 |
 | **Total rows** | **126** |
@@ -335,11 +335,12 @@ two already-Implemented ones, and found two gaps that are still open.** FR-168 (
 goal) and FR-172 (one verb drives the pipeline) were both **Implemented** and stay there:
 the modules, the verbs and the test modules existed, and the test modules passed. What was
 wrong is that the product did not run. `sofact build` against a fresh home at the shipped
-defaults failed at P0 three times over — a completion cap of 1024 that two of six dimension
-prompts exhausted inside the model's reasoning channel, a refusal that reported "only a
-reasoning channel" for a `finish_reason: "length"` the response stated plainly, an
-unreachable endpoint printed as `unreachable: .` because every httpx transport error
-stringifies to `""`, and a stop whose own two lines named different next commands
+defaults failed at P0 three times over — a completion cap of 1024 that two of the six
+dimension prompts P0 then asked exhausted inside the model's reasoning channel, a refusal
+that reported "only a reasoning channel" for a `finish_reason: "length"` the response
+stated plainly, an unreachable endpoint printed as `unreachable: .` because every httpx
+transport error stringifies to `""`, and a stop whose own two lines named different next
+commands
 (`build --resume` above, the questionnaire below) when the verb that works is `attest`. The
 fourth is the one that matters most, because it is the only route past a gate: **every
 printed approval read `sofact gate approve P2 --by you`, and the `gate` command's option is
@@ -415,6 +416,26 @@ L2–L3. Both keep their verdicts because both name a half that is still missing
 **trend** across history for one, and nothing for the other beyond the gate it was never
 short of — which is the counting rule working as stated rather than a promotion by
 proximity.
+
+**The 2026-10-17 elicitation unit (ADR-0077) moved one row, and the row it moved had
+been counted wrong in both directions.** FR-064 leaves **Partly** for **Implemented** and the
+tally is `102/24/0/0` over **126** rows, re-derived by re-running the classifier over all
+126 rather than adjusted by hand. The gap was recorded as "the enum has 6, the spec lists
+7", and neither number was the fact: five of the spec's rows were present, **two were
+absent**, and the enum carried **two the table does not list** — `CONSUMER`, split out of
+the table's single *Success* row, and `ORACLE`, FR-067's `verification_method`, which the
+module documents as producing no clause. So the target was eight, and no member order
+reproduces the table. **What the row could not have shown, because it counted instead of
+reading:** *Non-negotiables* had not been dropped at all — it was folded into
+`CONSTRAINT`'s own question ("What are the non-negotiables — platform, stack, dependencies,
+time?"), where it asked about the stack, while the spec's *Constraints* row was asked
+nowhere. A missing question with a plausible answer already sitting in its place is
+invisible to a count, which is the general form of this class. The verdict is Implemented
+because the limit inside it is the requirement's own: FR-064 requires the dimensions be
+*asked*, and a scale clause's oracle is prose, so it is declared and visibly unmet rather
+than verified. R19's second half — "P0 must resolve scale" — is a question now and not a
+bound, and the ADR records that as a gap rather than letting a recovered dimension read as
+a discharged risk.
 
 1. **its verdict cell names an unbuilt half**, *including* a cell that leads with
    "Implemented" and then names the half that is missing; or
@@ -632,10 +653,16 @@ built for.
    The later ADR supersedes the earlier one — but the *spec* still states the
    opposite of what ships, and §8.6 is the section the roadmap's M0 probe is
    sequenced against.
-3. **Spec §4 FR-064 vs `ElicitationDimension`.** The spec's table lists seven
-   dimensions (Goal, Success, Scope boundary, **Scale**, Constraints,
-   **Non-negotiables**, Failure); the enum has six. Scale and Non-negotiables were
-   dropped without a record.
+3. **Spec §4 FR-064 vs `ElicitationDimension` — closed 2026-10-17 (ADR-0077).** The
+   spec's table lists seven dimensions (Goal, Success, Scope boundary, **Scale**,
+   Constraints, **Non-negotiables**, Failure) and the enum had six. Both missing rows
+   are now members. The gap is recorded here rather than deleted because what it
+   actually was is not a count: *Non-negotiables* had been folded into `CONSTRAINT`'s
+   own question ("What are the non-negotiables — platform, stack, dependencies,
+   time?"), so it was never absent from the interrogation — it was asked as a question
+   about the stack, while the spec's *Constraints* row was asked nowhere. And nothing
+   compared the enum against the spec's table, which is why both survived; a test that
+   reads the table is a separate unit.
 4. **Spec §17 verb surface vs the CLI.** §17 says "the planned verbs remain the
    target surface" and lists `sofact init`, `specify`, `build`, `report`, `gate
    approve <phase>`. None exists. The same section's "Running in v0.1" list is

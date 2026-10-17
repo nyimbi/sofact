@@ -48,23 +48,24 @@ would change each one.
 
 Elicitation is a deterministic questionnaire. The model advises; it does not decide
 ([ADR-0008](docs/adr/0008-the-model-is-advisory-only.md)). Answers are checked against
-floors — a length, and for the oracle dimension a requirement that you name a real checking
-mechanism — so a non-answer is refused rather than recorded. Here the goal is stated, three
-dimensions resolve, and then a plausible-sounding answer is rejected because it describes an
-outcome and names no way to check it:
+floors — a length, a requirement that the oracle dimension name a real checking mechanism,
+and a requirement that the scale dimension name a quantity — so a non-answer is refused
+rather than recorded. Here the goal is stated, three dimensions resolve, and then a
+plausible-sounding answer is rejected because it describes an outcome and names no way
+to check it:
 
 ```text
 $ sofact
 What do you want to build?: Every reminder appears in the dashboard within 60 seconds
 of being scheduled.
 
-[1/6] outcome
+[1/8] outcome
   What observable state change tells you this worked?
   ↳ Without an observable outcome there is nothing to test, so there can be no oracle
     and no autonomy above L0.
   :   ✓ resolved
 
-[4/6] oracle
+[4/8] oracle
   How would a machine check the outcome, without asking you?
   ↳ This is the load-bearing question. An answer must name a real checking mechanism —
     a test, a property, a query, a digest — because a description of confidence is not
@@ -87,7 +88,7 @@ support:
 ```text
 $ sofact contract --command 'pytest -q'
 contract 01a136fc-097a-7aa6-aeb7-6e4f5e5ce2f6 v1
-  6 clause(s)
+  7 clause(s)
   weakest oracle rank 3 → ceiling L3
   ground-truth debt 0%
 ```
@@ -402,10 +403,10 @@ context model served through Ollama's cloud, not locally. Override with `SOFACT_
 costs in hermeticity.
 
 The completion cap is `SOFACT_LLM_MAX_TOKENS`, default 4096. It was 1024, and on a
-reasoning model that is not enough for P0: two of the six dimension prompts spent the
-whole budget inside the hidden reasoning channel and returned empty content, so the
-default could not finish the interrogation `sofact build` opens with. A refusal from
-that path names the budget and the variable to raise
+reasoning model that is not enough for P0: two of the six dimension prompts P0 then
+asked spent the whole budget inside the hidden reasoning channel and returned empty
+content, so the default could not finish the interrogation `sofact build` opens with.
+A refusal from that path names the budget and the variable to raise
 ([ADR-0075](docs/adr/0075-a-refusal-names-the-cause-the-response-shows.md)).
 
 For a real coding session the model must be one the **harness** can resolve, not merely one
@@ -525,7 +526,7 @@ gaps named rather than omitted:
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 2062 tests
+uv run pytest -vxs tests/ci          # 2067 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

@@ -40,8 +40,16 @@ GOOD_ANSWERS: dict[ElicitationDimension, str] = {
 		"A pytest test asserts the reminder row exists in the store, and an HTTP GET of "
 		"/reminders returns it with status 200."
 	),
+	ElicitationDimension.SCALE: (
+		"About 200 users at launch growing to 5,000 within a year, with roughly 50 "
+		"reminders per user."
+	),
 	ElicitationDimension.CONSTRAINT: (
 		"Python 3.12, no external scheduler daemon, must run inside a 1 GB container."
+	),
+	ElicitationDimension.NON_NEGOTIABLES: (
+		"The existing reminders table must not change shape, and the auth service must "
+		"not be modified."
 	),
 	ElicitationDimension.FAILURE: (
 		"A reminder must never be delivered twice, and no PII may appear in the logs."

@@ -385,7 +385,7 @@ class TestAProposalIsNotAnAnswer:
 	) -> None:
 		"""The ordinary first run on a reachable model, and the dead end it used to hit.
 
-		P0 drafts all six dimensions on the first iteration. ``readiness`` reports a
+		P0 drafts every dimension on the first iteration. ``readiness`` reports a
 		model-proposed answer nobody attested as **open** (FR-173) — correctly, since the
 		floor measures specificity and this measures authorship — so the second iteration
 		selects ``propose-answers`` again, proposes nothing, and stops. The message then
@@ -669,7 +669,7 @@ class TestTerminalStateIsReported:
 		)
 		assert "revise" in result.next_human_verb, (
 			f"the verb has to say what the revision is *of*, or the operator is sent to a "
-			f"questionnaire with six open questions and no indication which one moved: "
+			f"questionnaire of open questions and no indication which one moved: "
 			f"{result.next_human_verb}"
 		)
 

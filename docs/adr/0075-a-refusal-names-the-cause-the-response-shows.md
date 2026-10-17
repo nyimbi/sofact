@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-16
+- **Amended by:** [ADR-0077](0077-the-interrogation-asks-eight-dimensions-and-scale-is-one-of-them.md) — the measurements in this record were taken when P0 asked **six** dimension prompts, and P0 now asks eight. The counts here are left as measured and dated rather than restated, because the measurement is what makes the 1024-token finding a fact; every decision and consequence below stands.
 - **Related:** FR-168, FR-172, FR-173, NFR-024, ADR-0002, ADR-0070;
   [ADR-0021](0021-research-is-dispatched-not-performed.md)
 

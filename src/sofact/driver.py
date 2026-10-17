@@ -235,7 +235,7 @@ def _next_action(
 			# ``readiness`` cannot separate the two ways a dimension is open — "nobody
 			# has answered" and "a model proposed and nobody attested" are both open, with
 			# different reason strings — so this selects ``propose-answers`` for either.
-			# On a reachable model the first iteration drafts all six, the second selects
+			# On a reachable model the first iteration drafts every dimension, the second selects
 			# this again and proposes nothing, and the run stops with the *action's own*
 			# message naming the verb that actually continues it (``attest``). Reading the
 			# reason strings to tell the two apart would be parsing prose to make a control
@@ -803,7 +803,7 @@ async def _perform(
 			#
 			# **The verb here is `attest`, not a resume.** This message used to name
 			# ``RESUME_VERB``, and that was wrong in the one case that actually reaches it:
-			# the ordinary first run on a reachable model drafts all six dimensions, the
+			# the ordinary first run on a reachable model drafts every dimension, the
 			# next iteration selects this action again, and the operator was told to
 			# ``build --resume`` — a command that re-selects this same action, proposes
 			# nothing again, and prints the same sentence. The run was not waiting on a

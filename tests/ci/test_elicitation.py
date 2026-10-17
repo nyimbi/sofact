@@ -15,6 +15,7 @@ invented one.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping
 
 import pytest
@@ -76,7 +77,7 @@ def all_answered(
 def test_the_question_order_is_the_declaration_order() -> None:
 	"""Order is the contract: ``next_open`` asks, and a test asserts, in this order."""
 	assert tuple(ElicitationDimension) == DECLARATION_ORDER
-	assert len(DIMENSIONS) == 6
+	assert len(DIMENSIONS) == 8
 
 
 def test_every_dimension_asks_a_question_and_states_a_floor() -> None:
@@ -95,6 +96,44 @@ def test_only_the_oracle_dimension_demands_a_checking_mechanism() -> None:
 	"""A marker list is only meaningful for the dimension that asks for an oracle."""
 	required = {spec.dimension for spec in DIMENSIONS if spec.required_markers}
 	assert required == {ElicitationDimension.ORACLE}
+
+
+def test_only_the_scale_dimension_demands_a_quantity() -> None:
+	"""The other content floor, pinned to its dimension for the same reason.
+
+	``required_markers`` is pinned above and ``requires_quantity`` is pinned here, because
+	each is a floor that a later refactor can drop silently: an unpinned field is a rule
+	with no reader, and a dimension that acquires one by accident is a floor nobody chose.
+	"""
+	required = {spec.dimension for spec in DIMENSIONS if spec.requires_quantity}
+	assert required == {ElicitationDimension.SCALE}
+
+
+def test_the_spec_rows_the_enum_dropped_are_now_present() -> None:
+	"""FR-064's table lists *Scale* and *Non-negotiables*; both are dimensions again.
+
+	They were absent with no record until ADR-0077, which is the failure a list not bound
+	to its authority produces. This test names them so a later edit that removes one has
+	to delete a test that says why it exists.
+	"""
+	assert ElicitationDimension.SCALE in DECLARATION_ORDER
+	assert ElicitationDimension.NON_NEGOTIABLES in DECLARATION_ORDER
+
+
+def test_the_constraints_question_no_longer_asks_about_non_negotiables() -> None:
+	"""The absorbed row, asserted on the text: a rewording reverts silently otherwise.
+
+	CONSTRAINT used to read "What are the non-negotiables — platform, stack, …?", so the
+	spec's separate *Non-negotiables* row was never asked and the gap read as a count
+	mismatch rather than a question that had swallowed another's.
+	"""
+	constraint = spec_for(ElicitationDimension.CONSTRAINT).question
+	non_negotiables = spec_for(ElicitationDimension.NON_NEGOTIABLES).question
+
+	assert "non-negotiable" not in constraint.lower()
+	assert "must not change" in non_negotiables.lower(), "the spec's Non-negotiables row"
+	assert "regulatory" in constraint.lower(), "the spec's Constraints row, restored"
+	assert constraint != non_negotiables, "two dimensions asking one question"
 
 
 def test_the_oracle_markers_name_real_mechanisms() -> None:
@@ -157,6 +196,34 @@ def test_a_thin_answer_reports_the_floor_it_missed() -> None:
 	assert not readiness.statuses[0].resolved
 	assert "at least 20 characters" in reasons[0]
 	assert "got 8" in reasons[0]
+
+
+def test_a_scale_with_no_quantity_does_not_resolve_and_one_with_a_quantity_does() -> None:
+	"""FR-064's *adversarial* clause, on the dimension that had no floor for it.
+
+	Both directions in one test on purpose. Asserting only the refusal would pass for a
+	floor that refuses everything; asserting only the pass would pass for no floor at all.
+	The inputs are literals rather than built from the bound, because a text computed from
+	the constant it tests moves with that constant and proves nothing.
+	"""
+	goal_id = uuid7str()
+	vague = "A lot of users, and as many as needed later on."
+	assert len(vague) > spec_for(ElicitationDimension.SCALE).min_chars, (
+		"the vague answer must clear the length floor, or this test passes for the wrong "
+		"reason and the quantity rule goes unexercised"
+	)
+
+	status = assess(
+		goal_id, (answered(ElicitationDimension.SCALE, vague, goal_id=goal_id),)
+	).statuses[DECLARATION_ORDER.index(ElicitationDimension.SCALE)]
+	assert not status.resolved
+	assert "names no quantity" in status.reasons[0]
+
+	for stated in ("About 200 users at launch.", "Roughly five thousand records."):
+		resolved = assess(
+			goal_id, (answered(ElicitationDimension.SCALE, stated, goal_id=goal_id),)
+		).statuses[DECLARATION_ORDER.index(ElicitationDimension.SCALE)]
+		assert resolved.resolved, f"{stated!r} names a quantity and must resolve"
 
 
 def test_confidence_is_not_an_oracle() -> None:
@@ -443,9 +510,33 @@ def test_polarity_follows_the_dimension() -> None:
 
 	assert kind_of[ElicitationDimension.BOUNDARY] is ClauseKind.NEGATIVE
 	assert kind_of[ElicitationDimension.FAILURE] is ClauseKind.NEGATIVE
+	assert kind_of[ElicitationDimension.NON_NEGOTIABLES] is ClauseKind.NEGATIVE
 	assert kind_of[ElicitationDimension.OUTCOME] is ClauseKind.POSITIVE
 	assert kind_of[ElicitationDimension.CONSUMER] is ClauseKind.POSITIVE
 	assert kind_of[ElicitationDimension.CONSTRAINT] is ClauseKind.POSITIVE
+	assert kind_of[ElicitationDimension.SCALE] is ClauseKind.POSITIVE
+
+
+def test_each_fixture_answer_yields_exactly_one_stem() -> None:
+	"""``test_the_oracle_dimension_contributes_no_clause``'s arithmetic rests on this.
+
+	That test asserts ``len(draft.stems) == len(DIMENSIONS) - 1``, which holds only while
+	every non-oracle answer splits into exactly one stem — a fixture property, not a
+	design one. An answer containing a ``;`` or a sentence boundary would split in two and
+	break a test whose name says nothing about stems, so the property is asserted where it
+	can be read.
+	"""
+	goal_id = uuid7str()
+	draft = draft_stems(goal_id, all_answered(goal_id))
+	counts = Counter(stem.derived_from for stem in draft.stems)
+
+	for spec in DIMENSIONS:
+		if spec.dimension is ElicitationDimension.ORACLE:
+			continue
+		assert counts[spec.dimension] == 1, (
+			f"{spec.dimension.value} produced {counts[spec.dimension]} stems; the fixture "
+			"answer must split into exactly one or the clause-count assertions move"
+		)
 
 
 def test_a_draft_splits_a_multi_statement_answer() -> None:

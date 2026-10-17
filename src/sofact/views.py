@@ -1297,13 +1297,22 @@ class ElicitationDimension(StrEnum):
 	written without it, and removing any one of them produces a specific, known
 	failure: no OUTCOME and the goal cannot be tested, no ORACLE and it cannot be
 	checked, no FAILURE and its blast radius is unbounded.
+
+	**Eight, and the count is not the spec's.** §4's FR-064 table lists seven rows;
+	``ORACLE`` is not one of them and ``CONSUMER`` is split out of the table's single
+	*Success* row, so no member order reproduces the table and two members here have no
+	row of their own. ``SCALE`` and ``NON_NEGOTIABLES`` are the reverse case — spec rows
+	the enum lacked until ADR-0077, with no record of their absence, which is what a
+	dimension list not bound to its authority by a test will do.
 	"""
 
 	OUTCOME = "outcome"
 	CONSUMER = "consumer"
 	BOUNDARY = "boundary"
 	ORACLE = "oracle"
+	SCALE = "scale"
 	CONSTRAINT = "constraint"
+	NON_NEGOTIABLES = "non_negotiables"
 	FAILURE = "failure"
 
 

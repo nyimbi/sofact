@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-12
+- **Amended by:** [ADR-0077](0077-the-interrogation-asks-eight-dimensions-and-scale-is-one-of-them.md) — the dimension list is **eight**, not six: the spec's *Scale* and *Non-negotiables* rows were absent, and *Non-negotiables* had been folded into the constraints question. The gate is unchanged and remains deterministic; what changed is what it asks and that `SCALE` carries a second content floor. The rest of this record stands.
 
 ## Context
 
@@ -30,7 +31,7 @@ The readiness gate is a **pure function of the recorded answers**, in
 `elicitation.py`, with no model involvement. `assess(goal_id, answers) -> Readiness`
 and `next_open(...)` are deterministic; the same answers always yield the same gate.
 
-Each of the six dimensions carries its own floor, expressed as a predicate over the
+Each of the eight dimensions carries its own floor, expressed as a predicate over the
 answer text — a `min_chars` bound, smallest where an honest answer is naturally terse:
 
 | Dimension | Floor |
@@ -39,14 +40,22 @@ answer text — a `min_chars` bound, smallest where an honest answer is naturall
 | `CONSUMER` | 15 chars |
 | `BOUNDARY` | 10 chars |
 | `ORACLE` | 40 chars **+** a required marker |
+| `SCALE` | 15 chars **+** a required quantity |
 | `CONSTRAINT` | 10 chars |
+| `NON_NEGOTIABLES` | 15 chars |
 | `FAILURE` | 15 chars |
 
-The `ORACLE` floor is the one that carries weight: ≥ 40 characters **and** at least one
+**Two dimensions carry a content floor, not only a length** (ADR-0077). The `ORACLE`
+floor is the one that carries weight: ≥ 40 characters **and** at least one
 of 27 markers naming a real checking mechanism — `test`, `property`, `query`, `digest`,
 `exit code`, `schema`, `http`, `latency`, and so on. Failing it says so in as many
 words: "does not name a checking mechanism … a statement of confidence is not an
 oracle".
+
+The `SCALE` floor is the second: ≥ 15 characters **and** a numeral or a magnitude word,
+because FR-064's own word is *adversarial* and "a lot of users" clears any length while
+naming nothing (ADR-0077). It is a separate field from the marker list on purpose — a marker
+list means "name a checking mechanism", which is `ORACLE`'s question and no other's.
 
 Two further properties keep the gate honest:
 
@@ -65,13 +74,13 @@ The model may **advise** on an answer (ADR-0008). It may not resolve a dimension
 ## Evidence
 
 - `tests/ci/conftest.py::GOOD_ANSWERS` clears every floor on the first attempt for all
-  six dimensions, and `answer_everything` walks the interrogation to completion. Both
+  eight dimensions, and `answer_everything` walks the interrogation to completion. Both
   are exercised end to end by `tests/ci/test_pipeline.py`.
 - The `ORACLE` floor exists because of a specific failure: "I'll know it when I see
   it" is a description of confidence, not a checking mechanism, and a contract cannot
   be built on one. The dimension's own rationale text says so.
-- Debugging `answer_everything` showed the gate behaves as specified: after six
-  answers `open_question` returns `None` on the *next* call, i.e. readiness is
+- Debugging `answer_everything` showed the gate behaves as specified: after the last
+  answer `open_question` returns `None` on the *next* call, i.e. readiness is
   re-derived rather than tracked, and the helper had to check once more after the
   loop.
 

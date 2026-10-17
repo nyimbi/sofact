@@ -778,7 +778,8 @@ class TestDispatchPlan:
 		records = await service.dispatch_plan(plan.id)
 		run = [plan.step_by_id(record.step_id) for record in records]
 		kinds = [step.kind.value if step is not None else None for step in run]
-		assert kinds == ["bootstrap", "operation", "operation", "operation"]
+		# Four operations: one per pair of the contract's seven clauses, rounded up.
+		assert kinds == ["bootstrap", "operation", "operation", "operation", "operation"]
 		assert records[0].outcome is StepOutcome.COMPLETED
 		assert all(record.outcome is StepOutcome.FAILED for record in records[1:])
 		ran = {record.step_id for record in records}
@@ -801,7 +802,7 @@ class TestDispatchPlan:
 	async def test_max_steps_caps_the_run(self, home: Path, tmp_path: Path) -> None:
 		service, plan = await plan_and_service(home, tmp_path, "complete")
 		records = await service.dispatch_plan(plan.id, max_steps=2)
-		assert len(records) == 4  # the first wave plus a whole three-step wave
+		assert len(records) == 5  # the first wave plus a whole four-step wave
 		assert len(records) < len(plan.steps)
 
 	async def test_a_concurrent_wave_is_actually_concurrent(
@@ -820,7 +821,7 @@ class TestDispatchPlan:
 		start = time.monotonic()
 		concurrent = await service.dispatch_plan(plan.id, max_steps=4, concurrent=True)
 		concurrent_elapsed = time.monotonic() - start
-		assert len(sequential) == len(concurrent) == 4
+		assert len(sequential) == len(concurrent) == 5
 		assert all(record.outcome is StepOutcome.COMPLETED for record in concurrent)
 		assert concurrent_elapsed < sequential_elapsed * 0.75
 
@@ -2081,7 +2082,7 @@ class TestTheClauseClassification:
 		classification = await registered.current_classification()
 
 		assert classification is not None
-		assert len(classification.classifications) == 5, "one verdict per drafted clause"
+		assert len(classification.classifications) == 7, "one verdict per drafted clause"
 		assert all(c.verdict is ResearchVerdict.VALIDATED for c in classification.classifications)
 		assert all(c.evidence == ("S01",) for c in classification.classifications)
 		assert Counter(kinds(registered))["research.classified"] == 1
@@ -2172,7 +2173,7 @@ class TestTheClauseClassification:
 		checks = {check.name: check for check in await registered.classification_gate()}
 
 		assert checks["every-clause-is-classified"].passed is False
-		assert "4 clause(s) unclassified" in checks["every-clause-is-classified"].detail
+		assert "6 clause(s) unclassified" in checks["every-clause-is-classified"].detail
 
 	async def test_the_goal_names_the_clauses_and_their_ids(self) -> None:
 		"""A goal that said "classify the clauses" would let the producer choose the subject."""

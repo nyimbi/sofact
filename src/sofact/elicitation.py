@@ -1,8 +1,9 @@
 """P0 — elicitation: the questions, and the deterministic gate that ends it.
 
 The gate is deliberately *not* the model's judgement. Each dimension has a
-machine-checkable floor — a length, and for the oracle dimension a requirement that
-the answer name an actual checking mechanism. An answer that clears the floor is not
+machine-checkable floor — a length, and where the dimension's own question demands it a
+content floor: the oracle dimension must name an actual checking mechanism, and the
+scale dimension must name a quantity. An answer that clears the floor is not
 thereby *true*; it is only specific enough to be worked with. That distinction is the
 whole design, and it is why the model here is an advisor and not a judge
 (ADR-0007, ADR-0008).
@@ -43,6 +44,26 @@ __all__ = [
 MIN_STEM_CHARS = 12
 """A clause stem shorter than this is a fragment, not a requirement."""
 
+_QUANTITY_MARKERS: tuple[str, ...] = (
+	"dozen",
+	"tens",
+	"hundred",
+	"hundreds",
+	"thousand",
+	"thousands",
+	"million",
+	"millions",
+	"billion",
+	"billions",
+)
+"""Magnitude words that name a quantity without a numeral.
+
+Bare ``"ten"`` is deliberately absent: it is a substring of *often*, *written* and
+*threaten*, so matching it would pass an answer that names no quantity at all — and a
+floor that can be cleared by an unrelated word is the floor failing open, which is the
+one failure a gate may not have.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class DimensionSpec:
@@ -53,6 +74,15 @@ class DimensionSpec:
 	rationale: str
 	min_chars: int
 	required_markers: tuple[str, ...] = field(default=())
+	requires_quantity: bool = False
+	"""Whether a resolving answer must name a quantity (FR-064).
+
+	A second *content* floor beside :attr:`required_markers`, and separate from it on
+	purpose: a marker list asks "does this name a checking mechanism", which is the
+	oracle dimension's question and no other's. Scale's question is "how many", and an
+	answer of "a lot of users" clears any length while naming nothing — which is the
+	clarifying pleasantry FR-064 says elicitation must not accept.
+	"""
 
 
 DIMENSIONS: tuple[DimensionSpec, ...] = (
@@ -123,13 +153,34 @@ DIMENSIONS: tuple[DimensionSpec, ...] = (
 		),
 	),
 	DimensionSpec(
+		dimension=ElicitationDimension.SCALE,
+		question="How many users, entities or records? What is the growth expectation?",
+		rationale=(
+			"R19: unbounded goals produce unbounded platforms, and §1.3's envelope cannot "
+			"bound a goal whose size was never stated. A scale with no quantity is the "
+			"ambiguity this dimension exists to remove."
+		),
+		min_chars=15,
+		requires_quantity=True,
+	),
+	DimensionSpec(
 		dimension=ElicitationDimension.CONSTRAINT,
-		question="What are the non-negotiables — platform, stack, dependencies, time?",
+		question="What regulatory, data-residency, latency, budget or integration constraints apply?",
 		rationale=(
 			"Constraints are the difference between a design and a preference. Recording "
 			"them up front prevents the builder from silently choosing for you."
 		),
 		min_chars=10,
+	),
+	DimensionSpec(
+		dimension=ElicitationDimension.NON_NEGOTIABLES,
+		question="What must not change or be touched?",
+		rationale=(
+			"What must not break is a different question from what the stack is, and folding "
+			"it into the constraints question is how it went unasked. It bounds the blast "
+			"radius of every other answer."
+		),
+		min_chars=15,
 	),
 	DimensionSpec(
 		dimension=ElicitationDimension.FAILURE,
@@ -172,6 +223,21 @@ def spec_for(dimension: ElicitationDimension) -> DimensionSpec:
 	return _BY_DIMENSION[dimension]
 
 
+def _names_a_quantity(text: str) -> bool:
+	"""Whether ``text`` names a quantity, by a numeral or a magnitude word.
+
+	Deliberately loose about *what* the quantity counts and strict about there being
+	one: "a few hundred users" and "200 records" both pass, and "a lot of users" fails.
+	Reading a magnitude out of prose is not reading a *number* — nothing here parses a
+	bound, and :data:`~sofact.views.DimensionBound` is never built from an answer, which
+	would be the factory inventing a figure the operator never gave (FR-065).
+	"""
+	lowered = text.lower()
+	return any(char.isdigit() for char in text) or any(
+		marker in lowered for marker in _QUANTITY_MARKERS
+	)
+
+
 def _reasons(spec: DimensionSpec, text: str) -> tuple[str, ...]:
 	"""Why ``text`` does not resolve ``spec``, or an empty tuple if it does."""
 	stripped = text.strip()
@@ -188,6 +254,12 @@ def _reasons(spec: DimensionSpec, text: str) -> tuple[str, ...]:
 				"does not name a checking mechanism; expected something like one of: "
 				f"{preview}, … (a statement of confidence is not an oracle)",
 			)
+	if spec.requires_quantity and not _names_a_quantity(stripped):
+		reasons.append(
+			'names no quantity; a scale of "a lot" or "as many as needed" is the '
+			"ambiguity this dimension exists to remove, and the envelope cannot bound a "
+			"goal whose size was never stated (FR-064, R19)",
+		)
 	return tuple(reasons)
 
 
@@ -277,11 +349,19 @@ _STEM_KIND: dict[ElicitationDimension, ClauseKind] = {
 	ElicitationDimension.OUTCOME: ClauseKind.POSITIVE,
 	ElicitationDimension.CONSUMER: ClauseKind.POSITIVE,
 	ElicitationDimension.CONSTRAINT: ClauseKind.POSITIVE,
+	ElicitationDimension.SCALE: ClauseKind.POSITIVE,
 	ElicitationDimension.BOUNDARY: ClauseKind.NEGATIVE,
+	ElicitationDimension.NON_NEGOTIABLES: ClauseKind.NEGATIVE,
 	ElicitationDimension.FAILURE: ClauseKind.NEGATIVE,
 }
 """ORACLE is absent on purpose: how a requirement will be checked is metadata that
-drives oracle assignment, not a requirement in its own right."""
+drives oracle assignment, not a requirement in its own right.
+
+SCALE is *positive* rather than a bound: the operator's stated size is an obligation the
+system must meet ("handle 5,000 records"), and a negative reading of the same words would
+assert only that some unspecified limit is not exceeded. NON_NEGOTIABLES is negative for
+BOUNDARY's and FAILURE's reason — what must not change is a bound on the blast radius.
+"""
 
 
 def draft_stems(

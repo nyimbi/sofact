@@ -445,6 +445,18 @@ clarifying pleasantries. Specifically, for each intent clause it must resolve:
 | **Non-negotiables** | What must not change or be touched? |
 | **Failure** | What does unacceptable failure look like? What is the cost of one? |
 
+The table is the authority, and **nothing in the build compares the two**: no test reads
+this table, which is how *Scale* and *Non-negotiables* stayed absent from the
+interrogation with no record (ADR-0077). A test that reads it is a separate unit; until
+then a row added here is a row a reader must check by hand. **The implementation's list
+is not the table's, and it is longer** (ADR-0077): `CONSUMER` is
+*Success*'s second question — "who observes it?" — asked separately because the observer
+is what an oracle is written against, and `ORACLE` carries FR-067's `verification_method`
+as its own question rather than a column on a clause. *Scale*'s answer becomes a clause
+whose oracle is prose, so it is **declared and unverified** — `execution.run_all` skips a
+clause with no `command_hint` and P6 records it `INSUFFICIENT` — which is R19's second
+half built as a question and not as a bound.
+
 **FR-065** The elicitation must **terminate**. It must converge when every intent
 clause is falsifiable and the §1.3 envelope dimensions are determined, and it must
 report any dimension it could not resolve as an explicit risk rather than

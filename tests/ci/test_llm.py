@@ -266,8 +266,8 @@ async def test_an_exhausted_budget_names_the_budget_and_not_the_channel(
 async def test_the_default_budget_clears_the_deepest_prompt_the_product_writes() -> None:
 	"""The shipped cap has to be enough for P0, which is the front door's own work.
 
-	It was 1024, and two of P0's six dimension prompts spent all of it inside the
-	reasoning channel on the default model. So the default could not finish the
+	It was 1024, and two of the six dimension prompts P0 then asked spent all of it
+	inside the reasoning channel on the default model. So the default could not finish the
 	interrogation ``sofact build`` opens with, and the operator's first experience of
 	the front door was a refusal. The number here is the measured floor — the deepest
 	prompt answered at 4096 with room — pinned so a later tidy-up cannot lower it

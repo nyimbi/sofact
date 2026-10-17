@@ -371,7 +371,11 @@ class TestTheServiceRecordsTheAudit:
 		# count. Asserting against ``contract.clauses`` here would fail against correct
 		# code, which is how this test found the boundary rather than assumed it.
 		probed, skipped = probe_targets(contract)
-		assert len(skipped) == 2, "the interrogation always derives BOUNDARY and FAILURE"
+		# Derived from the contract rather than a literal: the count moved when FR-064
+		# added NON_NEGOTIABLES, and the property the line below asserts — skipped *is*
+		# the negative set — is the one that matters, so the number here is only a
+		# sanity check that the fixture derives both kinds at all.
+		assert skipped, "the fixture's interrogation must derive at least one negative clause"
 		assert {s.clause_id for s in skipped} == {
 			c.id for c in contract.clauses if c.kind is ClauseKind.NEGATIVE
 		}, "and those are the negative ones"
