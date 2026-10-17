@@ -355,7 +355,7 @@ rule asks whether a requirement is discharged, and this document has already sta
 it does not ask whether it was discharged correctly the first time. The tally is therefore
 `101/25/0/0` **unchanged** over **126** rows.
 
-**The two gaps the same walk found are open, and neither is a verdict to move.** Both
+**The two gaps the same walk found: one is closed and one is open, and neither is a verdict to move.** Both
 are reachable from the front door at the shipped defaults, and neither is a wording defect.
 Neither is an unbuilt half of the row it sits under either, which is why the tally stays
 where it is rather than being adjusted by work that did not discharge it:
@@ -381,10 +381,24 @@ where it is rather than being adjusted by work that did not discharge it:
   waits and not for `FAILED`, so the loop above is what the operator is told to run. Whether
   a resume can act is a fact about *why* the run failed, and the driver holds it.
 
-Neither gap is fixed here. Both need a design decision — what "revise the clauses and
-re-elicit" is as a verb, and whether a `FAILED` run carries the action it failed on — and
-neither is a wording change. They are recorded because a walk that stops at the first
-refusal it can explain leaves the next operator to find the second one.
+**The first is now closed, and the row's own text is what a reader would have been
+misled by.** Commit 9ed8bce added the recovery verb the note said did not exist:
+`sofact elicit` revises one dimension (or walks them), re-answering supersedes the
+earlier answer, and the next run drafts fresh stems from it — so the contradicted
+clause is gone rather than argued with. The same commit added
+`DriverTerminal.RETURNED_TO_P0`, so FR-068's stop is reported as the terminal state it
+is rather than as `FAILED`, and `next_human_verb` names `sofact elicit` instead of a
+resume that re-selected the action that refused. Two details in it are load-bearing and
+both were measured: `_returned_to_p0` reads the stop off the *classification* (data)
+rather than off the refusal's message text, and it clears only when **both** currency
+facts hold — the draft must descend from the answers on the log now *and* the
+classification must name that draft's clauses — because after a revision the latest
+draft is still the old one, so either check alone left a run stopping against a premise
+the operator had already restated. The **second gap is still open**: a `FAILED` run's
+`next_human_verb` is `RESUME_VERB` for every failure, including the ones a resume cannot
+act on. It needs a design decision — whether a `FAILED` run carries the action it failed
+on — and it is not a wording change. It is recorded because a walk that stops at the
+first refusal it can explain leaves the next operator to find the second one.
 
 The finding worth carrying forward is about evidence rather than about these bugs: **1987
 passing tests said nothing about whether `sofact build` runs**, because no test drives the
