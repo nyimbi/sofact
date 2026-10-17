@@ -474,6 +474,20 @@ and corrupts P2/P3.
 clause with no verification method is not a clause; it is a wish and must be
 returned to the operator.
 
+**Built (ADR-0078).** The two halves are discharged in different places, and the split is
+the requirement's own: "a clause with no verification method is not a clause" is enforced
+at `Contract.from_draft`, which refuses a stem with no oracle and names it, so no wish can
+reach a clause; and `verification_method` lives on the P2 `Requirement`, which is what the
+*Oracle* row of FR-064's table above means by carrying it "as its own question rather than
+a column on a clause". `confidence` is `Clause.confidence`, **derived from the clause's own
+oracle** rather than filled in: `covered` (the oracle runs and is strong enough), `weak`
+(it runs and is too narrow — rank 6–7, FR-103's "sample, not coverage"), or `stated` (no
+command, FR-108's ground-truth debt). A producer-authored number is refused because FR-140
+makes the producer's account of its own work inadmissible, and a stored field would move
+the `Contract.content_hash` FR-139 pins. It quantifies how far a clause is **established**,
+not how likely it is to be what the operator meant — §2.3's ground truth stays the
+operator's reading at P2.
+
 **Design note.** This is the phase that determines whether the product works at
 all. §2.3 says the operator's review of the specification is the only ground truth
 for correctness of intent. If elicitation produced a plausible-sounding but

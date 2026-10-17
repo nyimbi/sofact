@@ -33,12 +33,14 @@ an authoring surface, and a module whose import list is one package deep cannot 
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Final
 
 from sofact.views import (
 	UNATTESTED_MARKER,
 	AnswerProvenance,
+	ClauseConfidence,
 	ClauseVerdictProvenance,
 	Contract,
 	ElicitationAnswer,
@@ -52,6 +54,7 @@ from sofact.views import (
 )
 
 __all__ = [
+	"CONFIDENCE_GLOSS",
 	"PRODUCT_SPEC_FILENAME",
 	"PRODUCT_SPEC_HEADINGS",
 	"annotate",
@@ -87,6 +90,24 @@ _EMPTY: Final[str] = "_None._"
 
 A sentence rather than an empty body, because a heading with nothing under it reads as a
 document that lost a section.
+"""
+
+CONFIDENCE_GLOSS: Final[dict[ClauseConfidence, str]] = {
+	ClauseConfidence.COVERED: "an oracle runs and is strong enough to establish it",
+	ClauseConfidence.WEAK: (
+		"an oracle runs and is too weak to establish it — it measures something narrower "
+		"than the clause (FR-103's rank 6–7, 'sample, not coverage')"
+	),
+	ClauseConfidence.STATED: (
+		"no command: the clause is stated and nothing checks it (FR-108 ground-truth debt)"
+	),
+}
+"""The sentence printed beside each :class:`~sofact.views.ClauseConfidence` (FR-067).
+
+A mapping rather than a match at the print site so that a new member cannot be added
+without a gloss: the ``KeyError`` is the check, and the vocabulary is the repository's own
+— *too weak to establish* is :attr:`Contract.uncovered_clauses`' wording, and *sample, not
+coverage* is FR-103's.
 """
 
 
@@ -167,6 +188,7 @@ def annotate(
 				research=tuple(research),
 				oracle_class=clause.oracle.oracle_class if clause is not None else None,
 				oracle_rank=clause.oracle.rank if clause is not None else None,
+				clause_confidence=clause.confidence if clause is not None else None,
 				module_id=modules.get(first) if first is not None else None,
 				exceeds_claim_ids=tuple(dict.fromkeys(claim_ids)),
 			)
@@ -202,6 +224,16 @@ def _annotation_lines(
 		lines.append(
 			"  - oracle: none — this requirement traces to no clause in the contract, so "
 			"nothing checks it"
+		)
+	if annotation.clause_confidence is not None:
+		lines.append(
+			f"  - confidence: {annotation.clause_confidence.value} — "
+			f"{CONFIDENCE_GLOSS[annotation.clause_confidence]}"
+		)
+	else:
+		lines.append(
+			"  - confidence: none — no clause carries this requirement, so there is nothing "
+			"to read a confidence from"
 		)
 	if annotation.module_id is not None:
 		lines.append(f"  - module: `{annotation.module_id}`")
@@ -381,6 +413,22 @@ def render_product_specification(document: ProductSpecificationDocument) -> str:
 			f"(weakest) over {len(ranks)} requirement(s). Rank 1 is a property, rank 7 a "
 			"golden file; a rank above the covering maximum is an intention rather than a "
 			"check, and the delivery report names those as unverified."
+		)
+		confidences = Counter(
+			annotation.clause_confidence
+			for annotation in document.requirements
+			if annotation.clause_confidence is not None
+		)
+		lines.append(
+			"Clause confidence (FR-067): "
+			+ ", ".join(
+				f"{count} {member.value}"
+				for member, count in ((m, confidences[m]) for m in ClauseConfidence)
+				if count
+			)
+			+ f" over {sum(confidences.values())} requirement(s) tracing to a clause. "
+			"A rank range alone reads as strong; `stated` is a clause nothing checks and "
+			"`weak` one whose oracle measures something narrower than the clause."
 		)
 	else:
 		lines.append(

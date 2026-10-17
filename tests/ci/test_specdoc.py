@@ -28,6 +28,7 @@ the P0 refusal would produce.
 from __future__ import annotations
 
 import inspect
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,7 @@ from synthetic import (
 	synthetic_service,
 )
 
+from sofact._uuid7 import uuid7str
 from sofact.elicitation import DIMENSIONS
 from sofact.llm import LlmClient
 from sofact.service import FactoryService
@@ -50,8 +52,16 @@ from sofact.specdoc import (
 )
 from sofact.views import (
 	UNATTESTED_MARKER,
+	ClauseConfidence,
+	ClauseKind,
+	ClauseStem,
+	Contract,
 	ElicitationDimension,
+	OracleClass,
+	OracleDeclaration,
 	ProductSpecificationDocument,
+	SpecificationDraft,
+	now,
 )
 
 MODEL_PROPOSAL = (
@@ -112,6 +122,40 @@ async def a_document(
 	contract = await service.contract(goal.id)
 	await specify_and_approve(service, contract.id)
 	return service, await service.write_specification(contract.id)
+
+
+def _a_stranger_contract(contract: Contract) -> Contract:
+	"""A contract carrying none of ``contract``'s clause ids.
+
+	Same shape, different stems, so every lookup in :func:`~sofact.specdoc.annotate` misses
+	and the annotation records the absence rather than a default. Built through
+	``Contract.from_draft`` so the helper cannot produce a contract the real path could not.
+	"""
+	stems = tuple(
+		ClauseStem(
+			id=uuid7str(),
+			statement=f"a stranger's clause {n}",
+			kind=ClauseKind.POSITIVE,
+			derived_from=ElicitationDimension.OUTCOME,
+		)
+		for n in range(len(contract.clauses))
+	)
+	draft = SpecificationDraft(
+		id=uuid7str(),
+		goal_id=contract.goal_id,
+		created_at=now(),
+		stems=stems,
+	)
+	return Contract.from_draft(
+		draft,
+		{
+			stem.id: OracleDeclaration(
+				oracle_class=OracleClass.CONTRACT,
+				description="a stranger's oracle, naming no command",
+			)
+			for stem in stems
+		},
+	)
 
 
 async def an_unattested_document(
@@ -406,6 +450,87 @@ async def test_the_oracle_rank_reaches_the_document(tmp_path: Path) -> None:
 	rendered = render_product_specification(document)
 	assert "## Oracle strength" in rendered
 	assert "rank 1" in rendered
+
+
+async def test_the_clause_confidence_reaches_the_document(tmp_path: Path) -> None:
+	"""FR-067: the quantification is printed, or it quantifies nothing a reader sees.
+
+	The rank range alone reads as strength — "rank 1 to rank 7 over 7 requirements" — while
+	some of those clauses may be ones nothing checks. The section says both.
+	"""
+	_, document = await a_document(tmp_path / "home", tmp_path)
+	assert all(a.clause_confidence is not None for a in document.requirements)
+	rendered = render_product_specification(document)
+
+	for annotation in document.requirements:
+		assert annotation.clause_confidence is not None
+		assert f"  - confidence: {annotation.clause_confidence.value} — " in rendered
+
+	tally = next(line for line in rendered.splitlines() if line.startswith("Clause confidence"))
+	counts = Counter(a.clause_confidence for a in document.requirements)
+	assert f"{len(document.requirements)} stated over" in tally, (
+		"the fixture's oracles are all prose, so every clause is `stated` and the section "
+		f"must say so; it reads {tally!r}"
+	)
+	assert tally.count("covered") == 0 and counts[ClauseConfidence.COVERED] == 0, (
+		"a member absent from the document must not be named in its tally"
+	)
+
+
+async def test_a_requirement_tracing_to_no_clause_prints_no_confidence(tmp_path: Path) -> None:
+	"""The absent case, printed rather than defaulted.
+
+	Reached by annotating a specification against a contract that does not carry its
+	clauses — the real shape of a re-drafted contract — rather than by an empty
+	``clause_ids``, which ``Requirement._traces_to_something`` makes unrepresentable. The
+	reachable state is the lookup miss, and a default here would print a confidence measured
+	against nothing.
+	"""
+	service, document = await a_document(tmp_path / "home", tmp_path)
+	state = await service.state()
+	contract = state.contract(document.contract_id)
+	assert contract is not None
+	specification = state.latest_specification(contract.id)
+	assert specification is not None
+
+	stranger = _a_stranger_contract(contract)
+	annotations = annotate(
+		specification,
+		stranger,
+		await service.latest_draft(contract.goal_id),
+		state.answers_for(contract.goal_id),
+		frozenset(),
+	)
+	assert annotations and all(a.clause_confidence is None for a in annotations)
+
+	rendered = render_product_specification(
+		document.model_copy(update={"requirements": annotations})
+	)
+	assert "  - confidence: none — no clause carries this requirement" in rendered
+	assert "Nothing in this specification can be checked by a machine." in rendered
+	assert "Clause confidence (FR-067)" not in rendered, (
+		"a tally of zero would print an empty list where the section already says the "
+		"stronger thing: no requirement traces to a clause at all"
+	)
+
+
+async def test_every_confidence_member_has_a_gloss(tmp_path: Path) -> None:
+	"""A member with no sentence would raise at the print site, so the mapping is total.
+
+	Canaried the other way too: the test asserts the printed glosses are the ones in the
+	mapping, so a member added to the enum without an entry fails here rather than when a
+	document happens to contain that state.
+	"""
+	from sofact.specdoc import CONFIDENCE_GLOSS
+
+	assert set(CONFIDENCE_GLOSS) == set(ClauseConfidence)
+	assert len(set(CONFIDENCE_GLOSS.values())) == len(ClauseConfidence), (
+		"two members sharing a sentence means one of them is not being described"
+	)
+	assert all(gloss.strip() and gloss[0].islower() for gloss in CONFIDENCE_GLOSS.values()), (
+		"each gloss is printed after an em dash mid-sentence, so a capital or a blank reads "
+		"as a second sentence"
+	)
 
 
 # --------------------------------------------------------------------------- #

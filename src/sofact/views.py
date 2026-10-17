@@ -89,6 +89,7 @@ __all__ = [
 	"ClaimKind",
 	"Clause",
 	"ClauseClassification",
+	"ClauseConfidence",
 	"ClauseKind",
 	"ClauseStem",
 	"ClauseVerdict",
@@ -1678,6 +1679,7 @@ class RequirementAnnotation(View):
 	research: tuple[ClauseVerdictProvenance, ...] = ()
 	oracle_class: OracleClass | None = None
 	oracle_rank: int | None = None
+	clause_confidence: ClauseConfidence | None = None
 	module_id: UUID7 | None = None
 	exceeds_claim_ids: tuple[UUID7, ...] = ()
 
@@ -2023,6 +2025,20 @@ class ClauseKind(StrEnum):
 	NEGATIVE = "negative"
 
 
+class ClauseConfidence(StrEnum):
+	"""How far a clause is established, read from the oracle it carries (FR-067)."""
+
+	COVERED = "covered"
+	"""The oracle runs and is strong enough to establish the clause (``oracle.covers``)."""
+
+	WEAK = "weak"
+	"""The oracle runs and is too weak to establish the clause — it measures the wrong
+	thing (FR-103's "sample, not coverage", ranks 6–7)."""
+
+	STATED = "stated"
+	"""No command: an intention. The clause is named and nothing checks it (FR-108)."""
+
+
 class ClauseStem(View):
 	"""A clause before an oracle has been assigned.
 
@@ -2123,6 +2139,33 @@ class Clause(View):
 	statement: NonEmptyStr
 	kind: ClauseKind
 	oracle: OracleDeclaration
+
+	@property
+	def confidence(self) -> ClauseConfidence:
+		"""How far this clause is established, derived from its oracle and never asserted.
+
+		FR-067 asks that ambiguity be *quantified*. It does not ask that anyone be asked to
+		quantify it, and the difference is the whole design: a ``confidence`` a producer
+		fills in is a self-assessment, and this tree refuses self-assessments everywhere
+		(ADR-0007/0008, and ``test_confidence_is_not_an_oracle`` is the guard that a stated
+		confidence is not an oracle). What is quantified here is a fact the log already
+		holds — whether the oracle *runs*, and whether it is *strong enough* — which are
+		:attr:`OracleDeclaration.is_executable` and :attr:`OracleDeclaration.covers`.
+
+		Three values rather than a number because the underlying facts are three distinct
+		states, and a score would blur the one that matters: ``WEAK`` is not a low
+		``COVERED``, it is a *different* defect from ``STATED`` — one runs and measures the
+		wrong thing, the other measures nothing — and a 0.6 would make them the same number.
+
+		A plain property rather than a :func:`~pydantic.computed_field`, which is
+		:attr:`MachineEnvelope.ok`'s device for a JSON caller. ``Clause``'s readers are
+		Python, and a computed field would enter ``model_dump`` and move
+		:attr:`Contract.content_hash` — the pinned FR-139 subject — exactly as a stored
+		field would.
+		"""
+		if not self.oracle.is_executable:
+			return ClauseConfidence.STATED
+		return ClauseConfidence.COVERED if self.oracle.covers else ClauseConfidence.WEAK
 
 
 class SpecificationDraft(View):

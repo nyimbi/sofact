@@ -18,6 +18,8 @@ from sofact.contract import suggest_oracle
 from sofact.views import (
 	GENESIS_HASH,
 	AutonomyLevel,
+	Clause,
+	ClauseConfidence,
 	ClauseKind,
 	ClauseStem,
 	CompletionClaim,
@@ -144,6 +146,148 @@ class TestAnOracleCoversItsClause:
 		assert not OracleDeclaration(
 			oracle_class=OracleClass.EXAMPLE, description="d", command_hint="true"
 		).covers
+
+
+class TestAClauseConfidenceIsReadFromItsOracle:
+	"""FR-067: ambiguity quantified per clause, and quantified from a fact rather than asked.
+
+	The whole design is in what the property *cannot* see. A ``confidence`` a producer fills
+	in is a self-assessment, and this tree refuses those everywhere — ``test_confidence_is_not_
+	an_oracle`` is the guard one layer up. What is read here is a fact the log already holds.
+	"""
+
+	@pytest.mark.parametrize(
+		("oracle_class", "command", "expected"),
+		[
+			(OracleClass.PROPERTY, "true", ClauseConfidence.COVERED),
+			(OracleClass.STATE_MACHINE, "true", ClauseConfidence.COVERED),
+			(OracleClass.CONTRACT, "true", ClauseConfidence.COVERED),
+			(OracleClass.METAMORPHIC, "true", ClauseConfidence.COVERED),
+			(OracleClass.SCHEMA, "true", ClauseConfidence.COVERED),
+			(OracleClass.EXAMPLE, "true", ClauseConfidence.WEAK),
+			(OracleClass.GOLDEN, "true", ClauseConfidence.WEAK),
+			(OracleClass.PROPERTY, None, ClauseConfidence.STATED),
+			(OracleClass.STATE_MACHINE, None, ClauseConfidence.STATED),
+			(OracleClass.CONTRACT, None, ClauseConfidence.STATED),
+			(OracleClass.METAMORPHIC, None, ClauseConfidence.STATED),
+			(OracleClass.SCHEMA, None, ClauseConfidence.STATED),
+			(OracleClass.EXAMPLE, None, ClauseConfidence.STATED),
+			(OracleClass.GOLDEN, None, ClauseConfidence.STATED),
+		],
+	)
+	def test_confidence_is_the_whole_rank_by_runnability_grid(
+		self, oracle_class: OracleClass, command: str | None, expected: ClauseConfidence
+	) -> None:
+		"""Every class crossed with a command, asserting *which* state each cell is.
+
+		Written as the grid rather than as ``is_executable and rank <= MAX`` because the
+		expression restated is the expression untested: this asserts the classification, so
+		a boundary moved by one rank fails on the two cells it moved rather than passing
+		everywhere the formula was copied to.
+		"""
+		clause = Clause(
+			id=uuid7str(),
+			statement="the reminder is sent once",
+			kind=ClauseKind.POSITIVE,
+			oracle=OracleDeclaration(
+				oracle_class=oracle_class, description="d", command_hint=command
+			),
+		)
+
+		assert clause.confidence is expected
+
+	def test_weak_is_a_state_of_its_own_and_not_a_low_covered(self) -> None:
+		"""The third member, and the reason the enum has three rather than two.
+
+		``WEAK`` is an oracle that *runs* and measures something narrower than the clause —
+		FR-103's rank 6–7, "sample, not coverage". It is a different defect from ``STATED``,
+		which measures nothing at all, and a boolean or a score would have made them the
+		same reading.
+		"""
+		weak = Clause(
+			id=uuid7str(),
+			statement="the report shows the right total",
+			kind=ClauseKind.POSITIVE,
+			oracle=_oracle(OracleClass.EXAMPLE),
+		)
+
+		assert weak.oracle.is_executable, "the distinguishing fact: it does run"
+		assert not weak.oracle.covers, "and it is still not coverage"
+		assert weak.confidence is ClauseConfidence.WEAK
+
+	def test_a_statement_claiming_confidence_does_not_move_it(self) -> None:
+		"""A self-report cannot influence a derived reading, which is the point of deriving.
+
+		FR-067's word is *quantified*, not *asserted*: the clause below says in its own
+		statement that it is certainly satisfied, and the reading is unchanged.
+		"""
+		loud = Clause(
+			id=uuid7str(),
+			statement="this is certainly satisfied, confidence 1.0, no doubt whatsoever",
+			kind=ClauseKind.POSITIVE,
+			oracle=_oracle(OracleClass.PROPERTY, command=None),
+		)
+		quiet = Clause(
+			id=uuid7str(),
+			statement="the reminder is sent once",
+			kind=ClauseKind.POSITIVE,
+			oracle=_oracle(OracleClass.PROPERTY, command=None),
+		)
+
+		assert loud.confidence is quiet.confidence is ClauseConfidence.STATED
+
+	def test_the_confidence_is_a_plain_property_and_not_a_serialised_field(self) -> None:
+		"""It must not enter ``model_dump``, because ``Contract.content_hash`` hashes that.
+
+		The literal set, not ``set(Clause.model_fields)``: a ``@computed_field`` appears in
+		``model_dump`` and *not* in ``model_fields``, so the ``model_fields`` spelling would
+		pass a computed field while claiming to have tested it.
+		"""
+		clause = Clause(
+			id=uuid7str(),
+			statement="the reminder is sent once",
+			kind=ClauseKind.POSITIVE,
+			oracle=_oracle(),
+		)
+
+		assert set(clause.model_dump(mode="json")) == {"id", "statement", "kind", "oracle"}
+
+	def test_a_contracts_content_hash_is_the_literal_it_was(self) -> None:
+		"""FR-139's integrity subject, pinned as a literal.
+
+		Every other hash assertion in the suite compares a value against itself, so a field
+		added to ``Clause`` would satisfy all of them and silently invalidate the
+		``contract_hash`` recorded in every ledger row already written. This is the pin that
+		makes that visible. Ids are literal because the hash covers the clause set and a
+		``uuid7str()`` fixture would make the expected value move with the test.
+		"""
+		stem = ClauseStem(
+			id="01a092ed-c120-722c-8d66-cb25c6d3b009",
+			statement="the invariant holds under load",
+			kind=ClauseKind.POSITIVE,
+			derived_from=ElicitationDimension.OUTCOME,
+		)
+		draft = SpecificationDraft(
+			id="01a092ed-c120-722c-8d66-cb25c6d3b010",
+			goal_id="01a092ed-c120-722c-8d66-cb25c6d3b011",
+			created_at=now(),
+			stems=(stem,),
+		)
+		contract = Contract.from_draft(
+			draft,
+			{
+				stem.id: OracleDeclaration(
+					oracle_class=OracleClass.PROPERTY,
+					description="the invariant holds",
+					command_hint="pytest tests/test_invariant.py",
+				)
+			},
+			version=1,
+		)
+
+		assert contract.content_hash == (
+			"b4979366dffd189c1daf97b9970d7513d105bd038b5363a8448eb86992b00ce9"
+		)
 
 
 class TestAnOracleIsHeldOutOrNot:

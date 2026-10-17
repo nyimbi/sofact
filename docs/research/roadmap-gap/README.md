@@ -48,7 +48,7 @@ verdicts are the part that matters and the ones closed since carry their date.
 | FR-064 adversarial elicitation, 8 dimensions | **Implemented** (2026-10-17, ADR-0077) | `ElicitationDimension` (`views.py:1293`) has **8** members and the spec's two rows it lacked — *Scale* and *Non-negotiables* — are among them; the count is eight rather than the table's seven because `CONSUMER` is split out of the table's single *Success* row and `ORACLE` is FR-067's `verification_method`, which the module documents as producing no clause, so no member order reproduces the table and the ADR says so. `SCALE` carries a second content floor (`requires_quantity`, `test_only_the_scale_dimension_demands_a_quantity`), and the *Non-negotiables* row is its own question rather than folded into `CONSTRAINT`'s, which is where it had been. **The limit is inside the requirement and is the requirement's own word:** a scale clause's oracle is prose, so `execution.run_all` skips it and P6 records `INSUFFICIENT` — the obligation is declared and visibly unmet, and R19's second half is a question here rather than a bound. `test_the_spec_rows_the_enum_dropped_are_now_present` (`test_elicitation.py`). |
 | FR-065 elicitation terminates, unresolved reported as risk | **Implemented** | `next_open` (`elicitation.py:226`), `Readiness.open_dimensions`; `test_next_open_returns_the_first_unresolved_dimension` (`test_elicitation.py:229`). |
 | FR-066 elicitation proposes no implementation | **Implemented** | `_SHARED_CONSTRAINTS` (`planner.py:110`) + `draft_stems` polarity (`elicitation.py:254`); `test_polarity_follows_the_dimension` (`test_elicitation.py:281`). |
-| FR-067 each clause carries `confidence` and `verification_method` | **Partly** | `Clause` (`views.py:351`) carries **neither**; ambiguity is not quantified per clause. `test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite* rule. |
+| FR-067 each clause carries `confidence` and `verification_method` | **Implemented** (2026-10-17, ADR-0078) | `ClauseConfidence` and the derived `Clause.confidence` (`views.py:2144`), rendered per requirement and tallied in `## Oracle strength` (`specdoc.py`). The clause's state is **read from the oracle it carries** — `is_executable` and `covers` — and never asserted, so FR-067's quantification cannot be a self-assessment: a `confidence` a producer filled in would be the manufactured judge (`manufacture.py:6,32`) with a decimal point on it, which is what `test_confidence_is_not_an_oracle` (`test_elicitation.py:229`) guards. Three values, not a score, because the states are three: `covered` (runs, strong enough), `weak` (runs, too narrow — rank 6–7, FR-103's 'sample, not coverage'), `stated` (no command, FR-108 ground-truth debt). **The row was Partly for the wrong reason in every particular.** `Clause` is at `views.py:2115`, not `351` (which is `L5 = 5` in `AutonomyLevel`), and the test is at `test_elicitation.py:229`, not `160`. The test does **not** assert the opposite rule: it asserts that a *statement* of confidence is not a substitute for an oracle — an ORACLE answer of 'the operator will tell me it feels right' is refused for naming no checking mechanism — and says nothing about whether a clause may carry one. The row read the test's name and inferred the negation of its content. **And the second half of FR-067 was already built:** 'a clause with no verification method is not a clause; it is a wish' is discharged at `Contract.from_draft` (`views.py:2286-2303`), which raises `"{n} clause stem(s) have no oracle, so no contract exists"`, so no wish reaches a `Clause` and there is nothing to return to the operator. `verification_method` is **deliberately not a `Clause` column**, and the spec says so in its own words (`product-spec.md:457-458`): `ORACLE` carries it as its own question, the P2 `Requirement` holds it (`views.py:2792`), and it is already rendered per requirement. Adding it to `Clause` would put a second derivation of one fact where the spec places the first. The gap was `confidence` alone. `TestAClauseConfidenceIsReadFromItsOracle` (`test_views.py`), `test_the_clause_confidence_reaches_the_document` (`test_specdoc.py`). |
 | FR-068 clause classified by research into validated/invalidated/… | **Implemented** (2026-10-13, ADR-0037) | `ClauseClassification`/`ResearchClassification`, `VERDICT_ACTION` as data read by the type, the CLI and `advance_phase`, which refuses to complete P1 over an Invalidated or Deepened clause. The clause list is the draft's and is written into the producer's goal, so "every clause is classified" is not the producer measured against itself. `sofact classify` prints each verdict with its action; `TestTheClauseClassification` (21) and `TestTheClassifyVerb` (8). |
 | FR-069 finding provenance | **Implemented** (2026-10-12, ADR-0035) | `Source` carries `url`, `retrieved`, `verification` (`VerificationStatus`, the `docs/sources/README.md` legend as a type) and `confidence`; `Claim.opinion` labels the uncited assertion, and `SourceLedger.unbacked_decisions` refuses one as grounds for a decision. `ResearchRecord.source_urls` remains the *dispatch* measurement. |
 | FR-070 versioned source ledger, claims separately addressable | **Implemented** (2026-10-12, ADR-0035) | `Source`/`Claim`/`Contradiction`/`SourceLedger` (`views.py`), parsed from the producer's `research-sources/*.md` and `research-claims.json` by `sofact.research`, recorded as `LedgerKind.SOURCE_LEDGER_RECORDED`, printed by `sofact sources`. `SourceLedger.resting_on(id)` derives the set a source's invalidation takes with it; `version` counts the ledgers the project reads under. `test_a_claim_points_at_its_source_and_the_edge_is_navigable` (`test_service.py`). |
@@ -257,8 +257,8 @@ table has 126.
 
 | Verdict | n |
 | --- | --- |
-| Implemented | 102 |
-| Partly | 24 |
+| Implemented | 103 |
+| Partly | 23 |
 | Deferred (ADR-0024) | 0 |
 | Not built | 0 |
 | **Total rows** | **126** |
@@ -450,6 +450,31 @@ because the limit inside it is the requirement's own: FR-064 requires the dimens
 than verified. R19's second half — "P0 must resolve scale" — is a question now and not a
 bound, and the ADR records that as a gap rather than letting a recovered dimension read as
 a discharged risk.
+
+**The 2026-10-17 clause-confidence unit (ADR-0078) moved one row, and the row had been
+Partly for the wrong reason in every particular.** FR-067 leaves **Partly** for
+**Implemented** and the tally is `103/23/0/0` over **126** rows, re-derived by re-running
+the classifier over all 126 rather than adjusted by hand. The row read "`Clause`
+(`views.py:351`) carries **neither**" — and `Clause` is at `:2115`; `351` is `L5 = 5` in
+`AutonomyLevel`, so the citation had been pointing at an unrelated constant. It read
+"`test_confidence_is_not_an_oracle` (`test_elicitation.py:160`) asserts the *opposite*
+rule", and the test is at `:229` and asserts no such thing: it refuses an ORACLE answer of
+"the operator will tell me it feels right" for naming no checking mechanism, which is a
+statement that confidence is not a **substitute for** an oracle, not a statement that a
+clause may not **carry** one. The row read the test's name and inferred the negation of its
+content — a citation and a characterisation both wrong on the same line, which is the
+shape this audit exists to find in other people's documents.
+
+**What the row also could not show is that half of FR-067 was already built.** "A clause
+with no verification method is not a clause; it is a wish and must be returned to the
+operator" is discharged at `Contract.from_draft`, which raises naming the offending stems
+— so no wish reaches a `Clause` and there is nothing to return. And `verification_method`
+is **deliberately not a `Clause` column**: the spec says so itself, `ORACLE` carries it as
+its own question, and the P2 `Requirement` already holds and renders it. The row's
+"carries neither" was a field-name count contradicting the design note it claims to
+measure. The gap was `confidence` alone, and it is now a derivation from the clause's own
+oracle — `covered`/`weak`/`stated` — rather than a field anyone fills in, because a
+self-assessed confidence is the manufactured judge with a decimal point on it.
 
 1. **its verdict cell names an unbuilt half**, *including* a cell that leads with
    "Implemented" and then names the half that is missing; or
