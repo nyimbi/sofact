@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from conftest import COLLECTED
 
-from sofact.views import Phase, PhaseGate
+from sofact.views import ElicitationDimension, Phase, PhaseGate
 
 ROOT = Path(__file__).resolve().parents[2]
 README = ROOT / "README.md"
@@ -358,4 +358,119 @@ class TestTheAdrIndexIsTheSetOfRecords:
 		assert expected == len(rows), (
 			f"the sentence says {expected} non-resolution records and the table beneath it "
 			f"has {len(rows)}. The number is read off the table, so move it when a row is added."
+		)
+
+
+# --------------------------------------------------------------------------- #
+# the elicitation table, which the code must answer to and never did
+# --------------------------------------------------------------------------- #
+
+SPEC = ROOT / "docs" / "spec" / "product-spec.md"
+
+_SPEC_DIMENSION_ROW = re.compile(r"^\|\s*\*\*(.+?)\*\*\s*\|", re.M)
+
+
+def _spec_dimension_rows(text: str) -> list[str]:
+	"""The FR-064 table's dimension names, read from the section that holds it.
+
+	Scoped to FR-064's own block rather than the whole document, because ``**Goal**``
+	and ``**Failure**`` are words this spec uses as row labels in several tables and a
+	document-wide match would collect a different table's rows and call the result the
+	elicitation dimensions.
+	"""
+	start = text.index("**FR-064**")
+	end = text.index("**FR-065**", start)
+	block = text[start:end]
+	names = _SPEC_DIMENSION_ROW.findall(block)
+	return [name for name in names if name != "Dimension"]
+
+
+class TestTheElicitationTableIsBoundToTheEnum:
+	"""FR-064's table is the authority, and nothing compared it to the code.
+
+	ADR-0077's own finding: *Scale* and *Non-negotiables* were absent from
+	``ElicitationDimension`` for as long as both existed, with no record of the drop,
+	because no test read the table. A reader was the only mechanism, and a reader who
+	does not know the table exists cannot be one. The enum's docstring now says the
+	counts differ on purpose; this test is what makes that claim checkable rather than
+	a sentence beside a list.
+	"""
+
+	def test_the_table_is_readable_and_names_the_specs_own_rows(self) -> None:
+		"""Canary the reader against the table it claims to read.
+
+		Every assertion below is vacuous if the extraction returns nothing or returns
+		the wrong table, so the known-positive is asserted first: this table has seven
+		rows and these seven names, and a reader that returns a different set is the
+		finding rather than a reason to loosen the test beneath it.
+		"""
+		rows = _spec_dimension_rows(SPEC.read_text(encoding="utf-8"))
+		assert rows == [
+			"Goal",
+			"Success",
+			"Scope boundary",
+			"Scale",
+			"Constraints",
+			"Non-negotiables",
+			"Failure",
+		], f"the FR-064 table is not the one this test reads: {rows}"
+
+	def test_every_row_of_the_table_is_a_dimension_the_code_asks(self) -> None:
+		"""The property ADR-0077 restores, asserted against the table rather than a list.
+
+		The mapping is a **table** and not an identity, and it has to be, because the
+		two lists are not the same list: ``Success`` is two dimensions here (``OUTCOME``
+		and ``CONSUMER``, the observer being what an oracle is written against) and the
+		table has no *Oracle* row at all. Naming the mapping is the honest form — a
+		substring match on the member name would report *Scope boundary* as unasked and
+		a fuzzy match would pass on any row, which is the failure this test exists to
+		prevent. What it pins is the direction that was broken: a row the spec asks for
+		and the code does not ask.
+		"""
+		asked = {
+			"Goal": {ElicitationDimension.OUTCOME},
+			"Success": {ElicitationDimension.OUTCOME, ElicitationDimension.CONSUMER},
+			"Scope boundary": {ElicitationDimension.BOUNDARY},
+			"Scale": {ElicitationDimension.SCALE},
+			"Constraints": {ElicitationDimension.CONSTRAINT},
+			"Non-negotiables": {ElicitationDimension.NON_NEGOTIABLES},
+			"Failure": {ElicitationDimension.FAILURE},
+		}
+		rows = _spec_dimension_rows(SPEC.read_text(encoding="utf-8"))
+
+		unmapped = sorted(set(rows) - set(asked))
+		assert not unmapped, (
+			f"the FR-064 table names {unmapped}, which this test does not map to a "
+			"dimension. A row added to the table is a question P0 must ask, so map it "
+			"to the member that asks it — or to the member that already does."
+		)
+		for row in rows:
+			for dimension in asked[row]:
+				assert dimension in set(ElicitationDimension), (
+					f"the table's {row!r} row maps to {dimension}, which is not a member"
+				)
+
+	def test_every_dimension_is_either_a_table_row_or_declared_as_extra(self) -> None:
+		"""The other direction, so the mapping cannot go stale by the enum growing.
+
+		``ORACLE`` is the member with no row, and it is deliberate: FR-067's
+		``verification_method`` is a question P0 asks and the table does not list, which
+		the enum's docstring states. Pinning it here as a named exception rather than
+		allowing any unmapped member is the difference between a decision and a drift —
+		a member added tomorrow and left out of the table fails this, and whoever adds
+		it has to say which it is.
+		"""
+		covered = {
+			ElicitationDimension.OUTCOME,
+			ElicitationDimension.CONSUMER,
+			ElicitationDimension.BOUNDARY,
+			ElicitationDimension.SCALE,
+			ElicitationDimension.CONSTRAINT,
+			ElicitationDimension.NON_NEGOTIABLES,
+			ElicitationDimension.FAILURE,
+		}
+		no_row = {ElicitationDimension.ORACLE}
+		assert covered | no_row == set(ElicitationDimension), (
+			"a dimension is neither mapped to an FR-064 row nor named here as one the "
+			f"table does not list: {sorted(set(ElicitationDimension) - covered - no_row)}"
 		)

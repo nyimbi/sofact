@@ -120,11 +120,16 @@ specification's non-goals, the route FR-079 already uses.
 - **The unit does not enforce scale.** A `SCALE` clause's oracle is a suggested prose
   declaration, so P6 records it `INSUFFICIENT`. This is the central limitation and the
   reason the previous draft of this decision was wrong.
-- **Nothing binds the spec's table to the enum**, which is *why* this gap survived: no test
-  compares `len(ElicitationDimension)` against the table's row count, so a dimension could
-  be dropped and only a reader would notice. A test that reads the spec's table is the
-  durable fix and is a separate unit, because it changes how the spec is *read* rather than
-  what P0 asks.
+- **The table is now bound to the enum, and it was not when this record was written.** No
+  test compared the two, which is *why* this gap survived: a dimension could be dropped and
+  only a reader would notice. `test_docs.py`'s `TestTheElicitationTableIsBoundToTheEnum`
+  parses FR-064's block and asserts both directions — every row maps to a member, and every
+  member is either a row or named as one the table does not list (`ORACLE`). The mapping is
+  a table rather than an identity, and it has to be: *Success* is two dimensions here
+  (`OUTCOME` and `CONSUMER`) and the table has no *Oracle* row, so the guard pins the
+  direction that was broken and names the exception rather than fuzzy-matching a name.
+  Canaried both ways: renaming a row to one the map lacks, and adding a member with no row
+  and no declaration, each fail.
 - **A count in prose is a claim, and this unit was about a count that drifted.** Three
   statements of "six dimensions" in `llm.py`, `test_llm.py` and `README.md` are *measurements*
   taken when P0 asked six questions — two of those prompts exhausted a 1024-token budget —

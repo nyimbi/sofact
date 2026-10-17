@@ -445,10 +445,13 @@ clarifying pleasantries. Specifically, for each intent clause it must resolve:
 | **Non-negotiables** | What must not change or be touched? |
 | **Failure** | What does unacceptable failure look like? What is the cost of one? |
 
-The table is the authority, and **nothing in the build compares the two**: no test reads
-this table, which is how *Scale* and *Non-negotiables* stayed absent from the
-interrogation with no record (ADR-0077). A test that reads it is a separate unit; until
-then a row added here is a row a reader must check by hand. **The implementation's list
+The table is the authority, and it is **read by a test**:
+`test_every_row_of_the_table_is_a_dimension_the_code_asks` (`test_docs.py`) parses this
+block and fails on a row it cannot map to a member, and its sibling fails on a member
+that is neither a row nor declared as one the table does not list. Until ADR-0077
+nothing compared the two, which is how *Scale* and *Non-negotiables* stayed absent from
+the interrogation with no record — a row added here is now a question P0 is required to
+ask rather than one a reader must check by hand. **The implementation's list
 is not the table's, and it is longer** (ADR-0077): `CONSUMER` is
 *Success*'s second question — "who observes it?" — asked separately because the observer
 is what an oracle is written against, and `ORACLE` carries FR-067's `verification_method`

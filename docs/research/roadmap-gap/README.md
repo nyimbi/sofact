@@ -675,8 +675,9 @@ built for.
    own question ("What are the non-negotiables — platform, stack, dependencies,
    time?"), so it was never absent from the interrogation — it was asked as a question
    about the stack, while the spec's *Constraints* row was asked nowhere. And nothing
-   compared the enum against the spec's table, which is why both survived; a test that
-   reads the table is a separate unit.
+   compared the enum against the spec's table, which is why both survived —
+   `test_docs.py`'s `TestTheElicitationTableIsBoundToTheEnum` now does, in both
+   directions, so a row added to the table is a question P0 must answer for.
 4. **Spec §17 verb surface vs the CLI.** §17 says "the planned verbs remain the
    target surface" and lists `sofact init`, `specify`, `build`, `report`, `gate
    approve <phase>`. None exists. The same section's "Running in v0.1" list is
