@@ -195,10 +195,15 @@ records the failure as a named terminal state, and `sofact build` still stops wi
 `NOT built` and the next verb. What changed is whether the operator is told why, and
 whether the verb they are told to type can do anything.
 
-## What this does not fix
+## What this did not fix
 
-Two gaps the same walk reached, both recorded and neither closed here, because both need a
-design decision rather than a wording change.
+Two gaps the same walk reached, both recorded and neither closed here, because both needed a
+design decision rather than a wording change. **Both are now closed** — the first by
+`9ed8bce` (`sofact elicit`, the recovery verb the spec's action column named and nothing
+implemented) and the second by [ADR-0080](0080-a-failed-run-names-the-setting-and-not-a-resume.md)
+(a `FAILED` run records which configuration fault it hit and names that setting). The
+records below are kept as written, because a gap note that is deleted when it closes is how
+a reader loses the shape of the class.
 
 **A pipeline stopped by its own evidence has no exit.** P1 classified twelve of the draft's
 thirty-six clauses `invalidated`/`deepened`, and FR-068's table says what to do: "Return to
@@ -216,6 +221,8 @@ was fixed for P0's two `EXHAUSTED` waits and not for `FAILED`, so a run stopped 
 above tells the operator to run the command that provably loops. Whether a resume can act is
 a fact about *why* the run failed, and the driver holds it — the same shape as
 `awaiting_attestation`, which is why it is named here rather than fixed by guessing.
+*Closed 2026-10-19 by ADR-0080: the field is `DriverRun.failure`, and the shape was right —
+the view could not derive it, so the driver records it.*
 
 Both are reachable from the front door at the shipped defaults. Neither is fixed by the
 change this ADR records, and neither moves a verdict: FR-068's requirement is that every

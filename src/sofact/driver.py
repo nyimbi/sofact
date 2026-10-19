@@ -38,6 +38,9 @@ from pathlib import Path
 from typing import Final
 
 from sofact._uuid7 import uuid7str
+from sofact.git import GitUnavailableError
+from sofact.harness import HarnessBinaryMissing, HarnessSessionUnreadable
+from sofact.search import SearchRefusal
 from sofact.service import FactoryService
 from sofact.views import (
 	GATE_APPROVE_VERB,
@@ -45,6 +48,7 @@ from sofact.views import (
 	PHASE_PRODUCER_VERB,
 	PHASE_SEQUENCE,
 	DeliveryReport,
+	DriverFailure,
 	DriverOutcome,
 	DriverRun,
 	DriverStep,
@@ -60,6 +64,7 @@ __all__ = [
 	"DRIVER_ACTIONS",
 	"DriverAction",
 	"DriverRefusal",
+	"classify_failure",
 	"run_goal",
 ]
 
@@ -656,6 +661,7 @@ async def run_goal(
 				detail=f"{action.name}: {exc}",
 				open_gate=None,
 				notify=notify,
+				failure=classify_failure(exc),
 			)
 		if len(service.ledger) == before:
 			# The action ran and the log did not grow, which is the definition of an action
@@ -966,6 +972,38 @@ async def _close_predecessors(service: FactoryService, phase: Phase) -> None:
 		await service.advance_phase(earlier, PhaseStatus.COMPLETE, by="factory")
 
 
+_FAILURE_CLASSES: Final[tuple[tuple[type[BaseException], DriverFailure], ...]] = (
+	(HarnessBinaryMissing, DriverFailure.HARNESS_MISSING),
+	(HarnessSessionUnreadable, DriverFailure.HARNESS_RECORD_UNREADABLE),
+	(SearchRefusal, DriverFailure.SEARCH_UNUSABLE),
+	(GitUnavailableError, DriverFailure.GIT_MISSING),
+)
+"""The exception types whose fix is a setting, and which setting (FR-172).
+
+A table rather than a chain of ``isinstance`` in the handler, so the set is one thing a
+reader can see and a test can iterate. Every member is a *configuration* fault: the
+operator changes something outside the log and resumes, and a resume on its own re-selects
+the same action and raises the same exception.
+
+Ordered, and matched with ``isinstance``, because a subclass must read as its base: a
+future ``HarnessProfileUnusable(HarnessBinaryMissing)`` is a harness problem and would be
+misreported by any lookup keyed on the exact class.
+"""
+
+
+def classify_failure(exc: BaseException) -> DriverFailure | None:
+	"""Which configuration fault ``exc`` is, or ``None`` if the driver cannot tell (FR-172).
+
+	``None`` is the honest answer for a bug: the operator's move is to re-run and read the
+	trace, which is what the fallback verb says. Guessing a class here would send them to
+	change a setting that is not wrong.
+	"""
+	for kind, failure in _FAILURE_CLASSES:
+		if isinstance(exc, kind):
+			return failure
+	return None
+
+
 async def _finish(
 	service: FactoryService,
 	*,
@@ -978,6 +1016,7 @@ async def _finish(
 	notify: bool,
 	gate_failures: tuple[str, ...] = (),
 	awaiting_attestation: bool = False,
+	failure: DriverFailure | None = None,
 ) -> DriverRun:
 	"""Record the run, notify, and return it (FR-172).
 
@@ -1005,6 +1044,7 @@ async def _finish(
 		open_gate=open_gate,
 		gate_failures=gate_failures,
 		awaiting_attestation=awaiting_attestation,
+		failure=failure,
 	)
 	if notify:
 		statement = await _statement_of(service, goal_id)

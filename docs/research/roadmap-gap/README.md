@@ -394,11 +394,21 @@ rather than off the refusal's message text, and it clears only when **both** cur
 facts hold — the draft must descend from the answers on the log now *and* the
 classification must name that draft's clauses — because after a revision the latest
 draft is still the old one, so either check alone left a run stopping against a premise
-the operator had already restated. The **second gap is still open**: a `FAILED` run's
-`next_human_verb` is `RESUME_VERB` for every failure, including the ones a resume cannot
-act on. It needs a design decision — whether a `FAILED` run carries the action it failed
-on — and it is not a wording change. It is recorded because a walk that stops at the
-first refusal it can explain leaves the next operator to find the second one.
+the operator had already restated. **The second gap is now closed too** (2026-10-19, ADR-0080). A `FAILED` run records
+*what kind* of failure it was — `DriverRun.failure`, a closed `DriverFailure` enum of the
+configuration faults (`HARNESS_MISSING`, `HARNESS_RECORD_UNREADABLE`, `SEARCH_UNUSABLE`,
+`GIT_MISSING`) — and `next_human_verb` returns the setting's own instruction instead of a
+resume. `None` stays the reading for a bug, where a re-run and its trace *is* the next
+move. The design decision the note asked for is the field: a `FAILED` run carries the
+class, not the action, because the action is already on the step list and the class is the
+thing the view cannot derive. Two facts came out of building it. The exception the
+dispatch path raised for a missing binary was a bare `FileNotFoundError` —
+`HarnessBinaryMissing` existed and `probe()` raised it, but `_invoke`, the one launch path
+every dispatch goes through, did not, so the class never reached the run record; the
+end-to-end test failed on its first run with `failure=None` and found it. And `sofact
+probe`, `sofact search --help` and `git --version` are now printed as the first clause of
+their failures, which makes each one a verb the operator can run rather than a sentence
+they have to interpret.
 
 The finding worth carrying forward is about evidence rather than about these bugs: **1987
 passing tests said nothing about whether `sofact build` runs**, because no test drives the

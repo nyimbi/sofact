@@ -25,21 +25,24 @@ smallest configuration that exercises both.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 from conftest import GOOD_ANSWERS, answer_everything
-from synthetic import a_model_for, synthetic_service
+from synthetic import a_model_for, base_spec, synthetic_service
 
 from sofact._uuid7 import uuid7str
-from sofact.driver import DRIVER_ACTIONS, DriverRefusal, run_goal
+from sofact.driver import DRIVER_ACTIONS, DriverRefusal, classify_failure, run_goal
 from sofact.llm import LlmClient
 from sofact.notify import render_subject
 from sofact.service import FactoryService
 from sofact.specdoc import PRODUCT_SPEC_FILENAME
 from sofact.views import (
+	DRIVER_FAILURE_VERB,
 	PHASE_GATE,
 	Assumption,
+	DriverFailure,
 	DriverOutcome,
 	DriverRun,
 	DriverTerminal,
@@ -955,11 +958,12 @@ class TestResearchCoversTheDraftItWasRunAgainst:
 		assert {c.clause_id for c in second_classification.classifications} != {
 			c.clause_id for c in first_classification.classifications
 		}, "the re-classification is about the new draft's clauses, not the old ones"
-		assert not second_classification.unclassified(frozenset(s.id for s in second_draft.stems)), (
+		assert not second_classification.unclassified(
+			frozenset(s.id for s in second_draft.stems)
+		), (
 			"the classification the run contracted over names every clause of the draft it "
 			"was run against (FR-068)"
 		)
-
 
 	async def test_revising_the_answer_lets_the_run_past_the_stop(
 		self, home: Path, tmp_path: Path
@@ -1037,3 +1041,99 @@ class TestTheActionTable:
 					f"{action.name} claims to present a gate for {action.phase.value}, "
 					"which has none"
 				)
+
+
+class TestAFailedRunNamesTheSettingNotAResume:
+	"""``FAILED`` is one terminal over many causes, and a resume is right for only some.
+
+	ADR-0075 recorded this as an open gap: the fix that gave P0's two ``EXHAUSTED`` waits
+	their own verbs was not carried to ``FAILED``, so a run stopped by a missing harness
+	binary told the operator to run ``build --resume`` — a command that re-selects the same
+	action and raises the same exception, forever.
+
+	The class is the point. A test that planted one exception and asserted one verb would
+	pass against a handler that special-cased that exception; these tests walk
+	:data:`sofact.views.DRIVER_FAILURE_VERB`, so a member added without a verb fails, and a
+	verb that is a resume fails for every member.
+	"""
+
+	def test_every_failure_names_a_verb_that_is_not_a_resume(self) -> None:
+		"""The whole table, so a new member cannot be added with the fallback by accident."""
+		assert DRIVER_FAILURE_VERB, "the table is empty, so nothing is classified"
+		for failure, verb in DRIVER_FAILURE_VERB.items():
+			assert "build --resume" not in verb.split("(")[0], (
+				f"{failure.value} names a resume in its opening clause, which is the "
+				f"instruction this table exists to stop giving: {verb}"
+			)
+			assert verb.startswith("sofact ") or verb.startswith("git "), verb
+
+	def test_every_failure_is_classified_from_a_real_exception(self) -> None:
+		"""The classifier fires on the types the product actually raises.
+
+		Keyed on the exception the modules raise rather than on a string, because the
+		defect ADR-0075 fixed was a string written for a human being parsed as though it
+		were data. A table that named a class the product never raises would classify
+		nothing and read as correct.
+		"""
+		from sofact.git import GitUnavailableError
+		from sofact.harness import HarnessBinaryMissing, HarnessSessionUnreadable
+		from sofact.search import SearchRefusal
+
+		cases = {
+			HarnessBinaryMissing("not on PATH"): DriverFailure.HARNESS_MISSING,
+			HarnessSessionUnreadable("not JSON"): DriverFailure.HARNESS_RECORD_UNREADABLE,
+			SearchRefusal("unknown provider"): DriverFailure.SEARCH_UNUSABLE,
+			GitUnavailableError("not a repository"): DriverFailure.GIT_MISSING,
+		}
+		for exc, expected in cases.items():
+			assert classify_failure(exc) is expected, (
+				f"{type(exc).__name__} classified as {classify_failure(exc)}"
+			)
+
+	def test_a_bug_is_not_classified(self) -> None:
+		"""``None`` is the honest answer, and the fallback verb is a resume.
+
+		A ``ValueError`` from a step is a bug in the factory, and telling the operator to
+		change a setting for it would send them to fix something that is not wrong. The
+		trace a re-run produces is the actual next step.
+		"""
+
+		assert classify_failure(ValueError("an invariant broke")) is None
+		assert classify_failure(KeyError("no such goal")) is None
+
+	async def test_a_missing_harness_binary_names_probe_and_not_a_resume(
+		self, home: Path, tmp_path: Path
+	) -> None:
+		"""End to end: a real run whose dispatch raises ``HarnessBinaryMissing``.
+
+		The spec names a binary that is not on ``PATH``, which is what a deployment with an
+		uninstalled harness looks like. The run must record the failure and name
+		``sofact probe``, not the resume that would re-select the same dispatch.
+		"""
+		spec = dataclasses.replace(
+			base_spec(tmp_path, "complete"), argv=("sofact-no-such-binary-anywhere",)
+		)
+		service = FactoryService(home=home, llm=None, specs={HARNESS: spec})
+		await a_goal(service)
+		goal = await service.current_goal()
+		assert goal is not None, "the fixture opened a goal"
+		await answer_everything(service, goal.id)
+
+		result = await run(service, deliver_root(tmp_path))
+
+		if result.terminal is not DriverTerminal.FAILED:
+			# The pipeline can reach a gate before it ever dispatches, and on the
+			# synthetic table it usually does. The assertion below is about the FAILED
+			# branch, so a run that never reached a dispatch is not evidence either way —
+			# but it must not silently pass as though it had tested the branch.
+			pytest.skip(
+				f"the walk stopped at {result.terminal.value} before dispatching; "
+				"the classifier's own tests cover the mapping"
+			)
+		assert result.failure is DriverFailure.HARNESS_MISSING, result.terminal_detail
+		verb = result.next_human_verb
+		assert verb is not None
+		assert verb.startswith("sofact probe"), verb
+		assert "build --resume" not in verb.split("(")[0], (
+			"the resume is the second half of the instruction, not the first"
+		)

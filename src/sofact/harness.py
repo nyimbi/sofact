@@ -1402,14 +1402,27 @@ class ConfiguredHarnessAdapter:
 		directory the confinement requires, because a profile permitting writes only under
 		the workspace denies the host's ``TMPDIR``.
 		"""
-		process = await asyncio.create_subprocess_exec(
-			*wrap_argv(tuple(argv), self.boundary, self.workspace),
-			cwd=self.workspace,
-			stdin=asyncio.subprocess.DEVNULL,
-			stdout=asyncio.subprocess.PIPE,
-			stderr=asyncio.subprocess.PIPE,
-			env={**self._child_env(session_id), **boundary_env(self.boundary, self.workspace)},
-		)
+		try:
+			process = await asyncio.create_subprocess_exec(
+				*wrap_argv(tuple(argv), self.boundary, self.workspace),
+				cwd=self.workspace,
+				stdin=asyncio.subprocess.DEVNULL,
+				stdout=asyncio.subprocess.PIPE,
+				stderr=asyncio.subprocess.PIPE,
+				env={**self._child_env(session_id), **boundary_env(self.boundary, self.workspace)},
+			)
+		except FileNotFoundError as exc:
+			# **The same fact `probe` names, raised on the path that dispatches.** A missing
+			# binary reached the driver as a bare ``FileNotFoundError`` — "[Errno 2] No such
+			# file or directory: 'sofact-no-such-binary'" — which reads as a bug in the
+			# factory rather than as a harness the deployment has not installed, so the
+			# operator was told to resume a command that re-raises it. ``probe`` has always
+			# raised the named class; this is the one launch path every dispatch goes
+			# through, and naming it here is what makes the fact survive to the run record.
+			raise HarnessBinaryMissing(
+				f"harness {self.spec.name!r} needs {self.spec.argv[0]!r} on PATH and it is "
+				f"absent: {exc}"
+			) from exc
 		timed_out = False
 		stdout = b""
 		stderr = b""

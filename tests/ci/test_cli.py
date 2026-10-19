@@ -20,10 +20,15 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
+import typer.main
 from conftest import GOOD_ANSWERS
 from synthetic import base_spec, spec_json
+from typer._click import exceptions as click
+from typer.core import TyperGroup
+from typer.exceptions import Exit as TyperExit
 from typer.testing import CliRunner, Result
 
 from sofact.cli import app
@@ -3103,25 +3108,65 @@ class TestTheVerbTheProductTellsTheOperatorToType:
 		)
 
 	def test_every_verb_the_product_prints_is_one_this_cli_accepts(self, home: Path) -> None:
-		from sofact.views import GATE_APPROVE_VERB, PHASE_PRODUCER_VERB, Phase
+		from sofact.views import (
+			DRIVER_FAILURE_VERB,
+			GATE_APPROVE_VERB,
+			PHASE_PRODUCER_VERB,
+			Phase,
+		)
 
 		printed = {GATE_APPROVE_VERB, "sofact build", "sofact attest", "sofact"}
 		printed.update(f"sofact {verb}" for verb in PHASE_PRODUCER_VERB.values())
+		# ADR-0080's table, checked the same way: each of its verbs is the *opening* of a
+		# sentence an operator reads after a failed run, and a prefix the parser rejects
+		# turns a stop into a second refusal. ``git --version`` is in the table and is
+		# deliberately not checked here — it is not a SoFact verb, and the previous body
+		# "verified" it by stripping to ``--version``, which the *group* answers with its
+		# own version flag. A pass on a line the parser never read as a command is the
+		# same defect as the sentence-grep below, one layer down.
+		printed.update(
+			verb.split("  (")[0]
+			for verb in DRIVER_FAILURE_VERB.values()
+			if verb.startswith("sofact")
+		)
 		assert Phase.SPECIFY in PHASE_PRODUCER_VERB, "the table must cover the gate it is for"
 
+		# Parsed, not invoked. ``RUNNER.invoke`` ran each command for real — 252 seconds
+		# against a temporary home, and the run was itself the thing under test only by
+		# accident. Parsing is the whole claim: the line the operator is told to type is
+		# one this parser reads as a command.
+		# ``get_command`` is on the group, and ``typer.main.get_command`` is typed as
+		# returning a bare ``Command``. The cast is the group the app really is.
+		command = cast(TyperGroup, typer.main.get_command(app))
 		for verb in sorted(printed):
-			# ``sofact`` bare is the questionnaire, and it is the one entry with no
-			# argument to strip; every other prefix is invoked as the operator would
-			# type it up to the name they have to supply.
-			argv = ["--home", str(home), *verb.split()[1:]]
-			result = RUNNER.invoke(app, argv)
-			assert "unexpected extra argument" not in result.output, (
-				f"{verb!r} is printed to the operator and the CLI refuses it: "
-				f"{result.output.strip()}"
-			)
-			assert "No such command" not in result.output, (
-				f"{verb!r} is printed to the operator and names no command: {result.output.strip()}"
-			)
+			# ``sofact`` bare is the questionnaire, the one entry with no subcommand.
+			words = verb.split()[1:]
+			with command.make_context("sofact", ["--home", str(home)]) as root:
+				if not words:
+					continue
+				sub = command.get_command(root, words[0])
+				assert sub is not None, (
+					f"{verb!r} is printed to the operator and names no command this CLI has"
+				)
+				try:
+					with sub.make_context(words[0], words[1:], parent=root):
+						pass
+				except click.NoSuchOption as exc:
+					# The gate's claim, and the one the old body missed: click words a bad
+					# flag "No such option", so a sentence-grep for "unexpected extra
+					# argument" let `sofact tui --nonsense` through.
+					raise AssertionError(
+						f"{verb!r} is printed to the operator and the parser rejects it: {exc}"
+					) from exc
+				except TyperExit:
+					# ``--help`` parses and exits 0 before the callback runs; it is a flag
+					# the command has, so reaching this branch is a pass.
+					pass
+				except click.UsageError:
+					# A *missing required* argument is what the operator supplies — the
+					# sentence stops there on purpose (``attest`` wants ``--by``, ``gate
+					# --approve`` wants the phase). Tolerated, not asserted away.
+					pass
 
 	def test_the_gate_approval_verb_names_the_gate_and_the_human(self) -> None:
 		"""The printed sentence still has to say *which* gate and *who*.
@@ -3315,7 +3360,9 @@ class TestTheFrontDoorVerbs:
 		state = asyncio.run(FactoryService(home).state())
 		goal = state.latest_goal()
 		assert goal is not None, "the conversation opened a goal"
-		answers = [a for a in state.answers_for(goal.id) if a.dimension is ElicitationDimension.OUTCOME]
+		answers = [
+			a for a in state.answers_for(goal.id) if a.dimension is ElicitationDimension.OUTCOME
+		]
 		assert [a.text for a in answers] == [original], (
 			"a declined dimension holds exactly the answer it held before"
 		)

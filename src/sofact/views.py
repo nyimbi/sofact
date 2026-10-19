@@ -1783,6 +1783,36 @@ class DriverOutcome(StrEnum):
 	SKIPPED = "skipped"
 
 
+class DriverFailure(StrEnum):
+	"""What a failed step failed on, when the failure is one the operator configures away.
+
+	``FAILED`` is the terminal for every exception a step raised, and a resume is the right
+	instruction for most of them: a bug in the factory is fixed by a bug report, and the
+	trace is what re-running gets you. Three are different, because they are the
+	deployment's configuration rather than the factory's behaviour, and a resume re-selects
+	the same action and raises the same exception forever:
+
+	* ``HARNESS_MISSING`` — the executable is not on ``PATH``. The fix is to install it or
+		name another harness, and neither is a thing ``build --resume`` does.
+	* ``HARNESS_RECORD_UNREADABLE`` — the harness ran and wrote a session record that does
+		not parse. The fix is the harness's output, which a resume does not change.
+	* ``SEARCH_UNUSABLE`` — a search provider's spec is wrong. P1 dispatches through it, so
+		a resume hits the same refusal.
+	* ``GIT_MISSING`` — the workspace is not a repository and git cannot make it one.
+
+	A model that will not answer is deliberately *not* here: ``propose-answers`` already
+	catches :class:`~sofact.llm.LlmUnavailable` and reports it as a wait rather than a
+	failure, because P0 is a deterministic interrogation a person can answer by hand. A
+	model failure that reaches ``FAILED`` came from somewhere else, and telling the
+	operator to fix their endpoint for it would be a guess.
+	"""
+
+	HARNESS_MISSING = "harness_missing"
+	HARNESS_RECORD_UNREADABLE = "harness_record_unreadable"
+	SEARCH_UNUSABLE = "search_unusable"
+	GIT_MISSING = "git_missing"
+
+
 class DriverTerminal(StrEnum):
 	"""Why the driver stopped, and there is no member for "still going" (FR-172).
 
@@ -1863,6 +1893,27 @@ class DriverRun(View):
 	written before this field existed.
 	"""
 
+	failure: DriverFailure | None = None
+	"""What a ``FAILED`` run failed *on*, when the driver could name it (FR-172).
+
+	A resume is not always the move. ``FAILED`` covers every exception a step raised, and
+	three of them are configuration the operator has to change before any resume can act:
+	a harness binary that is not on ``PATH``, a search provider whose spec is unusable,
+	and a model that will not answer. Naming ``build --resume`` for those sent the
+	operator to a command that re-selects the same action and raises the same exception —
+	the loop this field exists to break, and the same defect ADR-0075 fixed for P0's two
+	``EXHAUSTED`` waits.
+
+	``None`` is the truthful reading for a run that failed on something the driver cannot
+	classify, and it is also what every row written before this field existed folds to.
+	The fallback for ``None`` is a resume, because that is the honest instruction when the
+	failure is a bug rather than a setting: re-running is how an operator gets the trace.
+
+	Recorded rather than derived, for the same reason as ``awaiting_attestation``: the
+	exception is the driver's, and a view that re-derived the class from
+	``terminal_detail`` would be parsing prose written for a human.
+	"""
+
 	notification_id: UUID7 | None = None
 
 	@property
@@ -1928,6 +1979,12 @@ class DriverRun(View):
 			# as an empty string, because the trailing space read as a missing command in a
 			# line whose whole job is to tell the operator what to type.
 			return "sofact   (bare: the questionnaire resumes at the open dimension)"
+		if self.terminal is DriverTerminal.FAILED and self.failure is not None:
+			# The resume below is the fallback for a failure the driver cannot classify, and
+			# it is right for those: re-running is how an operator gets the trace. These four
+			# are settings, so the resume provably repeats — it re-selects the same action
+			# and raises the same exception. The sentence names the setting instead.
+			return DRIVER_FAILURE_VERB[self.failure]
 		return "sofact build --resume"
 
 	@property
@@ -3337,6 +3394,40 @@ Hand-written rather than derived from the CLI because there is no machine-readab
 from a phase to a verb, and importing the CLI into the view layer is the dependency arrow
 pointing the wrong way — so ``tests/ci/test_docs.py`` checks the spelling against the
 installed ``--help`` instead, which is the only check that can catch a drift here.
+"""
+
+
+DRIVER_FAILURE_VERB: dict[DriverFailure, str] = {
+	DriverFailure.HARNESS_MISSING: (
+		"sofact probe   (the harness binary is not on PATH: install it or configure "
+		"another harness with SOFACT_HARNESS_SPECS, then `sofact build --resume`)"
+	),
+	DriverFailure.HARNESS_RECORD_UNREADABLE: (
+		"sofact probe   (the harness wrote a session record that does not parse: the "
+		"harness's output is what changes, not the log — `sofact build --resume` repeats "
+		"the same read)"
+	),
+	DriverFailure.SEARCH_UNUSABLE: (
+		"sofact search --help   (a search provider's spec is unusable: fix "
+		"SOFACT_SEARCHER_SPECS or name another provider with --searcher, then "
+		"`sofact build --resume`)"
+	),
+	DriverFailure.GIT_MISSING: (
+		"git --version   (the workspace is not a repository and git could not make it "
+		"one: install git or point --root at a repository, then `sofact build --resume`)"
+	),
+}
+"""What to type after a ``FAILED`` run whose cause is configuration (FR-172).
+
+A resume is right for a failure the factory can be re-run over, and wrong for these four:
+each is a setting the operator changes outside the log, so ``build --resume`` re-selects
+the same action and raises the same exception. ADR-0075 recorded this as an open gap
+after fixing the same defect for P0's two ``EXHAUSTED`` waits; naming the setting is the
+difference between a stop and a loop.
+
+The check that matters is that every verb here is one the CLI accepts — the same
+discipline ``PHASE_PRODUCER_VERB`` gets, because these strings reach a terminal and a
+sentence that reads right and parses wrong is the defect ADR-0075's own subject.
 """
 
 

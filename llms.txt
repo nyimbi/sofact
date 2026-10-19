@@ -245,8 +245,13 @@ Two further rules that follow from the same doctrine:
 - **Do not expect `sofact build --resume` to fix a run stopped by its own evidence.** If P1
   classifies clauses `invalidated` or `deepened`, FR-068 returns the pipeline to P0, and
   the recovery verb is `sofact elicit`, not a resume.
-- **Do not expect a `FAILED` run's `next_human_verb` to be specific.** It is the resume verb
-  for every failure; read the refusal above it.
+- **Read a `FAILED` run's `next_human_verb` before typing it.** It is the resume verb only
+  for a failure the factory cannot classify — a bug, where re-running gets the trace. Four
+  causes are configuration and name the setting instead, because a resume re-selects the
+  same action and raises the same exception: `harness_missing` → `sofact probe`,
+  `harness_record_unreadable` → `sofact probe`, `search_unusable` → fix
+  `SOFACT_SEARCHER_SPECS`, `git_missing` → install git or point `--root` at a repository.
+  The class is on the run as `DriverRun.failure` (ADR-0080).
 
 ## Vocabulary
 
@@ -259,6 +264,7 @@ Two further rules that follow from the same doctrine:
 | `ClauseConfidence` | `covered`, `weak`, `stated` | Derived from the oracle, never stored. |
 | `VerdictOutcome` | `satisfied`, `violated`, `insufficient` | `insufficient` is first-class, never passing. |
 | `DriverTerminal` | `gate_open`, `delivered`, `returned_to_p0`, `refused`, `exhausted`, `failed` | How a `build` run ended. |
+| `DriverFailure` | `harness_missing`, `harness_record_unreadable`, `search_unusable`, `git_missing` | Why a `failed` run failed, when the cause is a setting rather than a bug. `None` means unclassified, and the verb is a resume. |
 | `AutonomyLevel` | L0–L5 | L5 is representable and unreachable. `HIGHEST_GRANTABLE = L4`. |
 | `ElicitationDimension` | `outcome`, `consumer`, `boundary`, `oracle`, `scale`, `constraint`, `non_negotiables`, `failure` | The eight questions P0 asks, in that order. |
 | `ResearchVerdict` | `validated`, `invalidated`, `unverifiable`, `deepened` | Per clause. `invalidated` and `deepened` return the pipeline to P0. |
