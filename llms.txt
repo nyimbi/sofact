@@ -163,6 +163,7 @@ writes; `Blocks` says whether a failure stops the run.
 | `sofact build` | Drives the pipeline; stops at every gate and names the next verb (FR-172). | `driver.advanced` | yes |
 | `sofact api` | The read-only API operations. Refuses the four gate operations **by name**. | nothing | no |
 | `sofact ledger` | Prints the append-only event log. | nothing | no |
+| `sofact tui` | The dashboard: phases, gates, ledger, runs and the next move on one screen. Answers a question and approves a gate a person has read; **cannot drive past a gate**. | whatever the two human acts append | yes |
 | `sofact envelope` | The §1.3 envelope against what has been measured. | nothing | no |
 | `sofact spend` | Spend against the envelope; unreported tokens count as unmeasured, and the sum is a floor. | nothing | no |
 | `sofact goalmode` | Whether the harness really entered goal mode. | nothing | no |

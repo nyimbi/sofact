@@ -308,7 +308,15 @@ Two commands make the machine's own position legible:
 ```sh
 sofact phase    # where the pipeline is; exits non-zero while a gate is open
 sofact status   # the goal, the phase, readiness per dimension, ledger health
+sofact tui      # the same facts on one screen, plus the ledger and the next move
 ```
+
+`sofact tui` is the dashboard: the phase machine, the open gate's checks, readiness per
+dimension, the ledger, the last driver run, and the one command that would let the
+pipeline continue — all on one screen, re-read with `r`. It can do the two things §3.3
+keeps human (answer a question, approve a gate you have read) and nothing else. It cannot
+carry the pipeline past a gate: `b` runs the driver, which stops at every gate by
+construction, and `approve_gate` refuses a failed machine check regardless of who asks.
 
 A gate cannot be passed by anything except a person naming themselves, and an approval
 cannot waive a failed machine check:
@@ -1760,7 +1768,7 @@ The prohibition is enforced, not documented.
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 2099 tests
+uv run pytest -vxs tests/ci          # 2129 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

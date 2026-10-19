@@ -1122,6 +1122,24 @@ def show_ledger(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
 		typer.echo(f"  {entry.entry_hash[:12]}")
 
 
+@app.command()
+def tui(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
+	"""Open the dashboard: phases, gates, ledger and the next move on one screen.
+
+	The same facts ``status``, ``phase`` and ``ledger`` print, laid out so the one
+	question an operator has at any moment — what do I type next — is answered without
+	scrolling. It can answer a question and approve a gate a person has read; it cannot
+	drive the pipeline past one, because ``build`` stops at every gate by construction
+	(FR-061).
+	"""
+	# Imported here rather than at module scope: ``textual`` is a presentation
+	# dependency, and a machine surface that imports the CLI (``sofact api``) should not
+	# pay for a terminal library it will never open.
+	from sofact.tui import run_tui
+
+	run_tui(_service(_home_of(ctx, home)), home=_home_of(ctx, home))
+
+
 @app.command(name="verify-ledger")
 def verify_ledger(ctx: typer.Context, home: Path | None = _HOME_OPTION) -> None:
 	"""Recompute the hash chain. Exit code 1 if it does not verify."""
