@@ -6,7 +6,7 @@
   FR-101, FR-102, FR-140, FR-147, §1.3, §1.4, §8.4, §20.4;
   [ADR-0002](0002-model-access-is-one-openai-compatible-interface.md),
   [ADR-0012](0012-the-harness-table-is-data-not-code.md),
-  [ADR-0039](0039-the-envelope-refuses-the-ceiling-and-a-floor-is-a-target.md),
+  [ADR-0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md),
   [ADR-0055](0055-attempt-telemetry-is-a-join-and-the-unmeasured-token-count-is-part-of-it.md),
   [ADR-0064](0064-the-authoring-surfaces-cannot-reach-a-model.md)
 

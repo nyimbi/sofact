@@ -1,0 +1,350 @@
+# SoFact
+
+> A verification-first software factory. It interrogates a goal until it is falsifiable,
+> compiles it into a contract whose every clause names the oracle that would check it,
+> hands the building to an external coding harness, and then verifies the result
+> independently of whoever produced it.
+>
+> This file is the manual for an agent that has to *operate* SoFact: the state model, all
+> 51 commands, the two journeys through them, and the eight invariants that must not be
+> broken. `README.md` is the same product explained to a person.
+
+## What this file is
+
+SoFact is a Python package (`sofact`, 0.1.0, MIT) installed as a console script. Every
+command is flat — `sofact <verb>` — with no nested subcommands. There are 51 of them.
+
+The one rule that governs everything else is **no oracle, no autonomy** (ADR-0009). A
+clause without a machine-checkable acceptance criterion cannot exist in a contract, so it
+cannot be built and it cannot be claimed. Every other invariant in this file is a
+consequence of that one.
+
+SoFact contains **no coding loop**. It decides what "done" means, dispatches the building
+to a harness, and then checks the result with its own oracles. A producer's report of its
+own work is recorded and is never evidence.
+
+## The 60-second model
+
+- Ten phases, in a closed and ordered enum: **P0** elicit, **P1** research, **P2** specify,
+  **P3** decompose, **P4** contract, **P5** build, **P6** verify, **P7** integrate,
+  **P8** deliver, **P9** evolve (not built).
+- Four **human gates**, each attached to one phase: `specification` at P2, `decomposition`
+  at P3, `contract_sample` at P4 (sampled — one check, not one per clause), `deploy` at P8.
+- A phase is `pending`, `active`, `awaiting_gate` or `complete`. `awaiting_gate` is a hard
+  stop: **no machine code path leaves it.** Only a person naming themselves can.
+- State is one file. Every fact is an appended, hash-chained event, and all state is a pure
+  fold over that log. Nothing else is authoritative.
+- The model is advisory. It may propose an answer; a proposed answer does not resolve a
+  dimension until a person attests it.
+- `sofact build` drives the pipeline as far as a human lets it go, then stops and names the
+  verb to type next.
+
+## State: one file, one fold
+
+`./.sofact` (or `$SOFACT_HOME`) holds exactly two files:
+
+| File | What it is |
+| --- | --- |
+| `ledger.jsonl` | The whole project. One `LedgerEntry` JSON object per line, append-only and hash-chained. |
+| `ledger.lock` | The exclusive `flock` target that serialises writers. `flock` binds to an inode, and the log can be created and unlinked, so a dedicated lock file is what makes every writer contend on one inode. |
+
+An entry has `index`, `at`, `kind`, `payload`, `prev_hash` and `entry_hash`. `entry_hash`
+covers `prev_hash`, so altering any entry invalidates every entry after it.
+
+`state.fold(entries) -> ProjectState` is pure: same entries in, same state out, no I/O, no
+clock. That is what makes replay meaningful.
+
+```sh
+sofact ledger          # print the append-only event log
+sofact verify-ledger   # recompute the chain; exit 1 if it does not verify
+sofact rollback --to 12 --reason "the P3 split was wrong"   # a Cut, not a delete
+```
+
+A rollback appends a `Cut` row and deletes nothing. The fold reads the latest cut as a
+rule: fold through its `target_index`, skip every entry between the target and the cut
+row, then fold what follows normally. Cut rows are never hidden — the skip exists to undo
+work, and a cut is the record of a decision about how to read the log.
+
+## The verb surface
+
+All 51 commands, grouped by the phase they serve. `Appends` names the ledger row the verb
+writes; `Blocks` says whether a failure stops the run.
+
+### P0 — Elicit
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact` | The bare questionnaire: asks the open dimensions in enum order, one at a time. | `answer.recorded` | no |
+| `sofact dimensions` | Prints the eight dimensions, their questions and their rationales. | nothing | no |
+| `sofact draft` | Drafts clause stems; refuses while any dimension is open. | `draft.created` | yes |
+| `sofact elicit` | Revises a resolved answer. FR-068's recovery verb: after a return to P0 every dimension is resolved, so the questionnaire would change nothing. | `answer.recorded` | no |
+| `sofact attest` | Records that a person read a model-proposed answer (FR-173). | `elicitation.attested` | no |
+| `sofact speak` | Transcribes an audio file and opens a goal from it (FR-168). | `transcript.recorded`, `goal.created` | no |
+
+### P1 — Research
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact search` | Web search. Composes queries from the goal's own words, asks a declared provider, records every hit as a **lead**. | `search_scan.recorded` | no |
+| `sofact research` | Deep research, dispatched to a harness. | `research.run` | no |
+| `sofact sources` | The source ledger: what the design rests on, and how strongly. | nothing | no |
+| `sofact classify` | One verdict per clause from the research. | `research.classified` | yes |
+| `sofact competitors` | The competitive baseline, as a cited artefact. | `competitive_scan.recorded` | no |
+| `sofact exceed` | The exceedance declarations against the competitive baseline. | `exceeds.declared` | no |
+
+### P2 — Specify
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact specify` | Builds the specification: one requirement per clause, each carrying that clause's oracle. | `specification.proposed` | yes |
+| `sofact spec-doc` | Renders `SPECIFICATION.md` with every requirement annotated. | `product_spec.rendered` | no |
+| `sofact gate` | Presents the machine half and records the human half. | `specification.gated`, `phase.advanced` | yes |
+
+### P3 — Decompose
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact decompose` | Modules, interfaces and a dependency DAG. No model call. | `decomposition.proposed` | yes |
+| `sofact gate` | As above, for the `decomposition` gate. | `decomposition.gated`, `phase.advanced` | yes |
+
+### P4 — Contract
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact contract` | Assigns one oracle to every clause stem. Without `--command` it reports 100% ground-truth debt. | `contract.created` | yes |
+| `sofact audit` | Runs every oracle against an empty workspace; an oracle satisfied by nothing is a defect (FR-107). | `oracle.audited` | no |
+| `sofact plan` | Compiles ordered goal sessions with pinned hashes (FR-136, FR-139). | `plan.compiled` | yes |
+| `sofact gate` | As above, for the `contract_sample` gate. | `phase.advanced` | yes |
+
+### P5 — Build
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact probe` | Measures a harness. `dispatch` refuses until a profile exists. | `capability.probed` | no |
+| `sofact select` | Ranks configured harnesses on goal-declaration precision, then throughput (FR-147). | nothing | no |
+| `sofact dispatch` | Hands one plan step to a harness as an out-of-process session. | `step.dispatched` | yes |
+| `sofact repair` | A bounded repair attempt on a refuted clause. | `repair.attempted` | no |
+| `sofact attempts` | The repair attempts and their outcomes. | nothing | no |
+| `sofact composition` | The plugin set, and whether it is frozen (FR-154–156). Exits non-zero while any part is open. | nothing | no |
+
+### P6 — Verify
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact run` | Executes oracles out of process, recording `Evidence`. | `evidence.recorded` | yes |
+| `sofact verify` | Renders the verdict. Takes **no completion claim** by signature (FR-138). | `verdict.rendered` | yes |
+| `sofact claim` | Records a producer's completion claim. Changes no verdict. | `claim.declared` | no |
+| `sofact precision` | The measured oracle precision. | nothing | no |
+| `sofact review` | Records a diff review (FR-104). | `diff.reviewed` | no |
+
+### P7 — Integrate
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact integrate` | Build order, import discipline, interface and model conformance, system criteria. | `integration.checked` | yes |
+| `sofact integrity` | Re-verifies the pinned contract, oracle-set and goal-text hashes (FR-139). | `integrity.checked` | yes |
+| `sofact authorship` | Whether the producer's authorship claim holds. | `authorship.checked` | no |
+
+### P8 — Deliver
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact deliver` | Renders the delivery report, `RUNBOOK.md` and `DELIVERY.md`. | `delivery.rendered` | yes |
+| `sofact deploy` | Presents the `deploy` gate. Nothing deploys — §1.5 makes deploy permanently manual. | `deploy.recorded` | yes |
+| `sofact escape` | Records a revert, hot-fix or incident against a deployed change. | `escape.recorded` | no |
+| `sofact escapes` | The per-lane escape rate, folded from the log. | nothing | no |
+
+### Cross-cutting
+
+| Verb | What it does | Appends | Blocks |
+| --- | --- | --- | --- |
+| `sofact status` | The goal, the phase, the open gate, any cut in force, readiness per dimension, ledger health. | nothing | no |
+| `sofact phase` | Where the pipeline is. **Exits non-zero while a gate is open**, so a script can check it. | nothing | no |
+| `sofact build` | Drives the pipeline; stops at every gate and names the next verb (FR-172). | `driver.advanced` | yes |
+| `sofact api` | The read-only API operations. Refuses the four gate operations **by name**. | nothing | no |
+| `sofact ledger` | Prints the append-only event log. | nothing | no |
+| `sofact envelope` | The §1.3 envelope against what has been measured. | nothing | no |
+| `sofact spend` | Spend against the envelope; unreported tokens count as unmeasured, and the sum is a floor. | nothing | no |
+| `sofact goalmode` | Whether the harness really entered goal mode. | nothing | no |
+| `sofact tiers` | The model tier table and which phase sits in each tier. | nothing | no |
+| `sofact scope` | The declared file scope per lane. | nothing | no |
+| `sofact route` | The routing composition for a lane: admissible, ceiling, level. | nothing | no |
+| `sofact intent` | The intent graph, and the delivery chain projected from it (FR-127). | nothing | no |
+| `sofact notify` | The notification spec and whether a send was recorded. | `notification.sent` | no |
+
+## The two journeys
+
+### Driven: one verb, four approvals
+
+1. `sofact build --statement "…"` — or bare `sofact` for the questionnaire, then `sofact build --resume`.
+2. If the model proposed answers, `sofact attest --all --by you`. The run is **not** waiting
+   on a resume at this point; `build --resume` re-selects the same action and prints the
+   same sentence forever.
+3. `sofact build --resume` — carries the pipeline to the first gate and stops.
+4. `sofact gate --approve P2 --by you`.
+5. `sofact build --resume` → `sofact gate --approve P3 --by you`.
+6. `sofact build --resume` → `sofact gate --approve P4 --by you`.
+7. `sofact build --resume` → reaches P8 and presents the deploy gate.
+8. `sofact deploy --approve <report-id> --by you`.
+9. `sofact build --resume` — records `DELIVERED`.
+
+A run stopped at a gate reports `terminal: gate_open`. The other terminals are `delivered`,
+`returned_to_p0`, `refused`, `exhausted` and `failed`.
+
+### Manual: one verb per phase
+
+1. `sofact` (or `sofact speak interview.m4a`) — open the goal.
+2. `sofact draft` — clause stems.
+3. `sofact research` (and `sofact search`, `sofact competitors`) — P1.
+4. `sofact contract --command 'pytest -q'` — assign one oracle to every stem.
+5. `sofact specify` — the specification.
+6. `sofact gate --present P2` then `sofact gate --approve P2 --by you`.
+7. `sofact decompose` — modules and the DAG.
+8. `sofact gate --present P3` then `sofact gate --approve P3 --by you`.
+9. `sofact plan` — ordered goal sessions.
+10. `sofact audit` — oracles against an empty workspace.
+11. `sofact gate --present P4` then `sofact gate --approve P4 --by you`.
+12. `sofact probe` — measure the harness. `dispatch` refuses without this.
+13. `sofact dispatch --all` — waves, one session per step.
+14. `sofact repair` — bounded, on a refuted clause.
+15. `sofact run` then `sofact verify` — evidence, then the verdict.
+16. `sofact integrate` — P7's checks.
+17. `sofact deliver --root ./delivery` — the report.
+18. `sofact gate --present P8` then `sofact deploy --approve <report-id> --by you`.
+
+**A subtlety worth knowing.** `specify`, `decompose`, `plan` and `deliver` record their
+artefacts and gate results, but they do not themselves write `phase.advanced`; `build` and
+`gate --present`/`--approve` advance the phase machine. And `sofact deliver` does not
+present the P8 gate — the driver does.
+
+## Invariants you must not break
+
+1. **Never append to `ledger.jsonl` by hand.** Every fact goes through a verb. `entry_hash`
+   covers `prev_hash`, so a hand-written row breaks `sofact verify-ledger` and every entry
+   after it.
+2. **Never pass a gate as the agent.** `--by` names a person. There is no machine path: the
+   `api` surface refuses the four gate operations *by name* and tells you the human verb.
+3. **Never treat a completion claim as evidence.** `sofact verify` takes no claim by
+   signature (FR-138). `sofact claim` records a producer's declaration and changes no
+   verdict.
+4. **Never treat `INSUFFICIENT` as passing.** `VerdictOutcome` is `satisfied`, `violated`
+   or `insufficient`. An unrun oracle is not a passing one.
+5. **Never read a stored `confidence`.** `ClauseConfidence` is a plain property derived
+   from the clause's oracle (ADR-0078): `covered` = runs and rank ≤ 5, `weak` = runs but
+   rank 6–7, `stated` = no command.
+6. **Never assume an unmeasured harness scored badly.** `None` is not zero. `sofact select`
+   lists an unmeasured harness as *unmeasured*, and it cannot win.
+7. **Never treat a gate approval as waiving a failed machine check.** Present the gate,
+   read the checks. An approval is a judgement over a report, not a substitute for one.
+8. **Never expect a rollback to delete anything.** `sofact rollback` appends a `Cut`; the
+   log grows and the chain still verifies.
+
+Two further rules that follow from the same doctrine:
+
+- **Do not expect `sofact build --resume` to fix a run stopped by its own evidence.** If P1
+  classifies clauses `invalidated` or `deepened`, FR-068 returns the pipeline to P0, and
+  the recovery verb is `sofact elicit`, not a resume.
+- **Do not expect a `FAILED` run's `next_human_verb` to be specific.** It is the resume verb
+  for every failure; read the refusal above it.
+
+## Vocabulary
+
+| Enum | Members | Meaning |
+| --- | --- | --- |
+| `Phase` | P0–P9 | Elicit, research, specify, decompose, contract, build, verify, integrate, deliver, evolve. Closed and ordered. |
+| `PhaseStatus` | `pending`, `active`, `awaiting_gate`, `complete` | `awaiting_gate` is the hard stop. |
+| `PhaseGate` | `specification`, `decomposition`, `contract_sample`, `deploy` | One gate per gated phase. `PHASE_GATE` maps phase → gate. |
+| `OracleClass` | `property` 1, `state_machine` 2, `contract` 3, `metamorphic` 4, `schema` 5, `example` 6, `golden` 7 | Rank 1 is strongest. `COVERING_ORACLE_MAX_RANK = 5`; `STRONG_ORACLE_MAX_RANK = 2`. |
+| `ClauseConfidence` | `covered`, `weak`, `stated` | Derived from the oracle, never stored. |
+| `VerdictOutcome` | `satisfied`, `violated`, `insufficient` | `insufficient` is first-class, never passing. |
+| `DriverTerminal` | `gate_open`, `delivered`, `returned_to_p0`, `refused`, `exhausted`, `failed` | How a `build` run ended. |
+| `AutonomyLevel` | L0–L5 | L5 is representable and unreachable. `HIGHEST_GRANTABLE = L4`. |
+| `ElicitationDimension` | `outcome`, `consumer`, `boundary`, `oracle`, `scale`, `constraint`, `non_negotiables`, `failure` | The eight questions P0 asks, in that order. |
+| `ResearchVerdict` | `validated`, `invalidated`, `unverifiable`, `deepened` | Per clause. `invalidated` and `deepened` return the pipeline to P0. |
+
+The autonomy ceiling is a function of oracle rank: `ceiling_for_rank` returns L4 for rank
+≤ 2, L3 for rank ≤ 4, and L2 otherwise. A contract with any uncovered clause is clamped to
+`UNCOVERED_CLAUSE_CEILING = L2`.
+
+`covers` is a conjunction, not a rank test: `is_executable and rank <= 5`. A strong oracle
+with no command measures nothing; a weak oracle that runs measures the wrong thing.
+
+## Configuration
+
+29 `SOFACT_*` variables. Several default to *absent*, and absence is a state rather than a
+value — those are written "unset" with what the absence means.
+
+### State and model
+
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `SOFACT_HOME` | `./.sofact` | Where `ledger.jsonl` and `ledger.lock` live. |
+| `SOFACT_MODEL` | `deepseek-v4.1-flash:cloud` | The model name sent to the endpoint. |
+| `SOFACT_BASE_URL` | `http://localhost:11434/v1` | Any OpenAI-compatible endpoint. |
+| `SOFACT_API_KEY` | unset | Sent as a bearer token when set. |
+| `SOFACT_LLM_MAX_TOKENS` | `4096` | The completion cap. At 1024 two of P0's prompts spend the whole budget inside the reasoning channel and return empty content (ADR-0075). |
+| `SOFACT_LLM_TIMEOUT` | `120` | Request timeout in seconds. A transport error is reported by class name. |
+| `SOFACT_LLM_TEMPERATURE` | `0.3` | Sampling temperature. |
+| `SOFACT_MODEL_TIERS` | unset — the built-in table | Path to a JSON tier table. The tiers are `deep` and `cheap`; a table whose set differs is refused. |
+
+### Harness and plugins
+
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `SOFACT_HARNESS` | `pi` | Which configured harness runs when `--harness` is absent. |
+| `SOFACT_HARNESS_SPECS` | unset — the built-in table | Path to a harness table (`pi`, `dsh`, `claude`, `opencode`). An empty table is refused, not read as "no default harness". |
+| `SOFACT_TOOLS` | `read,write,edit,bash` | The tool allowlist handed to the producer. An empty value is refused: a producer that silently cannot write looks like one that failed. |
+| `SOFACT_COMPOSITION` | unset — not compared | The expected plugin set. Unset means no comparison is made, not that the set is empty. |
+
+### Search, research, transcription and notification
+
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `SOFACT_SEARCHER` | unset — no default searcher | Which declared searcher runs. |
+| `SOFACT_SEARCHER_SPECS` | unset — the built-in table | Path to a searcher table. No engine is bundled; a searcher is an argv template. |
+| `SOFACT_TRANSCRIBER` | unset — no default transcriber | Which declared transcriber `sofact speak` uses. |
+| `SOFACT_TRANSCRIBER_SPECS` | unset — the built-in table | Path to a transcriber table. |
+| `SOFACT_NOTIFIER` | unset — no default notifier | Which declared notifier sends the terminal-state message. |
+| `SOFACT_NOTIFIER_SPECS` | unset — the built-in table | Path to a notifier table. The row is written whether or not a process launched. |
+
+### Gates, envelope, autonomy and escape
+
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `SOFACT_ENVELOPE` | unset — no comparison | The §1.3 envelope to measure spend against. |
+| `SOFACT_SCOPE` | unset — no scope declared | The declared file scope per lane. |
+| `SOFACT_TOPOLOGY` | unset — no topology declared | The deployment topology, which bounds the blast radius. |
+| `SOFACT_BOUNDARY` | unset — no boundary declared | The isolation boundary. |
+| `SOFACT_BOUNDARY_IMAGE` | unset | The image prefix for a declared container boundary. |
+| `SOFACT_ESCAPE_BUDGET` | unset — no budget declared | The per-lane escape budget. A lane over it loses one autonomy level. |
+| `SOFACT_THETA_THRESHOLDS` | `0.80` high, `0.60` low | The θ thresholds used in readiness measurement. |
+| `SOFACT_CONCERNS_FLOORS` | unset — no floors | The §14 concerns floors. A concerns floor may only lower a ceiling. |
+
+### Oracle manufacture and change cost
+
+| Variable | Default | What it changes |
+| --- | --- | --- |
+| `SOFACT_MANUFACTURE` | unset — manufactures nothing | The language oracles are manufactured in. Not "Python" by default: a factory that silently adopted a language would run a Python check against a TypeScript module. |
+| `SOFACT_MANUFACTURE_SPECS` | unset — the built-in table | The language table (`python`, `typescript`, `rust`). A fourth language is a file, not a code change. |
+| `SOFACT_CHANGE_UNITS` | unset — no units declared | The pinned change units the change-cost instrument trends. A scope with fewer than two measured units reports *unmeasured*, not clean. |
+
+## Where to read more
+
+| Document | Open it when |
+| --- | --- |
+| [`docs/spec/product-spec.md`](docs/spec/product-spec.md) | You need the requirement itself, or the pipeline's normative statement. |
+| [`docs/adr/`](docs/adr/) | You need to know why a decision was made and what it cost. 78 records; each states its context, decision and consequences. |
+| [`docs/adr/README.md`](docs/adr/README.md) | You want the decisions in the order they were made. |
+| [`docs/phases.md`](docs/phases.md) | You need a phase's state in full. |
+| [`docs/research/roadmap-gap/README.md`](docs/research/roadmap-gap/README.md) | You need the spec against the implementation, requirement by requirement. |
+| [`docs/sources/README.md`](docs/sources/README.md) | You need to know what the design rests on and how strongly. |
+| [`docs/research/findings.md`](docs/research/findings.md) | You need what the research concluded and where it is weak. |
+
+The four doctrine ADRs, as the shortest path to the project's position:
+
+- [ADR-0003](docs/adr/0003-the-ledger-is-append-only-and-hash-chained.md) — the ledger is
+  append-only and hash-chained.
+- [ADR-0009](docs/adr/0009-no-oracle-no-autonomy.md) — no oracle, no autonomy.
+- [ADR-0050](docs/adr/0050-coverage-is-a-conjunction.md) — coverage is a conjunction.
+- [ADR-0054](docs/adr/0054-the-escape-rate-is-the-one-number-no-producer-authored.md) — the
+  escape rate is the one number no producer authored.

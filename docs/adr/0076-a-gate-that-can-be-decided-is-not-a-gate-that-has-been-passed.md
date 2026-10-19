@@ -4,11 +4,11 @@
 - **Date:** 2026-10-17
 - **Related:** FR-009, FR-010, FR-024–FR-035, FR-026, FR-027, FR-105, FR-108, FR-124,
   FR-157, NFR-018, NFR-024, §4.3, §5.1, §5.2, §5.4, §14;
-  [ADR-0045](0045-the-topology-ceiling-is-declared-and-the-blast-radius-is-not-measured.md),
-  [ADR-0046](0046-a-declared-budget-is-not-a-measured-blast-radius.md),
-  [ADR-0054](0054-the-escape-oracle-is-derived-from-the-weakest-rank.md),
+  [ADR-0045](0045-a-topology-is-a-type-and-a-refusal-is-not-a-downgrade.md),
+  [ADR-0046](0046-a-module-declares-its-budget-and-p7-measures-the-artefact.md),
+  [ADR-0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md),
   [ADR-0060](0060-the-boundary-is-measured-and-the-ceiling-follows-the-measurement.md),
-  [ADR-0061](0061-the-mutation-score-is-a-lower-bound-and-it-is-withheld.md),
+  [ADR-0061](0061-manufacturing-earns-the-hint-and-withholds-the-number.md),
   [ADR-0074](0074-a-modules-declared-class-outranks-its-phases-tier.md)
 
 ## Context

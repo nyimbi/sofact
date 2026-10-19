@@ -4,7 +4,7 @@
 - **Date:** 2026-10-13
 - **Related:** FR-110, FR-090, FR-103, FR-108, FR-112, FR-113, FR-114;
   [ADR-0026](0026-p7-checks-three-of-six-requirements-and-names-the-rest.md),
-  [ADR-0027](0027-a-module-declares-its-surface-and-p7-diffs-the-build-against-it.md),
+  [ADR-0027](0027-a-declared-surface-is-diffed-in-both-directions-and-a-claim-is-not-a-discharge.md),
   [ADR-0050](0050-coverage-is-a-conjunction-and-the-debt-and-the-cap-are-one-measure.md)
 
 ## Context

@@ -5,7 +5,7 @@
 - **Related:** FR-135, FR-144, FR-145, FR-153, NFR-024, §20.3 item 6a, §20.4, R25;
   [ADR-0019](0019-a-capability-is-measured-by-a-differential.md),
   [ADR-0043](0043-a-gate-cost-is-asked-for-because-nothing-observes-a-person-reading.md),
-  [ADR-0054](0054-the-escape-instrument-is-built-and-its-baseline-is-unmeasured.md),
+  [ADR-0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md),
   [ADR-0062](0062-the-change-cost-instrument-and-its-unmeasured-baseline.md),
   [ADR-0068](0068-a-diff-review-is-asked-for-and-the-diffs-nobody-read-are-part-of-the-number.md)
 

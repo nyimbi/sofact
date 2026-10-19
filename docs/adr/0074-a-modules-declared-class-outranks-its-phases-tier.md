@@ -4,8 +4,8 @@
 - **Date:** 2026-10-16
 - **Related:** FR-050, FR-097, FR-132, FR-133, NFR-026, §5.1, §10.1, §10.2;
   [ADR-0012](0012-the-harness-table-is-data-not-code.md),
-  [ADR-0045](0045-the-topology-ceiling-is-declared-and-the-blast-radius-is-not-measured.md),
-  [ADR-0046](0046-a-declared-budget-is-not-a-measured-blast-radius.md),
+  [ADR-0045](0045-a-topology-is-a-type-and-a-refusal-is-not-a-downgrade.md),
+  [ADR-0046](0046-a-module-declares-its-budget-and-p7-measures-the-artefact.md),
   [ADR-0072](0072-the-depth-assignment-is-sofacts-and-the-model-is-the-deployments.md)
 
 ## Context

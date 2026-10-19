@@ -5,8 +5,8 @@
 - **Related:** FR-160, NFR-024, §1.4, §20.2, §20.3 item 3, §21 R13;
   [ADR-0039](0039-the-envelope-refuses-a-ceiling-and-reports-a-floor.md),
   [ADR-0043](0043-a-gate-cost-is-asked-for-because-nothing-observes-a-person-reading.md),
-  [ADR-0054](0054-a-rate-needs-a-deployment-so-an-undeployed-project-reports-unmeasured.md),
-  [ADR-0062](0062-a-scope-with-fewer-than-two-measured-units-reports-unmeasured.md)
+  [ADR-0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md),
+  [ADR-0062](0062-the-change-cost-instrument-and-its-unmeasured-baseline.md)
 
 ## Context
 

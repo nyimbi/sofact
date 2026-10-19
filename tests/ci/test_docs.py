@@ -330,7 +330,7 @@ class TestTheAdrIndexIsTheSetOfRecords:
 
 		rows = _adr_index_rows(ADR_INDEX.read_text(encoding="utf-8"))
 		assert rows, "the ADR index has no rows in the documented shape"
-		listed = {name for _number, name in rows}
+		listed = {name for _, name in rows}
 
 		missing = sorted(on_disk - listed)
 		assert not missing, (
@@ -473,4 +473,109 @@ class TestTheElicitationTableIsBoundToTheEnum:
 		assert covered | no_row == set(ElicitationDimension), (
 			"a dimension is neither mapped to an FR-064 row nor named here as one the "
 			f"table does not list: {sorted(set(ElicitationDimension) - covered - no_row)}"
+		)
+
+
+_FENCE = re.compile(r"^```.*?^```", re.M | re.S)
+
+_LINK = re.compile(r"\]\(([^)\s]+)\)")
+"""A markdown inline link's target, without the title some links carry.
+
+Deliberately not a full markdown parser. The shapes that matter here are the two a
+relative link is written in — ``[text](path.md)`` and ``[text](path.md#anchor)`` — and a
+parser would accept both while also accepting the reference-style ``[text][ref]`` form,
+which is not used in this repository and whose target lives somewhere else in the file.
+"""
+
+
+_ARCHIVE = ROOT / "docs" / "sources" / "archive"
+"""Verbatim copies of other projects' documentation, kept for citation.
+
+Excluded deliberately, and not to make the check quiet. Every relative link in these
+files was written against *the upstream repository it came from* — ``docs/releases/
+v0.6.0.md`` is a path in OpenRig's tree, not in this one — so the only way to make them
+resolve here is to edit the copies, which would falsify the citation. A gate whose
+scope includes files it cannot legitimately check is a gate that cannot pass.
+"""
+
+
+def _relative_markdown_links(path: Path) -> list[tuple[int, str]]:
+	"""Every relative ``.md`` link a document makes, with the line it is on.
+
+	Fenced blocks are removed first. A link written inside a code sample is illustrating
+	a link rather than making one, and the three transcripts in ``README.md`` are full of
+	text that a naive pattern would read as markup.
+	"""
+	text = path.read_text(encoding="utf-8")
+	text = _FENCE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+	found: list[tuple[int, str]] = []
+	for number, line in enumerate(text.splitlines(), 1):
+		for target in _LINK.findall(line):
+			if target.startswith(("http://", "https://", "mailto:", "#", "tel:")):
+				continue
+			if not target.split("#", 1)[0].endswith(".md"):
+				continue
+			found.append((number, target))
+	return found
+
+
+def _resolves(document: Path, target: str) -> bool:
+	"""Whether a link target exists, from either base a document may write it against.
+
+	Both spellings are in use and both work on GitHub: a link inside ``docs/phases.md``
+	to ``docs/adr/0039-….md`` resolves from the repository root, while one inside
+	``docs/adr/0076-….md`` to ``0045-….md`` resolves from the file's own directory. A
+	checker that tried only one base reported eight correct links as dead — the same
+	defect as a link checker that matched ``href="/…"`` and let every relative link
+	through, with the sign flipped. The base is the document's directory first, because
+	that is what a relative link means, then the repository root.
+	"""
+	relative = target.split("#", 1)[0]
+	return (document.parent / relative).resolve().exists() or (ROOT / relative).exists()
+
+
+class TestEveryRelativeLinkResolves:
+	"""A cross-reference that points at a renamed file is a claim the reader cannot check.
+
+	This repository retitled twelve ADR files and left the references to their old names
+	in place, so ``docs/adr/0076`` linked to ``0045-the-topology-ceiling-is-declared-and-
+	the-blast-radius-is-not-measured.md`` for as long as the file had been called
+	``0045-a-topology-is-a-type-and-a-refusal-is-not-a-downgrade.md``. Nothing failed: a
+	dead relative link is not a syntax error, not a lint rule, and not a test failure.
+
+	The scope is ``.md`` targets only. The repository legitimately links to directories
+	and to non-markdown artefacts, and widening the check to every target would make it
+	fail on a shape that is correct — the "a gate that cannot pass is indistinguishable
+	from no gate" rule.
+	"""
+
+	def test_every_relative_markdown_link_resolves(self) -> None:
+		documents = [
+			document
+			for document in [README, *sorted((ROOT / "docs").rglob("*.md"))]
+			if _ARCHIVE not in document.parents
+		]
+		dead: list[str] = []
+		for document in documents:
+			for number, target in _relative_markdown_links(document):
+				if not _resolves(document, target):
+					dead.append(f"{document.relative_to(ROOT)}:{number} -> {target}")
+		assert not dead, "these links point at files that do not exist:\n  " + "\n  ".join(dead)
+
+	def test_the_check_finds_the_links_it_is_looking_for(self) -> None:
+		"""A gate that matches nothing reports clean forever.
+
+		Every assertion above passes vacuously if ``_LINK`` is wrong, so this pins the
+		pattern against a known-present link and a known-absent one: the ADR index is
+		linked from the README and the ADR-0009 record links to ADR-0003. Both are real
+		links in the tree, so a regression in the extractor fails here rather than
+		silently widening the pass.
+		"""
+		found = {target for _, target in _relative_markdown_links(README)}
+		assert any(t.startswith("docs/adr") for t in found), (
+			f"the README links into docs/adr and the extractor found only {sorted(found)}"
+		)
+		found = {target for _, target in _relative_markdown_links(ROOT / "docs/adr/README.md")}
+		assert any(t.startswith("0") and t.endswith(".md") for t in found), (
+			f"the ADR index links to records and the extractor found only {sorted(found)}"
 		)

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-14
 - **Related:** FR-102, FR-118, FR-138, FR-140, NFR-024; FR-101, FR-143;
-  [ADR-0043](0043-gate-cost-is-a-pair-and-an-unmeasured-cost-is-not-a-free-one.md),
+  [ADR-0043](0043-a-gate-cost-is-asked-for-because-nothing-observes-a-person-reading.md),
   [ADR-0053](0053-the-adversarial-audit-is-a-must-fail-canary-and-the-empty-tree-is-the-input.md),
   [ADR-0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md)
 

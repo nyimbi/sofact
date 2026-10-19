@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-15
 - **Related:** FR-068, FR-069, FR-070, FR-074, FR-169, FR-170, FR-171, NFR-024;
-  [ADR-0021](0021-research-is-dispatched-and-not-performed.md),
+  [ADR-0021](0021-research-is-dispatched-not-performed.md),
   [ADR-0070](0070-the-front-door-stops-at-every-gate-and-a-model-answer-is-not-an-answer.md)
 
 ## Context

@@ -4,7 +4,7 @@
 - **Date:** 2026-10-14
 - **Related:** FR-127, FR-117, FR-021–023, FR-076, FR-088, FR-089, FR-091, FR-131,
   FR-139, §2.3, §2.4, §9.6, §7;
-  [ADR-0044](0044-the-report-is-rendered-from-the-log-and-the-artefacts-are-written-once.md),
+  [ADR-0044](0044-the-factory-writes-the-two-artefacts-it-owes-and-the-delivery-is-a-fixed-point.md),
   [ADR-0054](0054-the-escape-rate-is-the-one-number-no-producer-authored.md),
   [ADR-0057](0057-the-autonomy-target-is-a-deployment-scoped-type.md)
 
