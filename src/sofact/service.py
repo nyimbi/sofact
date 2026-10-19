@@ -198,6 +198,7 @@ from sofact.views import (
 	Notification,
 	OracleAuditReport,
 	OracleDeclaration,
+	OracleStrengthMeasured,
 	Phase,
 	PhaseAdvance,
 	PhaseGate,
@@ -2433,6 +2434,44 @@ class FactoryService:
 		found = approved.module_for_clauses(clause_ids)
 		return found.budget.reasoning_class if found is not None else None
 
+	async def _require_lane_above_theta(self, plan: GoalPlan, module: str | None) -> None:
+		"""FR-105's refusal: a lane *measured* below θ_lo is not built at autonomy.
+
+		The spec's row is "must be reported as unbuildable-at-autonomy and escalated, not
+		built anyway", and this is the one seam every dispatch passes through, so the
+		refusal is applied here rather than at each caller.
+
+		Three absences dispatch unchanged, and each is a decision rather than an oversight:
+
+		- **No recorded measurement** — the project has not run the instrument. NFR-024's
+			rule read one level up: a lane nobody scored is not a lane that scored zero.
+		- **No module** — a bootstrap step or one spanning two modules belongs to no lane,
+			so there is no lane whose strength could be read. FR-105 refuses *a module*, and
+			a step with no module has none to refuse.
+		- **The module is not in the mapping** — the instrument declined to score it (too
+			few mutants, an oracle naming no command). That is
+			:attr:`OracleStrengthMeasured.strengths`' documented absence, not a low score.
+
+		The strength is compared against the thresholds *carried by the measurement*, not
+		the defaults in force now. A number measured under assumed thresholds and judged
+		under calibrated ones would be a verdict by a rule it never met.
+		"""
+		if module is None:
+			return
+		state = await self.state()
+		measured = state.latest_strength(plan.contract_id)
+		if measured is None or module not in measured.unbuildable_at_autonomy:
+			return
+		strength = measured.strengths[module]
+		raise RoutingRefusal(
+			f"module {module!r} measured oracle strength {strength:.3f}, below θ_lo = "
+			f"{measured.thresholds.lo:g} (measured {measured.measured_at.isoformat()} against "
+			f"contract {measured.contract_hash[:12]}). FR-105 reports this lane as "
+			"unbuildable-at-autonomy: strengthen the oracle and re-measure with "
+			"`sofact audit --strength`, or dispatch the step by hand once a person has read "
+			"the gap. An unmeasured lane is not refused; this one was measured and failed."
+		)
+
 	async def dispatch_step(
 		self,
 		plan_id: str,
@@ -2479,6 +2518,18 @@ class FactoryService:
 		# single module owns (bootstrap; one spanning two) gets neither a class nor a
 		# module, and falls back to its own ordinal and kind.
 		module = await self._module_for(plan, step.clause_ids)
+		# FR-105's interlock, and it sits here rather than in `dispatch_plan` because this
+		# is the one path *every* dispatch goes through: the driver's `build`, a scheduled
+		# wave, and a direct caller. A check in `dispatch_plan` would be a check on one of
+		# the three, and the driver is the surface an operator actually uses.
+		#
+		# It refuses only what was *measured* below θ_lo. A lane with no recorded number is
+		# not refused — it dispatches exactly as before — because NFR-024's rule is that an
+		# absence of evidence is not evidence of a defect, and refusing an unmeasured lane
+		# would make FR-105's escalation fire on every project that has not run the
+		# instrument. The number is recorded by `measure_oracle_strength`, which is what
+		# makes it readable here at all.
+		await self._require_lane_above_theta(plan, module)
 		reasoning_class = await self._module_class_for(plan, step.clause_ids)
 		# FR-132: the model is resolved from the *step's kind* — the phase this dispatch
 		# belongs to (FR-133's join) — and from the class the module declared (FR-050).
@@ -3961,6 +4012,66 @@ class FactoryService:
 		audit = await run_oracle_audit(contract, timeout=timeout, workspace=workspace)
 		self._commit(LedgerKind.ORACLE_AUDITED, {"audit": audit.model_dump(mode="json")})
 		return audit
+
+	async def measure_oracle_strength(
+		self,
+		contract_id: str,
+		*,
+		thresholds: ThetaThresholds = DEFAULT_THETA,
+	) -> OracleStrengthMeasured:
+		"""FR-105's number, measured and **recorded** so a later dispatch can read it.
+
+		The measurement itself is :meth:`_measured_strengths`, and it is called here rather
+		than reimplemented: a second copy of "which clause, which module, which oracle"
+		would be the second place for the scoping rule to drift. What this method adds is
+		the ledger row — without it the number exists only inside the render or report that
+		computed it, and FR-105's "unbuildable-at-autonomy" has nothing to be read from.
+
+		**Only lanes that produced a number are recorded.** A lane the instrument declined
+		— too few mutants, an oracle naming no command, ownership that is not exactly one
+		module — is absent rather than zero, because a zero would make the dispatch
+		interlock refuse a lane nobody scored. That is NFR-024 read one level up.
+
+		The contract is re-read from the log for :meth:`audit_oracles`' reason: the thing
+		measured is the oracle set the log holds, and a caller-supplied contract would let
+		the measurement grade its own input.
+		"""
+		state = await self.state()
+		contract = state.contract(contract_id)
+		if contract is None:
+			raise RoutingRefusal(
+				f"no contract {contract_id} in the log; FR-105 measures a contract's lanes"
+			)
+		try:
+			decomposition = await self.require_approved_decomposition(contract_id)
+		except ValueError as exc:
+			raise RoutingRefusal(str(exc)) from exc
+		plan = state.latest_plan(contract_id)
+		if plan is None:
+			raise RoutingRefusal(
+				"no plan in the log; FR-105 mutates the files a dispatch sealed, and a "
+				"project with no plan has none"
+			)
+		strengths = await self._measured_strengths(contract, decomposition, plan, state)
+		# The instrument scores clauses and FR-105 refuses modules, so the fold happens
+		# here, once, at the seam that writes the row — not inside the interlock, where a
+		# second copy of "which module owns this clause" could disagree with this one.
+		module_of: dict[str, str] = {}
+		for module in decomposition.modules:
+			for clause_id in module.clause_ids:
+				module_of[clause_id] = module.name
+		measured = OracleStrengthMeasured(
+			id=uuid7str(),
+			contract_id=contract.id,
+			contract_hash=contract.content_hash,
+			measured_at=now(),
+			strengths=OracleStrengthMeasured.from_clauses(strengths, module_of),
+			thresholds=thresholds,
+		)
+		self._commit(
+			LedgerKind.ORACLE_STRENGTH_MEASURED, {"strength": measured.model_dump(mode="json")}
+		)
+		return measured
 
 	# ------------------------------------- FR-012-015: the adversarial audit
 

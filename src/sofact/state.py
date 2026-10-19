@@ -49,6 +49,7 @@ from sofact.views import (
 	LedgerKind,
 	Notification,
 	OracleAuditReport,
+	OracleStrengthMeasured,
 	PhaseAdvance,
 	ProductSpecificationDocument,
 	ProjectState,
@@ -158,6 +159,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 	gate_costs: list[GateCost] = []
 	reviews: list[DiffReview] = []
 	oracle_audits: list[OracleAuditReport] = []
+	oracle_strengths: list[OracleStrengthMeasured] = []
 	adversarial_audits: list[AdversarialAuditReport] = []
 	authorship_checks: list[AuthorshipCheck] = []
 	escapes: list[EscapeEvent] = []
@@ -255,6 +257,11 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 				deploys.append(DeployRecord.model_validate(payload["deploy"]))
 			case LedgerKind.ORACLE_AUDITED:
 				oracle_audits.append(OracleAuditReport.model_validate(payload["audit"]))
+			case LedgerKind.ORACLE_STRENGTH_MEASURED:
+				# Appended, never keyed, and for ORACLE_AUDITED's reason: the number is about
+				# the tree and oracle set it was measured against, so re-keying it to a later
+				# contract would attach an old measurement to code nobody mutated.
+				oracle_strengths.append(OracleStrengthMeasured.model_validate(payload["strength"]))
 			case LedgerKind.ADVERSARIAL_AUDITED:
 				# Appended, never keyed, and for FR-015's reason: the rate is a *trend*, so
 				# every pass is a data point. Keying them to the latest would leave the
@@ -369,6 +376,7 @@ def fold(entries: Iterable[LedgerEntry]) -> ProjectState:
 		gate_costs=tuple(gate_costs),
 		reviews=tuple(reviews),
 		oracle_audits=tuple(oracle_audits),
+		oracle_strengths=tuple(oracle_strengths),
 		adversarial_audits=tuple(adversarial_audits),
 		authorship_checks=tuple(authorship_checks),
 		escapes=tuple(escapes),

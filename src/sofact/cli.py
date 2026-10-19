@@ -119,6 +119,7 @@ from sofact.views import (
 	ModuleClass,
 	Notification,
 	OracleAuditReport,
+	OracleStrengthMeasured,
 	Phase,
 	PhaseStatus,
 	PluginComposition,
@@ -2452,6 +2453,16 @@ def audit(
 			"command runs and ask whether the verdict moved."
 		),
 	),
+	strength: bool = typer.Option(
+		False,
+		"--strength",
+		help=(
+			"Measure each lane's oracle strength by mutation and RECORD it (FR-105), so a "
+			"dispatch of a lane below θ_lo refuses with a named reason instead of building "
+			"it. Costs one process launch per mutant; a lane the instrument declines is "
+			"recorded as absent, not as zero."
+		),
+	),
 	ordinal: int = typer.Option(
 		1,
 		"--ordinal",
@@ -2466,12 +2477,86 @@ def audit(
 		help="Seconds to allow one oracle before its result is INSUFFICIENT.",
 	),
 ) -> None:
-	"""Audit the contract's oracles (FR-107), or attack them (FR-012-015)."""
+	"""Audit the contract's oracles (FR-107), attack them (FR-012-015), or measure their strength (FR-105)."""
 	svc = _service(_home_of(ctx, home))
 	if adversarial:
 		asyncio.run(_adversarial(svc, ordinal=ordinal, timeout=timeout))
 		return
+	if strength:
+		asyncio.run(_strength(svc))
+		return
 	asyncio.run(_audit(svc, timeout))
+
+
+async def _strength(svc: FactoryService) -> None:
+	"""FR-105's measurement, written to the log so the dispatch interlock can read it.
+
+	The same preamble :func:`_audit` uses, and for a sharper reason: the interlock compares
+	a lane against the number *this* run records, so measuring a contract the operator
+	happens to have on disk and dispatching against the one the log holds would leave the
+	dispatch reading an older row.
+	"""
+	goal = await svc.current_goal()
+	if goal is None:
+		typer.secho("no goal yet.", fg="yellow")
+		raise typer.Exit(code=1)
+	built = await svc.latest_contract(goal.id)
+	if built is None:
+		typer.secho("no contract yet. Run `sofact contract` first.", fg="yellow")
+		raise typer.Exit(code=1)
+	try:
+		measured = await svc.measure_oracle_strength(built.id)
+	except RoutingRefusal as exc:
+		typer.secho(f"cannot measure: {exc}", fg="red")
+		raise typer.Exit(code=1) from exc
+	_print_strength(measured)
+
+
+def _print_strength(measured: OracleStrengthMeasured) -> None:
+	"""The number, the lanes it refuses, and the fact that an absent lane is not a zero.
+
+	The exit code is ``unbuildable_at_autonomy``: a measurement that found a lane FR-105
+	refuses has done its job, and reporting it as a successful run would leave the operator
+	reading a green line over a lane that will refuse at P5. The lanes *not* in the mapping
+	are printed explicitly, because the whole difference between "scored zero" and "not
+	scored" is invisible in a table of the ones that were.
+	"""
+	typer.secho("\nFR-105 oracle strength", fg="cyan", bold=True)
+	typer.secho(
+		f"  contract {measured.contract_id} @ {measured.contract_hash[:12]}", fg="bright_black"
+	)
+	typer.secho(
+		f"  θ_lo = {measured.thresholds.lo:g}, θ_hi = {measured.thresholds.hi:g}"
+		+ (
+			f" (calibrated by {measured.thresholds.calibrated_by})"
+			if measured.thresholds.calibrated_by
+			else " (assumed, FR-010)"
+		),
+		fg="bright_black",
+	)
+	if not measured.strengths:
+		typer.secho(
+			"  no lane produced a number: the instrument declines a clause whose oracle names "
+			"no command, whose rank is above the covering set, or whose ownership is not "
+			"exactly one module. That is unmeasured, not zero (NFR-024).",
+			fg="yellow",
+		)
+		return
+	refused = set(measured.unbuildable_at_autonomy)
+	for name, value in sorted(measured.strengths.items()):
+		mark = "[FAIL]" if name in refused else "[ ok ]"
+		colour = "red" if name in refused else "green"
+		typer.secho(f"  {mark} {name}: {value:.3f}", fg=colour)
+	if refused:
+		typer.secho(
+			f"\n  {len(refused)} lane(s) below θ_lo = {measured.thresholds.lo:g}: FR-105 reports "
+			"them unbuildable-at-autonomy. A dispatch of a step in one refuses with the "
+			"measured number; strengthen the oracle and re-measure, or have a person read the "
+			"gap and dispatch by hand.",
+			fg="red",
+		)
+		raise typer.Exit(code=1)
+	typer.secho("\n  every measured lane is at or above θ_lo.", fg="green")
 
 
 async def _adversarial(svc: FactoryService, *, ordinal: int, timeout: float) -> None:

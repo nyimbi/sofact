@@ -112,7 +112,7 @@ writes; `Blocks` says whether a failure stops the run.
 | Verb | What it does | Appends | Blocks |
 | --- | --- | --- | --- |
 | `sofact contract` | Assigns one oracle to every clause stem. Without `--command` it reports 100% ground-truth debt. | `contract.created` | yes |
-| `sofact audit` | Runs every oracle against an empty workspace; an oracle satisfied by nothing is a defect (FR-107). | `oracle.audited` | no |
+| `sofact audit` | Runs every oracle against an empty workspace; an oracle satisfied by nothing is a defect (FR-107). `--adversarial` attacks one oracle's verdict; `--strength` measures each lane's oracle strength by mutation and records it, so a later dispatch of a lane below θ_lo refuses (FR-105). | `oracle.audited`, `adversarial.audited`, `oracle.strength_measured` | no |
 | `sofact plan` | Compiles ordered goal sessions with pinned hashes (FR-136, FR-139). | `plan.compiled` | yes |
 | `sofact gate` | As above, for the `contract_sample` gate. | `phase.advanced` | yes |
 
@@ -203,7 +203,9 @@ A run stopped at a gate reports `terminal: gate_open`. The other terminals are `
 7. `sofact decompose` — modules and the DAG.
 8. `sofact gate --present P3` then `sofact gate --approve P3 --by you`.
 9. `sofact plan` — ordered goal sessions.
-10. `sofact audit` — oracles against an empty workspace.
+10. `sofact audit` — oracles against an empty workspace. Add `--strength` after a first
+    dispatch to record each lane's measured strength, which is what lets FR-105 refuse a
+    later dispatch of a lane below θ_lo.
 11. `sofact gate --present P4` then `sofact gate --approve P4 --by you`.
 12. `sofact probe` — measure the harness. `dispatch` refuses without this.
 13. `sofact dispatch --all` — waves, one session per step.

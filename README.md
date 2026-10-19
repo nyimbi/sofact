@@ -430,7 +430,7 @@ producer wrote — the escape rate.
 
 Every fact is an append-only, hash-chained event. `ledger.jsonl` lives in `./.sofact` or
 `$SOFACT_HOME`, one `LedgerEntry` per line with fields `index, at, kind, payload,
-prev_hash, entry_hash`. There are 41 `LedgerKind` members, from `goal.created` to
+prev_hash, entry_hash`. There are 42 `LedgerKind` members, from `goal.created` to
 `search_scan.recorded`.
 
 `entry_hash` covers `prev_hash`, so altering any entry invalidates every entry after it —
@@ -469,18 +469,18 @@ An unknown kind cannot reach the fold: `LedgerEntry.kind` is typed `LedgerKind`,
 from a newer build fails validation in `Ledger.entries()` and surfaces as
 `LedgerCorruptError` rather than being skipped.
 
-The 41 kinds do not all fold the same way, and the difference is deliberate rather than
+The 42 kinds do not all fold the same way, and the difference is deliberate rather than
 incidental:
 
 ```mermaid
-%% fold(entries) -> ProjectState: the 41 LedgerKinds grouped by fold behaviour
+%% fold(entries) -> ProjectState: the 42 LedgerKinds grouped by fold behaviour
 flowchart TD
     E["entries, oldest first"] --> H{"hidden by the latest cut?"}
     H -->|"yes"| X["skipped"]
     H -->|"no"| K{"which LedgerKind"}
     K -->|"append"| A1["goal.created, answer.recorded, verdict.rendered"]
     K -->|"append"| A2["escape.recorded, deploy.recorded, notification.sent"]
-    K -->|"append"| A3["the remaining majority of the 41"]
+    K -->|"append"| A3["the remaining majority of the 42"]
     K -->|"keyed"| W1["step.dispatched"]
     K -->|"keyed"| W2["repair.attempted"]
     K -->|"versioned"| V1["delivery.rendered, source_ledger.recorded"]
@@ -501,7 +501,7 @@ flowchart TD
 
 | Fold behaviour | Kinds | Why |
 | --- | --- | --- |
-| **append** | the majority of the 41 | Every row is a fact; the fold accumulates them. |
+| **append** | the majority of the 42 | Every row is a fact; the fold accumulates them. |
 | **keyed, last write wins** | `step.dispatched`, `repair.attempted` | A row is written when work starts and settled when it ends. The log keeps both; the fold reports the settled value, and position stays the first appearance. |
 | **versioned, latest operative** | `delivery.rendered`, `source_ledger.recorded`, `research.classified`, `competitive_scan.recorded`, `product_spec.rendered` | Re-rendering supersedes without erasing, so a deploy gate approved against a report stays readable after the report is re-rendered. |
 | **collected, pre-applied** | `cut.recorded` | Read before the loop, because the latest cut decides what the loop skips. |
@@ -1075,7 +1075,7 @@ never run, and the weakest oracle rank caps the ceiling (FR-109).
 | Verb | What it does |
 | --- | --- |
 | `contract --command <cmd>` | Builds the contract: one oracle per stem, `content_hash` over the clause set, `oracle_set_hash` over the oracles alone. |
-| `audit` | Runs every probeable oracle against an empty workspace and reports the ones that passed anyway (FR-107). |
+| `audit` | Runs every probeable oracle against an empty workspace and reports the ones that passed anyway (FR-107). `--strength` measures each lane by mutation and records the number, which a later `dispatch` reads to refuse a lane below θ_lo (FR-105). |
 | `gate --present P4` / `gate --approve P4 --by you` | Presents the single sampled check and records the approval. |
 
 ```mermaid
@@ -1768,7 +1768,7 @@ The prohibition is enforced, not documented.
 ## Develop
 
 ```sh
-uv run pytest -vxs tests/ci          # 2133 tests
+uv run pytest -vxs tests/ci          # 2143 tests
 uv run pyright
 uv run ruff format --check .
 npx --yes markdownlint-cli2 "docs/**/*.md" "README.md"

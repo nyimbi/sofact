@@ -4052,6 +4052,83 @@ class OracleAuditReport(View):
 		return max(ranks) if ranks else None
 
 
+class OracleStrengthMeasured(View):
+	"""One mutation run per lane, recorded so a later dispatch can read the number (FR-105).
+
+	FR-105 asks for a **measured** strength "for every module before P5 begins", and a
+	module below θ_lo "must be reported as unbuildable-at-autonomy and escalated, not built
+	anyway". The measurement existed — :func:`sofact.mutation.measure_strength` — and was
+	computed only inside a render or a routing report, so nothing that *acts* could read it.
+	This is the row that makes the number durable.
+
+	**Keyed by contract, appended never replaced**, for :class:`OracleAuditReport`'s
+	reason: a measurement is about the exact tree and oracle set it ran against, and
+	re-keying it to a later contract would attach an old number to code nobody mutated. A
+	second run is a second measurement, and :meth:`~sofact.views.ProjectState.latest_strength`
+	reads the operative one.
+
+	**A lane with no number is absent from the mapping, not present as zero.** NFR-024's
+	rule, one level up from the rate: a module whose mutant set was too small, or whose
+	oracle names no command, has not scored badly — it has not scored. Recording it as
+	``0.0`` would make the dispatch interlock refuse a lane nobody measured, which is
+	FR-105's escalation firing on the absence of evidence.
+
+	``thresholds`` is carried because the *comparison* is a claim about a calibration: a
+	number recorded under assumed thresholds and read under calibrated ones would be a
+	pass judged by a rule it never met. The field is the pair in force at the measurement.
+	"""
+
+	id: UUID7
+	contract_id: UUID7
+	contract_hash: str
+	measured_at: datetime
+	strengths: dict[str, float] = {}
+	"""Module name → the **weakest** measured clause strength in that lane.
+
+	The instrument scores a *clause*, and FR-105 refuses a *module*, so something has to
+	join them. It is the minimum rather than a mean, because a module is only as verifiable
+	as its least-verifiable promise: averaging lets one well-tested clause carry a lane
+	whose other clause nothing checks, which is the composition FR-105 exists to refuse.
+	"""
+
+	thresholds: ThetaThresholds
+
+	@staticmethod
+	def from_clauses(
+		clause_strengths: dict[str, float], module_of: dict[str, str]
+	) -> dict[str, float]:
+		"""Fold clause measurements into one number per lane, taking the **minimum**.
+
+		``module_of`` is clause id → owning module, supplied by the caller because the
+		ownership rule (exactly one module claims the clause) belongs to the decomposition
+		and not to this row. A clause absent from ``module_of`` was already declined by the
+		instrument and contributes nothing; a lane with no clause left is absent from the
+		result rather than present as zero, for the class docstring's reason.
+		"""
+		folded: dict[str, float] = {}
+		for clause_id, strength in clause_strengths.items():
+			module = module_of.get(clause_id)
+			if module is None:
+				continue
+			folded[module] = min(strength, folded.get(module, strength))
+		return folded
+
+	@property
+	def unbuildable_at_autonomy(self) -> tuple[str, ...]:
+		"""The lanes FR-105 refuses: a measured strength strictly below θ_lo.
+
+		Strictly below, because the spec's own row reads "below θ_lo" and a strength of
+		exactly θ_lo is *at* the threshold that admits L3. Counting the tie as a violation
+		would refuse the boundary case the table admits, and ties are the common case for a
+		small suite.
+		"""
+		return tuple(
+			name
+			for name, strength in sorted(self.strengths.items())
+			if strength < self.thresholds.lo
+		)
+
+
 # --------------------------------------------------------------------------- #
 # FR-012-015 — the adversarial audit: hacker, fixer, sampling, exploit rate
 # --------------------------------------------------------------------------- #
@@ -10066,6 +10143,7 @@ class LedgerKind(StrEnum):
 	GATE_COST_RECORDED = "gate_cost.recorded"
 	DIFF_REVIEWED = "diff.reviewed"
 	ORACLE_AUDITED = "oracle.audited"
+	ORACLE_STRENGTH_MEASURED = "oracle.strength_measured"
 	ADVERSARIAL_AUDITED = "adversarial.audited"
 	AUTHORSHIP_CHECKED = "authorship.checked"
 	ESCAPE_RECORDED = "escape.recorded"
@@ -10344,6 +10422,7 @@ class ProjectState(View):
 	"""
 
 	oracle_audits: tuple[OracleAuditReport, ...] = ()
+	oracle_strengths: tuple[OracleStrengthMeasured, ...] = ()
 	"""Every adversarial oracle audit the log records, oldest first (FR-107).
 
 	Appended, never keyed, and for :attr:`gate_costs`'s reason: an audit is a measurement
@@ -10531,6 +10610,16 @@ class ProjectState(View):
 		other's oracles.
 		"""
 		matching = [a for a in self.oracle_audits if a.contract_id == contract_id]
+		return matching[-1] if matching else None
+
+	def latest_strength(self, contract_id: str) -> OracleStrengthMeasured | None:
+		"""The most recent strength measurement for one contract, if any ran (FR-105).
+
+		Keyed by contract for :meth:`latest_oracle_audit`'s reason, and *appended* rather
+		than replaced for it too: a second run is a second measurement of a tree that
+		moved, and the later one is the one a dispatch should read.
+		"""
+		matching = [m for m in self.oracle_strengths if m.contract_id == contract_id]
 		return matching[-1] if matching else None
 
 	def latest_adversarial_audit(self, contract_id: str) -> AdversarialAuditReport | None:
